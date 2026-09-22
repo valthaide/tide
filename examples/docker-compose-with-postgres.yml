@@ -5,7 +5,7 @@ services:
     image: anurag1201/conops:latest
     container_name: conops
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       DB_TYPE: postgres
       DB_CONNECTION_STRING: postgres://conops:password@postgres:5432/conops?sslmode=disable

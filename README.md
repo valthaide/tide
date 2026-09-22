@@ -40,7 +40,7 @@ Run ConOps with a single command:
 ```bash
 docker run \
   --name conops \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   -e CONOPS_RUNTIME_DIR=/tmp/conops-runtime \
   -v /tmp/conops-runtime:/tmp/conops-runtime \
   -v conops_data:/data \
@@ -51,6 +51,11 @@ docker run \
 Open **http://localhost:8080** and click **New App**.
 
 > **Note:** For production use, we recommended using [Docker Compose](#production-setup).
+
+> **Security:** The port is bound to `127.0.0.1` because ConOps has no built-in
+> authentication and mounts the Docker socket. Reach it remotely over an SSH
+> tunnel (`ssh -L 8080:127.0.0.1:8080 host`) or a private network, rather than
+> publishing it.
 
 ## Features
 
@@ -188,7 +193,7 @@ services:
   conops:
     image: anurag1201/conops:latest
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       - CONOPS_RUNTIME_DIR=/tmp/conops-runtime
       - DB_TYPE=sqlite

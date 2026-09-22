@@ -65,7 +65,7 @@ This configuration:
    ```bash
    docker run -d \
      --name conops \
-     -p 8080:8080 \
+     -p 127.0.0.1:8080:8080 \
      -v /var/run/docker.sock:/var/run/docker.sock \
      -v conops_data:/data \
      anurag1201/conops:latest
