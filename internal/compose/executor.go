@@ -389,59 +389,78 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		appendLogLine(&repoLog, "repository cache missing; cloning fresh copy")
-		cloneArgs := []string{"clone", "--branch", branch}
-		if commitHash == "" {
-			cloneArgs = append(cloneArgs, "--depth", "1")
-		}
-		cloneArgs = append(cloneArgs, repoURL, repoDir)
-		_, err := e.runCommandWithTranscript(ctx, &repoLog, "git", cloneArgs, appDir, gitEnv, nil)
-		if err != nil {
-			return strings.TrimSpace(repoLog.String()), err
-		}
-		if commitHash != "" {
-			_, err := e.runCommandWithTranscript(ctx, &repoLog, "git", []string{"checkout", commitHash}, repoDir, gitEnv, nil)
-			if err != nil {
-				return strings.TrimSpace(repoLog.String()), err
-			}
-		}
-		return strings.TrimSpace(repoLog.String()), nil
+		err := e.cloneRepo(ctx, &repoLog, appDir, repoDir, repoURL, branch, commitHash, gitEnv)
+		return strings.TrimSpace(repoLog.String()), err
 	}
 
 	appendLogLine(&repoLog, "repository cache found; fetching latest refs")
-	_, err = e.runCommandWithTranscript(ctx, &repoLog, "git", []string{"fetch", "origin"}, repoDir, gitEnv, nil)
-	if err != nil {
-		return strings.TrimSpace(repoLog.String()), err
-	}
-
-	if commitHash != "" {
-		_, err := e.runCommandWithTranscript(ctx, &repoLog, "git", []string{"fetch", "origin", commitHash}, repoDir, gitEnv, nil)
-		if err != nil {
-			return strings.TrimSpace(repoLog.String()), err
+	if err := e.updateRepo(ctx, &repoLog, repoDir, branch, commitHash, gitEnv); err != nil {
+		// The cache exists but is unusable: a partially deleted checkout, an
+		// interrupted clone from a previous timeout, or a corrupt object store.
+		// Discarding and re-cloning recovers from all of them, where returning
+		// here leaves the app stuck in error until someone syncs it by hand.
+		appendLogLine(&repoLog, "repository cache unusable; discarding and re-cloning")
+		appendLogLine(&repoLog, err.Error())
+		if rmErr := os.RemoveAll(repoDir); rmErr != nil {
+			appendLogLine(&repoLog, "failed to discard repository cache")
+			return strings.TrimSpace(repoLog.String()), fmt.Errorf("discard repo cache %s: %w", repoDir, rmErr)
 		}
-		_, err = e.runCommandWithTranscript(ctx, &repoLog, "git", []string{"checkout", commitHash}, repoDir, gitEnv, nil)
-		if err != nil {
-			return strings.TrimSpace(repoLog.String()), err
-		}
-		_, err = e.runCommandWithTranscript(ctx, &repoLog, "git", []string{"reset", "--hard", commitHash}, repoDir, gitEnv, nil)
-		if err != nil {
-			return strings.TrimSpace(repoLog.String()), err
-		}
-	} else {
-		_, err := e.runCommandWithTranscript(ctx, &repoLog, "git", []string{"checkout", branch}, repoDir, gitEnv, nil)
-		if err != nil {
-			return strings.TrimSpace(repoLog.String()), err
-		}
-		_, err = e.runCommandWithTranscript(ctx, &repoLog, "git", []string{"reset", "--hard", "origin/" + branch}, repoDir, gitEnv, nil)
-		if err != nil {
-			return strings.TrimSpace(repoLog.String()), err
-		}
-	}
-	_, err = e.runCommandWithTranscript(ctx, &repoLog, "git", []string{"clean", "-fd"}, repoDir, gitEnv, nil)
-	if err != nil {
-		return strings.TrimSpace(repoLog.String()), err
+		cloneErr := e.cloneRepo(ctx, &repoLog, appDir, repoDir, repoURL, branch, commitHash, gitEnv)
+		return strings.TrimSpace(repoLog.String()), cloneErr
 	}
 
 	return strings.TrimSpace(repoLog.String()), nil
+}
+
+// cloneRepo clones into repoDir, which must not already exist.
+func (e *ComposeExecutor) cloneRepo(ctx context.Context, repoLog *strings.Builder, appDir, repoDir, repoURL, branch, commitHash string, gitEnv map[string]string) error {
+	cloneArgs := []string{"clone", "--branch", branch}
+	if commitHash == "" {
+		cloneArgs = append(cloneArgs, "--depth", "1")
+	}
+	cloneArgs = append(cloneArgs, repoURL, repoDir)
+	if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", cloneArgs, appDir, gitEnv, nil); err != nil {
+		return err
+	}
+	if commitHash != "" {
+		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"checkout", commitHash}, repoDir, gitEnv, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// updateRepo brings an existing checkout up to date. Any error here is treated
+// by the caller as "this cache is not salvageable" rather than a hard failure.
+func (e *ComposeExecutor) updateRepo(ctx context.Context, repoLog *strings.Builder, repoDir, branch, commitHash string, gitEnv map[string]string) error {
+	if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"fetch", "origin"}, repoDir, gitEnv, nil); err != nil {
+		return err
+	}
+
+	if commitHash != "" {
+		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"fetch", "origin", commitHash}, repoDir, gitEnv, nil); err != nil {
+			return err
+		}
+		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"checkout", commitHash}, repoDir, gitEnv, nil); err != nil {
+			return err
+		}
+		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"reset", "--hard", commitHash}, repoDir, gitEnv, nil); err != nil {
+			return err
+		}
+	} else {
+		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"checkout", branch}, repoDir, gitEnv, nil); err != nil {
+			return err
+		}
+		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"reset", "--hard", "origin/" + branch}, repoDir, gitEnv, nil); err != nil {
+			return err
+		}
+	}
+
+	if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"clean", "-fd"}, repoDir, gitEnv, nil); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // prepareEnvOverrides creates a compose override file with environment variables.
