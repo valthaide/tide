@@ -21,10 +21,12 @@ curl -X POST http://localhost:8080/api/v1/apps/ \
 Generate a deploy key:
 ```bash
 ssh-keygen -t ed25519 -C "conops-deploy-key" -f ~/.ssh/conops_deploy_key
-# Add the public key to your GitHub repo: Settings > Deploy keys
+# Add the public key as a deploy key in GitHub/GitLab (or self-hosted GitLab):
+#   GitHub: Settings → Deploy keys
+#   GitLab: Settings → Repository → Deploy keys
 ```
 
-Then use the private key in your app configuration.
+Then use the private key in your app configuration. SSH URLs work for GitHub, GitLab.com, and self-hosted hosts (for example `git@git.example.com:group/repo.git`).
 
 ## Deployment Examples
 

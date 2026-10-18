@@ -43,7 +43,7 @@
 
         <div class="form-control">
             <label for="repo_url">Git repository URL</label>
-            <input class="input input-bordered w-full" type="text" id="repo_url" name="repo_url" value="{{.Form.RepoURL}}" required placeholder="git@github.com:org/repo.git">
+            <input class="input input-bordered w-full" type="text" id="repo_url" name="repo_url" value="{{.Form.RepoURL}}" required placeholder="git@git.example.com:group/repo.git">
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -51,7 +51,7 @@
             <label for="repo_auth_method">Repository access</label>
             <select class="select select-bordered w-full" id="repo_auth_method" name="repo_auth_method">
                 <option value="public" {{if eq .Form.RepoAuth "public"}}selected{{end}}>Public repository</option>
-                <option value="deploy_key" {{if eq .Form.RepoAuth "deploy_key"}}selected{{end}}>Private GitHub (deploy key)</option>
+                <option value="deploy_key" {{if eq .Form.RepoAuth "deploy_key"}}selected{{end}}>Private repository (SSH deploy key)</option>
             </select>
         </div>
 
@@ -100,7 +100,7 @@
         <div class="form-control">
             <label for="deploy_key">Deploy private key</label>
             <textarea class="textarea textarea-bordered min-h-40 w-full" id="deploy_key" name="deploy_key" rows="8" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----">{{.Form.DeployKey}}</textarea>
-            <div class="label"><span class="label-text-alt text-base-content/70">Only required when using private GitHub deploy keys.</span></div>
+            <div class="label"><span class="label-text-alt text-base-content/70">Required for private repos. Works with GitHub, GitLab, and self-hosted Git over SSH.</span></div>
         </div>
 
         <div class="flex items-center justify-end gap-2">
@@ -209,7 +209,7 @@
             <label for="repo_auth_method">Repository access</label>
             <select class="select select-bordered w-full bg-base-200" id="repo_auth_method" name="repo_auth_method" disabled>
                 <option value="public" {{if eq .Form.RepoAuth "public"}}selected{{end}}>Public repository</option>
-                <option value="deploy_key" {{if eq .Form.RepoAuth "deploy_key"}}selected{{end}}>Private GitHub (deploy key)</option>
+                <option value="deploy_key" {{if eq .Form.RepoAuth "deploy_key"}}selected{{end}}>Private repository (SSH deploy key)</option>
             </select>
             <div class="label"><span class="label-text-alt text-base-content/70">Repository access method cannot be changed.</span></div>
         </div>

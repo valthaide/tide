@@ -378,7 +378,7 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 	var repoLog strings.Builder
 	appendLogSection(&repoLog, "Repository sync")
 
-	gitEnv, cleanup, err := e.buildGitEnv(appDir, deployKey)
+	gitEnv, cleanup, err := e.buildGitEnv(appDir, repoURL, deployKey)
 	if err != nil {
 		appendLogLine(&repoLog, "failed to configure git auth environment")
 		appendLogLine(&repoLog, err.Error())
@@ -539,12 +539,12 @@ func (e *ComposeExecutor) prepareEnvOverrides(appDir string, serviceEnvs map[str
 	return []string{"-f", overrideAbs}, cleanup, nil
 }
 
-func (e *ComposeExecutor) buildGitEnv(appDir string, deployKey []byte) (map[string]string, func(), error) {
+func (e *ComposeExecutor) buildGitEnv(appDir, repoURL string, deployKey []byte) (map[string]string, func(), error) {
 	if len(deployKey) == 0 {
 		return nil, func() {}, nil
 	}
 
-	knownHostsPath, err := repoauth.ResolveKnownHostsPath()
+	knownHostsPath, err := repoauth.ResolveKnownHostsForRepo(repoURL)
 	if err != nil {
 		return nil, nil, err
 	}

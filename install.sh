@@ -3,7 +3,7 @@
 
 set -e
 
-REPO="anuragxxd/conops"
+REPO="valthaide/conops-private"
 
 # Function to get the latest tag from redirect
 get_latest_release() {

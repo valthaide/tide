@@ -230,7 +230,7 @@ func (w *GitWatcher) authForApp(app *App) (transport.AuthMethod, error) {
 	}
 	defer zeroBytes(deployKey)
 
-	knownHostsPath, err := repoauth.ResolveKnownHostsPath()
+	knownHostsPath, err := repoauth.ResolveKnownHostsForRepo(app.RepoURL)
 	if err != nil {
 		return nil, err
 	}

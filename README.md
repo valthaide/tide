@@ -94,10 +94,10 @@ The `conops-ctl` CLI helps you manage applications from your terminal.
 
 ```bash
 # Install the latest version to /usr/local/bin
-curl -sfL https://raw.githubusercontent.com/anuragxxd/conops/master/install.sh | sudo sh
+curl -sfL https://raw.githubusercontent.com/valthaide/conops-private/master/install.sh | sh
 ```
 
-Or download pre-built binaries from the [Releases](https://github.com/anuragxxd/conops/releases) page.
+Or download pre-built binaries from the [Releases](https://github.com/valthaide/conops-private/releases) page (private repo access required).
 
 **Configuration:**
 Set the controller URL if running remotely (defaults to `http://localhost:8080`):
@@ -211,22 +211,30 @@ volumes:
 
 ## Private Repositories
 
-ConOps supports private GitHub/GitLab repositories via SSH deploy keys.
+ConOps supports private repositories on GitHub, GitLab.com, and self-hosted Git (including GitLab) via SSH deploy keys.
 
-When registering an app via the API, set `repo_auth_method` to `deploy_key` and provide the private key:
+Use an SSH repo URL (`git@host:group/repo.git` or `ssh://git@host:port/group/repo.git`) and set `repo_auth_method` to `deploy_key`:
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/apps/ \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Private App",
-    "repo_url": "git@github.com:my-org/private-repo.git",
+    "repo_url": "git@git.example.com:my-group/private-repo.git",
     "repo_auth_method": "deploy_key",
     "deploy_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----",
     "branch": "main",
     "compose_path": "docker-compose.yml"
   }'
 ```
+
+Host key verification is strict (`StrictHostKeyChecking=yes`). ConOps maintains a managed `known_hosts` file seeded from `CONOPS_KNOWN_HOSTS_FILE`, `~/.ssh/known_hosts`, or `/etc/ssh/ssh_known_hosts` when present. Missing host keys are fetched automatically:
+
+- `github.com` — from `api.github.com/meta` (with embedded fallbacks)
+- `gitlab.com` — via `ssh-keyscan` (with embedded fallbacks)
+- other hosts (self-hosted GitLab, etc.) — via `ssh-keyscan`
+
+If keyscan cannot reach the host, pre-seed keys with `CONOPS_KNOWN_HOSTS_FILE`.
 
 > **Security:** Deploy keys are encrypted at rest using AES-GCM. ConOps auto-generates an encryption key on first run, or you can provide your own via `CONOPS_ENCRYPTION_KEY`.
 
