@@ -3,8 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"github.com/valthaide/conops-private/internal/api"
@@ -91,8 +89,9 @@ func printContainersTable(containers []api.Container) {
 		fmt.Println("  (none)")
 		return
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "SERVICE\tSTATUS\tHEALTH\tIMAGE\tPORTS\tNAME")
+	color := colorEnabled()
+	headers := []string{"SERVICE", "STATUS", "HEALTH", "IMAGE", "PORTS", "NAME"}
+	rows := make([][]string, 0, len(containers))
 	for _, c := range containers {
 		health := c.Health
 		if health == "" {
@@ -102,9 +101,12 @@ func printContainersTable(containers []api.Container) {
 		if ports == "" {
 			ports = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", c.Service, c.Status, health, c.Image, ports, c.Name)
+		rows = append(rows, []string{c.Service, c.Status, health, c.Image, ports, c.Name})
 	}
-	_ = w.Flush()
+	printAlignedTable(headers, rows,
+		func(_ int, plain string) string { return colorHeader(color, plain) },
+		func(_ int, plain string) string { return colorData(color, plain) },
+	)
 }
 
 func init() {

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/viper"
 	"github.com/valthaide/conops-private/internal/api"
@@ -85,10 +85,14 @@ func messageFor(app api.App) string {
 
 func truncate(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	runes := []rune(s)
+	if n <= 1 {
+		return string(runes[:n])
+	}
+	return string(runes[:n-1]) + "…"
 }
 
 func suspendedValue(app api.App) string {
@@ -100,17 +104,8 @@ func suspendedValue(app api.App) string {
 
 func printAppsTable(apps []api.App) {
 	color := colorEnabled()
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, strings.Join([]string{
-		colorHeader(color, "NAME"),
-		colorHeader(color, "READY"),
-		colorHeader(color, "STATUS"),
-		colorHeader(color, "SUSPENDED"),
-		colorHeader(color, "DRIFT"),
-		colorHeader(color, "REVISION"),
-		colorHeader(color, "LAST SYNC"),
-		colorHeader(color, "MESSAGE"),
-	}, "\t"))
+	headers := []string{"NAME", "READY", "STATUS", "SUSPENDED", "DRIFT", "REVISION", "LAST SYNC", "MESSAGE"}
+	rows := make([][]string, 0, len(apps))
 	for _, app := range apps {
 		rev := shortCommit(app.LastSyncedCommit)
 		if rev == "" {
@@ -119,18 +114,26 @@ func printAppsTable(apps []api.App) {
 		if rev == "" {
 			rev = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			colorData(color, app.Name),
-			paintReady(color, readyValue(app)),
-			colorData(color, app.Status),
-			paintBool(color, suspendedValue(app)),
-			paintBool(color, driftValue(app)),
-			colorData(color, rev),
-			colorData(color, relativeTime(app.LastSyncAt)),
-			colorData(color, messageFor(app)),
-		)
+		rows = append(rows, []string{
+			app.Name,
+			readyValue(app),
+			app.Status,
+			suspendedValue(app),
+			driftValue(app),
+			rev,
+			relativeTime(app.LastSyncAt),
+			messageFor(app),
+		})
 	}
-	_ = w.Flush()
+	printAlignedTable(headers, rows,
+		func(_ int, plain string) string { return colorHeader(color, plain) },
+		func(col int, plain string) string {
+			if col == 1 { // READY
+				return paintReady(color, plain)
+			}
+			return colorData(color, plain)
+		},
+	)
 }
 
 func printAppDetail(app api.App) {
