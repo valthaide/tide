@@ -7,15 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/valthaide/conops-private/internal/apiauth"
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/controller"
 	"github.com/valthaide/conops-private/internal/credentials"
+	"github.com/valthaide/conops-private/internal/fleet"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/store"
+	"github.com/valthaide/conops-private/internal/tlsutil"
 )
 
 // Version is set by build ldflags when releasing the controller image.
@@ -63,6 +67,19 @@ func main() {
 	}
 	logger.Info("Credential encryption is enabled", "source", credentialService.KeySource())
 
+	auth, err := apiauth.Setup(dataDir)
+	if err != nil {
+		logger.Error("Failed to initialize API auth", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("API bearer auth enabled")
+
+	certFile, keyFile, err := tlsutil.EnsureServerCert(dataDir)
+	if err != nil {
+		logger.Error("Failed to ensure TLS certificate", "error", err)
+		os.Exit(1)
+	}
+
 	registry := controller.NewRegistry(dbStore, credentialService)
 
 	watcher := controller.NewGitWatcher(registry, logger)
@@ -88,26 +105,36 @@ func main() {
 	reconciler := controller.NewReconciler(registry, executor, logger, reconcilerCfg)
 	go reconciler.Run(ctx)
 
+	fleetCfg, err := fleet.LoadConfigFromEnv(dataDir)
+	if err != nil {
+		logger.Error("Failed to load fleet config", "error", err)
+		os.Exit(1)
+	}
+	if fleetCfg.Enabled() {
+		logger.Info("Fleet reconciler enabled", "repo", fleetCfg.RepoURL, "host", fleetCfg.Host, "interval", fleetCfg.Interval.String())
+		fleetReconciler := fleet.NewReconciler(fleetCfg, registry, executor, logger)
+		go fleetReconciler.Run(ctx)
+	} else {
+		logger.Info("Fleet reconciler disabled (set CONOPS_FLEET_REPO_URL to enable)")
+	}
+
 	promRegistry := prometheus.NewRegistry()
 	if err := metrics.Register(promRegistry, registry); err != nil {
 		logger.Error("Failed to register metrics", "error", err)
 		os.Exit(1)
 	}
 
-	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-
 	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
 
-	r.Handle("/metrics", metrics.Handler(promRegistry))
-	r.Get("/healthz", appHandler.Healthz)
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+	apiRouter := chi.NewRouter()
+	apiRouter.Use(middleware.Logger)
+	apiRouter.Use(middleware.Recoverer)
+	apiRouter.Use(auth.Middleware)
+	apiRouter.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nHealth: /healthz\nMetrics: /metrics\nUse CLI: cps\n"))
+		_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nUse CLI: cps\n"))
 	})
-
-	r.Route("/api/v1", func(r chi.Router) {
+	apiRouter.Route("/api/v1", func(r chi.Router) {
 		r.Route("/apps", func(r chi.Router) {
 			r.Post("/", appHandler.RegisterApp)
 			r.Get("/", appHandler.ListApps)
@@ -121,9 +148,35 @@ func main() {
 		})
 	})
 
-	addr := ":8080"
-	logger.Info("Starting controller", "addr", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
+	metricsRouter := chi.NewRouter()
+	metricsRouter.Use(middleware.Recoverer)
+	metricsRouter.Handle("/metrics", metrics.Handler(promRegistry))
+	metricsRouter.Get("/healthz", appHandler.Healthz)
+
+	apiAddr := strings.TrimSpace(os.Getenv("CONOPS_API_ADDR"))
+	if apiAddr == "" {
+		apiAddr = ":8443"
+	}
+	metricsAddr := strings.TrimSpace(os.Getenv("CONOPS_METRICS_ADDR"))
+	if metricsAddr == "" {
+		metricsAddr = "127.0.0.1:8081"
+	}
+
+	errCh := make(chan error, 2)
+
+	go func() {
+		logger.Info("Starting metrics/health listener", "addr", metricsAddr)
+		srv := &http.Server{Addr: metricsAddr, Handler: metricsRouter, ReadHeaderTimeout: 10 * time.Second}
+		errCh <- srv.ListenAndServe()
+	}()
+
+	go func() {
+		logger.Info("Starting HTTPS API listener", "addr", apiAddr, "cert", certFile)
+		srv := &http.Server{Addr: apiAddr, Handler: apiRouter, ReadHeaderTimeout: 10 * time.Second}
+		errCh <- srv.ListenAndServeTLS(certFile, keyFile)
+	}()
+
+	if err := <-errCh; err != nil && err != http.ErrServerClosed {
 		logger.Error("Server failed", "error", err)
 		os.Exit(1)
 	}

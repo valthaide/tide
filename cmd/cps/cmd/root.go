@@ -28,13 +28,24 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-	rootCmd.PersistentFlags().String("url", "http://127.0.0.1:8080", "Controller URL")
+	rootCmd.PersistentFlags().String("url", "", "Controller URL (default from cps config or https://127.0.0.1:8443)")
+	rootCmd.PersistentFlags().String("token", "", "API bearer token (or CONOPS_TOKEN / cps config)")
+	rootCmd.PersistentFlags().String("context", "", "cps config context name")
+	rootCmd.PersistentFlags().String("config", "", "Path to cps config file")
+	rootCmd.PersistentFlags().Bool("insecure", false, "Skip TLS certificate verification")
+	rootCmd.PersistentFlags().String("certificate-authority", "", "Path to CA certificate for HTTPS")
 	rootCmd.PersistentFlags().StringP("output", "o", "table", "Output format: table|json")
 	_ = viper.BindPFlag("url", rootCmd.PersistentFlags().Lookup("url"))
+	_ = viper.BindPFlag("token", rootCmd.PersistentFlags().Lookup("token"))
+	_ = viper.BindPFlag("context", rootCmd.PersistentFlags().Lookup("context"))
+	_ = viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
+	_ = viper.BindPFlag("insecure", rootCmd.PersistentFlags().Lookup("insecure"))
+	_ = viper.BindPFlag("certificate-authority", rootCmd.PersistentFlags().Lookup("certificate-authority"))
 	_ = viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
 }
 
 func initConfig() {
 	viper.SetEnvPrefix("CONOPS")
 	viper.AutomaticEnv()
+	_ = viper.BindEnv("token", "CONOPS_TOKEN", "CONOPS_API_TOKEN")
 }

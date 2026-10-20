@@ -10,34 +10,36 @@
 | **Fleet-репо** | На каком хосте какие apps (repo/branch/path) |
 | **App-репо** | `docker-compose.yml`, конфиги, SOPS — desired state стека |
 
-Подробности: [ARCHITECTURE.md](ARCHITECTURE.md). План работ: [ROADMAP.md](ROADMAP.md).
+Подробности: [ARCHITECTURE.md](ARCHITECTURE.md). План: [ROADMAP.md](ROADMAP.md).
 
 ## Компоненты
 
-- **conops** — контроллер на хосте (reconcile fleet + app repos, compose)
-- **cps** — CLI к API контроллера
+- **conops** — контроллер (HTTPS API + localhost metrics, fleet + app reconcile)
+- **cps** — CLI к API (`--token`, `cps config`)
 
 ## Локальная сборка
 
 ```bash
 go build -o bin/conops ./cmd/conops
 go build -o bin/cps ./cmd/cps
-docker compose up -d --build
 ```
 
-## CLI (сейчас)
+## Быстрый старт CLI
 
 ```bash
-export CONOPS_URL=http://127.0.0.1:8080
+# после старта conops: token в ./bootstrap_token (или CONOPS_API_TOKEN)
+cps config set-context --name local \
+  --url https://127.0.0.1:8443 \
+  --token "$(cat bootstrap_token)" \
+  --insecure-skip-tls-verify
+cps config use-context local
 
 cps check
 cps get apps
-cps get app my-app
 cps reconcile app my-app
-cps suspend app my-app && cps resume app my-app
 ```
 
-Целевое подключение: HTTPS API + Bearer token + `cps config` contexts (см. architecture).
+Metrics/healthz: `http://127.0.0.1:8081/metrics`, `/healthz`.
 
 ## Лицензия
 

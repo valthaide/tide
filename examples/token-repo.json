@@ -1,0 +1,9 @@
+{
+  "name": "private-https-app",
+  "repo_url": "https://gitlab.example/group/app.git",
+  "repo_auth_method": "token",
+  "git_token": "glpat-xxxxxxxx",
+  "branch": "main",
+  "compose_path": "docker-compose.yml",
+  "poll_interval": "60s"
+}

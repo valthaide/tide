@@ -22,6 +22,7 @@ import (
 const (
 	MethodPublic    = "public"
 	MethodDeployKey = "deploy_key"
+	// MethodToken is defined in token.go
 
 	KnownHostsPathEnv = "CONOPS_KNOWN_HOSTS_FILE"
 
@@ -76,13 +77,17 @@ func NormalizeMethod(value string) string {
 		return MethodPublic
 	case "deploy_key", "deploy-key", "deploykey":
 		return MethodDeployKey
+	case "token", "https_token", "https-token", "pat":
+		return MethodToken
 	default:
 		return ""
 	}
 }
 
 // ValidateCreateInput validates repo config before persistence.
-func ValidateCreateInput(repoURL, method, deployKey string) error {
+// secret is a deploy key (deploy_key) or git token (token); may be empty for token
+// when CONOPS_GIT_TOKEN will be supplied at runtime.
+func ValidateCreateInput(repoURL, method, secret string) error {
 	repoURL = strings.TrimSpace(repoURL)
 	if repoURL == "" {
 		return fmt.Errorf("repo URL is required")
@@ -93,31 +98,39 @@ func ValidateCreateInput(repoURL, method, deployKey string) error {
 		return fmt.Errorf("unsupported repo auth method")
 	}
 
-	if method != MethodDeployKey {
+	switch method {
+	case MethodPublic:
 		return nil
-	}
-
-	deployKey = NormalizeDeployKey(deployKey)
-	if strings.TrimSpace(deployKey) == "" {
-		return fmt.Errorf("deploy key is required for private repositories")
-	}
-
-	if _, err := ParseSSHEndpoint(repoURL); err != nil {
-		return err
-	}
-	if !isSSHRepoURL(repoURL) {
-		return fmt.Errorf("deploy key mode requires an SSH repo URL (git@host:path or ssh://...)")
-	}
-
-	if _, err := ssh.ParseRawPrivateKey([]byte(deployKey)); err != nil {
-		var passErr *ssh.PassphraseMissingError
-		if errors.As(err, &passErr) {
-			return fmt.Errorf("passphrase-protected deploy keys are not supported")
+	case MethodToken:
+		if !isHTTPSRepoURL(repoURL) {
+			return fmt.Errorf("token mode requires an HTTPS repo URL")
 		}
-		return fmt.Errorf("invalid deploy key")
+		if strings.TrimSpace(secret) == "" && ResolveGitToken("") == "" {
+			return fmt.Errorf("git token is required for token auth (set git_token or %s)", GitTokenEnv)
+		}
+		return nil
+	case MethodDeployKey:
+		deployKey := NormalizeDeployKey(secret)
+		if strings.TrimSpace(deployKey) == "" {
+			return fmt.Errorf("deploy key is required for private repositories")
+		}
+		if _, err := ParseSSHEndpoint(repoURL); err != nil {
+			return err
+		}
+		if !isSSHRepoURL(repoURL) {
+			return fmt.Errorf("deploy key mode requires an SSH repo URL (git@host:path or ssh://...)")
+		}
+		if _, err := ssh.ParseRawPrivateKey([]byte(deployKey)); err != nil {
+			var passErr *ssh.PassphraseMissingError
+			if errors.As(err, &passErr) {
+				return fmt.Errorf("passphrase-protected deploy keys are not supported")
+			}
+			return fmt.Errorf("invalid deploy key")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported repo auth method")
 	}
-
-	return nil
 }
 
 // NormalizeDeployKey normalizes copy-pasted private keys from forms/JSON payloads.

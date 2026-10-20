@@ -198,6 +198,7 @@ func (r *Reconciler) requeuePending(app *App, reason string) {
 		return
 	}
 	app.Status = "pending"
+	metrics.ObserveRequeue(app.ID, app.Name, reason)
 	if r.Logger != nil {
 		r.Logger.Info("Requeued app for reconciliation", "app_id", app.ID, "reason", reason)
 	}
@@ -224,14 +225,14 @@ func (r *Reconciler) syncApp(app *App) error {
 		r.Logger.Warn("Failed to mark app syncing", "app_id", app.ID, "error", err)
 	}
 
-	deployKey, err := r.Registry.GetDeployKey(app.ID)
+	repoSecret, err := r.Registry.GetRepoSecret(app.ID)
 	if err != nil {
 		_ = r.Registry.UpdateStatus(app.ID, "error", nil)
 		err = fmt.Errorf("failed to load app credentials: %w", err)
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), err)
 		return err
 	}
-	defer zeroBytes(deployKey)
+	defer zeroBytes(repoSecret)
 
 	envVars, err := r.Registry.GetAppEnvs(app.ID)
 	if err != nil {
@@ -254,7 +255,8 @@ func (r *Reconciler) syncApp(app *App) error {
 		app.Branch,
 		app.ComposePath,
 		app.LastSeenCommit,
-		deployKey,
+		app.RepoAuthMethod,
+		repoSecret,
 		progress.Update,
 	)
 	progress.Flush()

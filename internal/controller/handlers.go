@@ -19,6 +19,7 @@ type registerAppRequest struct {
 	RepoURL        string            `json:"repo_url"`
 	RepoAuthMethod string            `json:"repo_auth_method"`
 	DeployKey      string            `json:"deploy_key"`
+	GitToken       string            `json:"git_token"`
 	Branch         string            `json:"branch"`
 	ComposePath    string            `json:"compose_path"`
 	PollInterval   string            `json:"poll_interval"`
@@ -45,7 +46,8 @@ type RuntimeApplier interface {
 		appID, content string,
 		envVars map[string]string,
 		repoURL, branch, composePath, commitHash string,
-		deployKey []byte,
+		repoAuthMethod string,
+		repoSecret []byte,
 		onProgress func(string),
 	) (string, error)
 }
@@ -155,7 +157,11 @@ func (h *Handler) RegisterApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Registry.AddWithDeployKeyAndEnvs(&app, req.DeployKey, req.ServiceEnvs); err != nil {
+	secret := strings.TrimSpace(req.DeployKey)
+	if t := strings.TrimSpace(req.GitToken); t != "" {
+		secret = t
+	}
+	if err := h.Registry.AddWithDeployKeyAndEnvs(&app, secret, req.ServiceEnvs); err != nil {
 		status := http.StatusConflict
 		errText := strings.ToLower(err.Error())
 		if strings.Contains(errText, "required") || strings.Contains(errText, "invalid") || strings.Contains(errText, "unsupported") {
@@ -373,13 +379,13 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 		h.Logger.Warn("Failed to mark app syncing", "id", app.ID, "error", err)
 	}
 
-	deployKey, err := h.Registry.GetDeployKey(app.ID)
+	repoSecret, err := h.Registry.GetRepoSecret(app.ID)
 	if err != nil {
 		_ = h.Registry.UpdateStatus(app.ID, "error", nil)
 		http.Error(w, fmt.Sprintf("failed to load app credentials: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer zeroBytes(deployKey)
+	defer zeroBytes(repoSecret)
 
 	envVars, err := h.Registry.GetAppEnvs(app.ID)
 	if err != nil {
@@ -405,7 +411,8 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 		app.Branch,
 		app.ComposePath,
 		"",
-		deployKey,
+		app.RepoAuthMethod,
+		repoSecret,
 		progress.Update,
 	)
 	progress.Flush()

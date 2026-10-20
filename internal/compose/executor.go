@@ -60,7 +60,8 @@ func (e *ComposeExecutor) Apply(
 	appID, content string,
 	envVars map[string]string,
 	repoURL, branch, composePath, commitHash string,
-	deployKey []byte,
+	repoAuthMethod string,
+	repoSecret []byte,
 	onProgress func(string),
 ) (string, error) {
 	var syncLog strings.Builder
@@ -129,7 +130,7 @@ func (e *ComposeExecutor) Apply(
 
 	repoDir := filepath.Join(appDirAbs, "repo")
 	e.Logger.Info("Preparing repo", "app_id", appID, "repo", repoURL, "branch", branch, "commit", commitHash, "dir", repoDir)
-	repoLog, err := e.prepareRepo(ctx, appDirAbs, repoDir, repoURL, branch, commitHash, deployKey)
+	repoLog, err := e.prepareRepo(ctx, appDirAbs, repoDir, repoURL, branch, commitHash, repoAuthMethod, repoSecret)
 	appendLogBlock(&syncLog, repoLog)
 	emitProgress()
 	if err != nil {
@@ -374,11 +375,11 @@ func (e *ComposeExecutor) SnapshotProjects(ctx context.Context) (map[string]Proj
 	return snapshot, nil
 }
 
-func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repoURL, branch, commitHash string, deployKey []byte) (string, error) {
+func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repoURL, branch, commitHash, repoAuthMethod string, repoSecret []byte) (string, error) {
 	var repoLog strings.Builder
 	appendLogSection(&repoLog, "Repository sync")
 
-	gitEnv, cleanup, err := e.buildGitEnv(appDir, repoURL, deployKey)
+	cloneURL, gitEnv, cleanup, err := e.buildGitAuth(appDir, repoURL, repoAuthMethod, repoSecret)
 	if err != nil {
 		appendLogLine(&repoLog, "failed to configure git auth environment")
 		appendLogLine(&repoLog, err.Error())
@@ -389,7 +390,7 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		appendLogLine(&repoLog, "repository cache missing; cloning fresh copy")
-		err := e.cloneRepo(ctx, &repoLog, appDir, repoDir, repoURL, branch, commitHash, gitEnv)
+		err := e.cloneRepo(ctx, &repoLog, appDir, repoDir, cloneURL, branch, commitHash, gitEnv)
 		return strings.TrimSpace(repoLog.String()), err
 	}
 
@@ -405,7 +406,7 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 			appendLogLine(&repoLog, "failed to discard repository cache")
 			return strings.TrimSpace(repoLog.String()), fmt.Errorf("discard repo cache %s: %w", repoDir, rmErr)
 		}
-		cloneErr := e.cloneRepo(ctx, &repoLog, appDir, repoDir, repoURL, branch, commitHash, gitEnv)
+		cloneErr := e.cloneRepo(ctx, &repoLog, appDir, repoDir, cloneURL, branch, commitHash, gitEnv)
 		return strings.TrimSpace(repoLog.String()), cloneErr
 	}
 
@@ -539,35 +540,48 @@ func (e *ComposeExecutor) prepareEnvOverrides(appDir string, serviceEnvs map[str
 	return []string{"-f", overrideAbs}, cleanup, nil
 }
 
-func (e *ComposeExecutor) buildGitEnv(appDir, repoURL string, deployKey []byte) (map[string]string, func(), error) {
-	if len(deployKey) == 0 {
-		return nil, func() {}, nil
-	}
+// buildGitAuth returns the clone URL (possibly token-injected), git env, and cleanup.
+func (e *ComposeExecutor) buildGitAuth(appDir, repoURL, method string, secret []byte) (cloneURL string, env map[string]string, cleanup func(), err error) {
+	cloneURL = repoURL
+	method = repoauth.NormalizeMethod(method)
+	noop := func() {}
 
-	knownHostsPath, err := repoauth.ResolveKnownHostsForRepo(repoURL)
-	if err != nil {
-		return nil, nil, err
+	switch method {
+	case repoauth.MethodToken:
+		token := repoauth.ResolveGitToken(string(secret))
+		if token == "" {
+			return "", nil, noop, fmt.Errorf("git token is empty")
+		}
+		injected, injErr := repoauth.InjectTokenIntoHTTPSURL(repoURL, token)
+		if injErr != nil {
+			return "", nil, noop, injErr
+		}
+		return injected, map[string]string{"GIT_TERMINAL_PROMPT": "0"}, noop, nil
+	case repoauth.MethodDeployKey:
+		if len(secret) == 0 {
+			return "", nil, noop, fmt.Errorf("deploy key is empty")
+		}
+		knownHostsPath, khErr := repoauth.ResolveKnownHostsForRepo(repoURL)
+		if khErr != nil {
+			return "", nil, noop, khErr
+		}
+		sshDir := filepath.Join(appDir, ".ssh")
+		if err := os.MkdirAll(sshDir, 0700); err != nil {
+			return "", nil, noop, fmt.Errorf("failed to create ssh dir: %w", err)
+		}
+		keyPath := filepath.Join(sshDir, "deploy_key")
+		if err := os.WriteFile(keyPath, secret, 0600); err != nil {
+			return "", nil, noop, fmt.Errorf("failed to write deploy key file: %w", err)
+		}
+		cleanup = func() { _ = os.Remove(keyPath) }
+		env = map[string]string{
+			"GIT_TERMINAL_PROMPT": "0",
+			"GIT_SSH_COMMAND":     repoauth.BuildSSHCommand(keyPath, knownHostsPath),
+		}
+		return cloneURL, env, cleanup, nil
+	default:
+		return cloneURL, map[string]string{"GIT_TERMINAL_PROMPT": "0"}, noop, nil
 	}
-
-	sshDir := filepath.Join(appDir, ".ssh")
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
-		return nil, nil, fmt.Errorf("failed to create ssh dir: %w", err)
-	}
-
-	keyPath := filepath.Join(sshDir, "deploy_key")
-	if err := os.WriteFile(keyPath, deployKey, 0600); err != nil {
-		return nil, nil, fmt.Errorf("failed to write deploy key file: %w", err)
-	}
-
-	cleanup := func() {
-		_ = os.Remove(keyPath)
-	}
-
-	env := map[string]string{
-		"GIT_TERMINAL_PROMPT": "0",
-		"GIT_SSH_COMMAND":     repoauth.BuildSSHCommand(keyPath, knownHostsPath),
-	}
-	return env, cleanup, nil
 }
 
 func appendLogSection(builder *strings.Builder, title string) {

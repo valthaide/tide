@@ -20,7 +20,7 @@ func TestNormalizeMethod(t *testing.T) {
 		"deploy_key": MethodDeployKey,
 		"deploy-key": MethodDeployKey,
 		"DeployKey":  MethodDeployKey,
-		"token":      "",
+		"token":      MethodToken,
 	}
 	for in, want := range tests {
 		if got := NormalizeMethod(in); got != want {

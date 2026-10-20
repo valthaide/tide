@@ -13,13 +13,13 @@ const namespace = "conops"
 
 // AppSnapshot is the app state exposed to Prometheus gauges.
 type AppSnapshot struct {
-	ID                      string
-	Name                    string
-	Status                  string
-	LastSyncAt              time.Time
-	LastSyncError           string
-	LastSeenCommit          string
-	LastSyncedCommit        string
+	ID               string
+	Name             string
+	Status           string
+	LastSyncAt       time.Time
+	LastSyncError    string
+	LastSeenCommit   string
+	LastSyncedCommit string
 }
 
 // AppLister provides app snapshots for gauge metrics on each scrape.
@@ -46,6 +46,12 @@ var (
 		Help:      "Duration of app sync apply operations.",
 		Buckets:   []float64{1, 5, 15, 30, 60, 120, 300, 600},
 	}, []string{"app_id", "app_name"})
+
+	RequeueTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "app_requeue_total",
+		Help:      "Number of times an app was requeued for reconciliation, by reason.",
+	}, []string{"app_id", "app_name", "reason"})
 )
 
 // Register registers process counters/histograms and an apps collector.
@@ -54,6 +60,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		ReconcileLoopsTotal,
 		SyncTotal,
 		SyncDurationSeconds,
+		RequeueTotal,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {
@@ -72,11 +79,14 @@ func Handler(registry prometheus.Gatherer) http.Handler {
 type appsCollector struct {
 	lister AppLister
 
-	appsDesc             *prometheus.Desc
-	syncStatusDesc       *prometheus.Desc
-	lastSyncTimestampDesc *prometheus.Desc
-	lastSyncErrorDesc    *prometheus.Desc
-	commitDriftDesc      *prometheus.Desc
+	appsDesc                      *prometheus.Desc
+	syncStatusDesc                *prometheus.Desc
+	lastSyncTimestampDesc         *prometheus.Desc
+	lastSyncErrorDesc             *prometheus.Desc
+	commitDriftDesc               *prometheus.Desc
+	syncInProgressDesc            *prometheus.Desc
+	lastSuccessfulSyncTimestampDesc *prometheus.Desc
+	syncSuccessAgeSecondsDesc     *prometheus.Desc
 }
 
 func newAppsCollector(lister AppLister) *appsCollector {
@@ -112,6 +122,24 @@ func newAppsCollector(lister AppLister) *appsCollector {
 			[]string{"app_id", "app_name"},
 			nil,
 		),
+		syncInProgressDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "app_sync_in_progress"),
+			"Whether an app sync is currently in progress (1=yes, 0=no).",
+			[]string{"app_id", "app_name"},
+			nil,
+		),
+		lastSuccessfulSyncTimestampDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "app_last_successful_sync_timestamp_seconds"),
+			"Unix timestamp of the last successful sync (status=synced); 0 if never synced successfully.",
+			[]string{"app_id", "app_name"},
+			nil,
+		),
+		syncSuccessAgeSecondsDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "app_sync_success_age_seconds"),
+			"Seconds since the last successful sync; -1 if never synced successfully.",
+			[]string{"app_id", "app_name"},
+			nil,
+		),
 	}
 }
 
@@ -121,6 +149,9 @@ func (c *appsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.lastSyncTimestampDesc
 	ch <- c.lastSyncErrorDesc
 	ch <- c.commitDriftDesc
+	ch <- c.syncInProgressDesc
+	ch <- c.lastSuccessfulSyncTimestampDesc
+	ch <- c.syncSuccessAgeSecondsDesc
 }
 
 func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -128,6 +159,7 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
+	now := time.Now()
 	apps := c.lister.ListAppSnapshots()
 	statusCounts := map[string]float64{}
 
@@ -161,6 +193,24 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 			drift = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.commitDriftDesc, prometheus.GaugeValue, drift, id, name)
+
+		var inProgress float64
+		if status == "syncing" {
+			inProgress = 1
+		}
+		ch <- prometheus.MustNewConstMetric(c.syncInProgressDesc, prometheus.GaugeValue, inProgress, id, name)
+
+		var lastSuccess float64
+		age := float64(-1)
+		if status == "synced" && !app.LastSyncAt.IsZero() && strings.TrimSpace(app.LastSyncError) == "" {
+			lastSuccess = float64(app.LastSyncAt.Unix())
+			age = now.Sub(app.LastSyncAt).Seconds()
+			if age < 0 {
+				age = 0
+			}
+		}
+		ch <- prometheus.MustNewConstMetric(c.lastSuccessfulSyncTimestampDesc, prometheus.GaugeValue, lastSuccess, id, name)
+		ch <- prometheus.MustNewConstMetric(c.syncSuccessAgeSecondsDesc, prometheus.GaugeValue, age, id, name)
 	}
 
 	for status, count := range statusCounts {
@@ -176,4 +226,13 @@ func ObserveSync(appID, appName string, duration time.Duration, err error) {
 	}
 	SyncTotal.WithLabelValues(appID, appName, result).Inc()
 	SyncDurationSeconds.WithLabelValues(appID, appName).Observe(duration.Seconds())
+}
+
+// ObserveRequeue records a reconciliation requeue with a reason label.
+func ObserveRequeue(appID, appName, reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unknown"
+	}
+	RequeueTotal.WithLabelValues(appID, appName, reason).Inc()
 }

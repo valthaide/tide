@@ -112,15 +112,11 @@ cps --context mon get apps
 
 ---
 
-## Что ещё предстоит в коде (относительно текущего master)
+## Реализовано в коде
 
-Уже есть: controller, `cps`, apps в SQLite через API, SSH deploy key, `/healthz`, metrics на том же порту, suspend/resume.
-
-Нужно добавить:
-
-1. Fleet reconciler (git → apps registry).
-2. API HTTPS + metrics на отдельном localhost-порту.
-3. API Bearer auth + `/data/bootstrap_token` + multi-token create с loopback.
-4. `cps config` contexts + `--token`.
-5. HTTPS git + token (deploy token к GitLab) для app/fleet репо.
-6. Алерто-ready метрики.
+1. Fleet reconciler (`CONOPS_FLEET_*`).
+2. API HTTPS + metrics/healthz на `127.0.0.1` (отдельный порт).
+3. API Bearer auth + `/data/bootstrap_token` (файл не авто-удаляется).
+4. `cps config` contexts + `--token` / `CONOPS_TOKEN`.
+5. HTTPS git + `repo_auth_method: token` (`CONOPS_GIT_TOKEN` / `git_token`).
+6. Алерто-ready метрики (`sync_in_progress`, success age, `requeue{reason}`).

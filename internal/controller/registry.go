@@ -46,34 +46,38 @@ func (r *Registry) Add(app *api.App) error {
 	return r.AddWithDeployKey(app, "")
 }
 
-// AddWithDeployKeyAndEnvs registers a new application with optional deploy key and environment variables.
-func (r *Registry) AddWithDeployKeyAndEnvs(app *api.App, deployKey string, serviceEnvs map[string]string) error {
+// AddWithDeployKeyAndEnvs registers a new application with optional deploy key / git token and environment variables.
+func (r *Registry) AddWithDeployKeyAndEnvs(app *api.App, secret string, serviceEnvs map[string]string) error {
 	if app == nil {
 		return fmt.Errorf("app is required")
 	}
 
-	deployKey = repoauth.NormalizeDeployKey(deployKey)
 	if strings.TrimSpace(app.ID) == "" {
 		app.ID = uuid.NewString()
 	}
 
 	if normalized := repoauth.NormalizeMethod(app.RepoAuthMethod); normalized != "" {
 		app.RepoAuthMethod = normalized
-	} else if deployKey != "" {
+	} else if strings.TrimSpace(secret) != "" {
 		app.RepoAuthMethod = repoauth.MethodDeployKey
 	} else {
 		app.RepoAuthMethod = repoauth.MethodPublic
 	}
 
-	if err := repoauth.ValidateCreateInput(app.RepoURL, app.RepoAuthMethod, deployKey); err != nil {
+	if app.RepoAuthMethod == repoauth.MethodDeployKey {
+		secret = repoauth.NormalizeDeployKey(secret)
+	} else {
+		secret = strings.TrimSpace(secret)
+	}
+
+	if err := repoauth.ValidateCreateInput(app.RepoURL, app.RepoAuthMethod, secret); err != nil {
 		return err
 	}
 
-	// Check encryption support if sensitive data is provided
-	hasDeployKey := app.RepoAuthMethod == repoauth.MethodDeployKey
+	hasSecret := secret != "" && (app.RepoAuthMethod == repoauth.MethodDeployKey || app.RepoAuthMethod == repoauth.MethodToken)
 	hasEnvVars := len(serviceEnvs) > 0
 
-	if (hasDeployKey || hasEnvVars) && (r.credentials == nil || !r.credentials.Enabled()) {
+	if (hasSecret || hasEnvVars) && (r.credentials == nil || !r.credentials.Enabled()) {
 		return fmt.Errorf("encryption support is unavailable: set %s", credentials.EncryptionKeyEnv)
 	}
 
@@ -96,7 +100,7 @@ func (r *Registry) AddWithDeployKeyAndEnvs(app *api.App, deployKey string, servi
 	}
 
 	// If no credentials to store, return early
-	if !hasDeployKey && !hasEnvVars {
+	if !hasSecret && !hasEnvVars {
 		return nil
 	}
 
@@ -104,8 +108,8 @@ func (r *Registry) AddWithDeployKeyAndEnvs(app *api.App, deployKey string, servi
 		AppID: app.ID,
 	}
 
-	if hasDeployKey {
-		plaintext := []byte(deployKey)
+	if hasSecret {
+		plaintext := []byte(secret)
 		defer zeroBytes(plaintext)
 
 		ciphertext, nonce, err := r.credentials.Encrypt(plaintext)
@@ -307,30 +311,75 @@ func (r *Registry) GetAppEnvs(id string) (map[string]string, error) {
 
 // GetDeployKey returns the decrypted deploy key for the app if configured.
 func (r *Registry) GetDeployKey(id string) ([]byte, error) {
+	return r.GetRepoSecret(id)
+}
+
+// GetRepoSecret returns the decrypted deploy key or git token for the app.
+func (r *Registry) GetRepoSecret(id string) ([]byte, error) {
+	app, err := r.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
 	credential, err := r.store.GetAppCredential(context.Background(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrCredentialNotFound) {
+			if app.RepoAuthMethod == repoauth.MethodToken {
+				if t := repoauth.ResolveGitToken(""); t != "" {
+					return []byte(t), nil
+				}
+			}
 			return nil, nil
 		}
 		return nil, err
 	}
 
 	if len(credential.DeployKeyCiphertext) == 0 {
+		if app.RepoAuthMethod == repoauth.MethodToken {
+			if t := repoauth.ResolveGitToken(""); t != "" {
+				return []byte(t), nil
+			}
+		}
 		return nil, nil
 	}
 
 	if r.credentials == nil || !r.credentials.Enabled() {
-		return nil, fmt.Errorf("deploy key support is unavailable: set %s", credentials.EncryptionKeyEnv)
+		return nil, fmt.Errorf("credential decryption unavailable: set %s", credentials.EncryptionKeyEnv)
 	}
 
-	deployKey, err := r.credentials.Decrypt(credential.DeployKeyCiphertext, credential.DeployKeyNonce)
+	secret, err := r.credentials.Decrypt(credential.DeployKeyCiphertext, credential.DeployKeyNonce)
 	if err != nil {
 		return nil, err
 	}
 
-	normalized := []byte(repoauth.NormalizeDeployKey(string(deployKey)))
-	zeroBytes(deployKey)
-	return normalized, nil
+	if app.RepoAuthMethod == repoauth.MethodDeployKey {
+		normalized := []byte(repoauth.NormalizeDeployKey(string(secret)))
+		zeroBytes(secret)
+		return normalized, nil
+	}
+	if app.RepoAuthMethod == repoauth.MethodToken {
+		token := []byte(strings.TrimSpace(string(secret)))
+		zeroBytes(secret)
+		if len(token) == 0 {
+			if t := repoauth.ResolveGitToken(""); t != "" {
+				return []byte(t), nil
+			}
+		}
+		return token, nil
+	}
+	zeroBytes(secret)
+	return nil, nil
+}
+
+// FindByName returns the first app with the given name (case-insensitive).
+func (r *Registry) FindByName(name string) *api.App {
+	name = strings.TrimSpace(name)
+	for _, app := range r.List() {
+		if app != nil && strings.EqualFold(app.Name, name) {
+			return app
+		}
+	}
+	return nil
 }
 
 // UpdateCommit updates the latest commit hash for an app.

@@ -2,10 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -15,18 +18,81 @@ import (
 
 type APIClient struct {
 	BaseURL string
+	Token   string
 	Client  *http.Client
 }
 
 func NewClient() *APIClient {
+	url := strings.TrimRight(strings.TrimSpace(viper.GetString("url")), "/")
+	token := strings.TrimSpace(viper.GetString("token"))
+	insecure := viper.GetBool("insecure")
+	caPath := strings.TrimSpace(viper.GetString("certificate-authority"))
+
+	cfgPath := defaultConfigPath()
+	if p := strings.TrimSpace(viper.GetString("config")); p != "" {
+		cfgPath = p
+	}
+	if cfg, err := loadConfig(cfgPath); err == nil {
+		_, ctx, ctxErr := resolveActiveContext(cfg, viper.GetString("context"))
+		if ctxErr == nil {
+			if url == "" && ctx.URL != "" {
+				url = strings.TrimRight(ctx.URL, "/")
+			}
+			if token == "" {
+				token = strings.TrimSpace(ctx.Token)
+			}
+			if !insecure && ctx.InsecureSkipTLSVerify {
+				insecure = true
+			}
+			if caPath == "" {
+				caPath = strings.TrimSpace(ctx.CertificateAuthority)
+			}
+		}
+	}
+
+	if url == "" {
+		url = "https://127.0.0.1:8443"
+	}
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("CONOPS_TOKEN"))
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if insecure {
+		tlsCfg.InsecureSkipVerify = true
+	}
+	if caPath != "" {
+		pem, err := os.ReadFile(caPath)
+		if err == nil {
+			pool := x509.NewCertPool()
+			if pool.AppendCertsFromPEM(pem) {
+				tlsCfg.RootCAs = pool
+			}
+		}
+	}
+	transport.TLSClientConfig = tlsCfg
+
 	return &APIClient{
-		BaseURL: strings.TrimRight(viper.GetString("url"), "/"),
-		Client:  &http.Client{Timeout: 30 * time.Second},
+		BaseURL: url,
+		Token:   token,
+		Client:  &http.Client{Timeout: 30 * time.Second, Transport: transport},
 	}
 }
 
+func (c *APIClient) do(req *http.Request) (*http.Response, error) {
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	return c.Client.Do(req)
+}
+
 func (c *APIClient) Get(path string) (*http.Response, error) {
-	return c.Client.Get(c.BaseURL + path)
+	req, err := http.NewRequest(http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.do(req)
 }
 
 func (c *APIClient) Post(path string, body interface{}) (*http.Response, error) {
@@ -34,7 +100,12 @@ func (c *APIClient) Post(path string, body interface{}) (*http.Response, error) 
 	if err != nil {
 		return nil, err
 	}
-	return c.Client.Post(c.BaseURL+path, "application/json", bytes.NewBuffer(payload))
+	req, err := http.NewRequest(http.MethodPost, c.BaseURL+path, bytes.NewBuffer(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req)
 }
 
 func (c *APIClient) Patch(path string, body interface{}) (*http.Response, error) {
@@ -47,7 +118,7 @@ func (c *APIClient) Patch(path string, body interface{}) (*http.Response, error)
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.Client.Do(req)
+	return c.do(req)
 }
 
 func (c *APIClient) Delete(path string) (*http.Response, error) {
@@ -55,7 +126,7 @@ func (c *APIClient) Delete(path string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.Client.Do(req)
+	return c.do(req)
 }
 
 func CheckResponse(resp *http.Response) error {

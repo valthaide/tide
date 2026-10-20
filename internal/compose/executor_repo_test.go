@@ -51,7 +51,7 @@ func TestPrepareRepoClonesWhenCacheMissing(t *testing.T) {
 	repoDir := filepath.Join(appDir, "repo")
 
 	e := newTestExecutor()
-	logOut, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", nil)
+	logOut, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", "public", nil)
 	if err != nil {
 		t.Fatalf("prepareRepo: %v\n%s", err, logOut)
 	}
@@ -72,7 +72,7 @@ func TestPrepareRepoRecoversFromCorruptCache(t *testing.T) {
 	repoDir := filepath.Join(appDir, "repo")
 
 	e := newTestExecutor()
-	if _, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", nil); err != nil {
+	if _, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", "public", nil); err != nil {
 		t.Fatalf("initial prepareRepo: %v", err)
 	}
 
@@ -85,7 +85,7 @@ func TestPrepareRepoRecoversFromCorruptCache(t *testing.T) {
 		t.Fatalf("test precondition: .git must still exist: %v", err)
 	}
 
-	logOut, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", nil)
+	logOut, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", "public", nil)
 	if err != nil {
 		t.Fatalf("prepareRepo should have recovered by re-cloning, got: %v\n%s", err, logOut)
 	}
@@ -106,7 +106,7 @@ func TestPrepareRepoRestoresDeletedWorkingTree(t *testing.T) {
 	repoDir := filepath.Join(appDir, "repo")
 
 	e := newTestExecutor()
-	if _, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", nil); err != nil {
+	if _, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", "public", nil); err != nil {
 		t.Fatalf("initial prepareRepo: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestPrepareRepoRestoresDeletedWorkingTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logOut, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", nil)
+	logOut, err := e.prepareRepo(context.Background(), appDir, repoDir, origin, "main", "", "public", nil)
 	if err != nil {
 		t.Fatalf("prepareRepo: %v\n%s", err, logOut)
 	}
