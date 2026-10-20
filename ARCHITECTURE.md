@@ -1,4 +1,4 @@
-# Целевая архитектура ConOps (Tenko / Flux-модель)
+# Целевая архитектура ConOps (Flux-модель)
 
 Зафиксировано 2026-10-20.
 
@@ -6,13 +6,13 @@
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
-│  Puppet                                                  │
+│  Config management (Puppet / Ansible / …)               │
 │  Ставит только runtime: образ conops + пакет/бинарник cps│
 │  TLS certs, CONOPS_API_TOKEN (SOPS), bootstrap volume    │
 └───────────────────────────┬─────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────┐
-│  Fleet-репо (tenko/infra/fleet или аналог)               │
+│  Fleet-репо                                              │
 │  Desired state «какие apps на каком хосте»               │
 │  YAML: host → apps[] → repo_url, branch, path, auth ref  │
 │  ConOps на хосте reconcili’ит этот репо → registry apps  │
@@ -27,29 +27,29 @@
 
 | Слой | Git | Кто трогает |
 |------|-----|-------------|
-| **Runtime** | нет | Puppet: conops + cps |
-| **Fleet** | `tenko/infra/fleet` | кто решает «monitoring на mon», «stack X на club-01» |
+| **Runtime** | нет | Config mgmt: conops + cps |
+| **Fleet** | отдельный репо | кто решает «какой стек на каком хосте» |
 | **App** | отдельные репо | владельцы стека: compose + SOPS |
 
-Puppet **не** регистрирует apps через API и **не** кладёт compose на диск вручную. Источник правды apps — fleet git.
+Config management **не** регистрирует apps через API и **не** кладёт compose на диск вручную. Источник правды apps — fleet git.
 
 `cps create/patch` остаются для отладки/bootstrap; в проде apps приходят из fleet (drift: ручная регистрация vs fleet — выигрывает fleet).
 
 ### Пример фрагмента fleet (эскиз)
 
 ```yaml
-# hosts/mon.yaml
-host: mon.example.internal
+# hosts/app-01.yaml
+host: app-01.example.internal
 apps:
   - name: monitoring
-    repo_url: https://git.example/tenko/infra/monitoring.git
+    repo_url: https://git.example/org/infra/monitoring.git
     branch: main
     compose_path: docker-compose.yml
     repo_auth_method: token   # или deploy_key; секрет — на хосте / в SOPS для ConOps
     poll_interval: 60s
 ```
 
-ConOps на `mon` читает только свой host-документ (или directory matching hostname).
+ConOps на хосте читает только свой host-документ (файл по hostname или YAML с полем `host:`).
 
 ---
 
@@ -61,19 +61,19 @@ ConOps на `mon` читает только свой host-документ (ил
 | **Metrics** | `127.0.0.1` only | HTTP ок | нет | Prometheus scrape |
 | **Health** | с metrics или рядом на localhost | HTTP | нет | liveness |
 
-Серверный TLS: файлы в data dir (`/data/tls/cert.pem`, `key.pem`) из Puppet/SOPS или self-signed при первом старте.
+Серверный TLS: файлы в data dir (`/data/tls/cert.pem`, `key.pem`) из config mgmt/SOPS или self-signed при первом старте.
 
 ---
 
 ## Auth: Bearer token + GitOps
 
-Клиентский доступ — **token** (не клиентский сертификат). Проще, ближе к типичному kubectl (Bearer), достаточно для закрытой сети.
+Доступ к API — **token** (не клиентский сертификат). Ближе к типичному kubectl (Bearer), достаточно для закрытой сети.
 
 ### Источники token (приоритет)
 
-1. **`CONOPS_API_TOKEN`** (из SOPS / Puppet) — предпочтительно в проде: hash при старте, plaintext только в secret store.
-2. Иначе tokens в БД (hash).
-3. Иначе bootstrap: сгенерировать, сохранить hash в БД, plaintext в **`/data/bootstrap_token`** (0600).
+1. **`CONOPS_API_TOKEN`** (из SOPS / config mgmt) — предпочтительно в проде: hash при старте, plaintext только в secret store.
+2. Иначе hash на диске (`/data/api_token.sha256`).
+3. Иначе bootstrap: сгенерировать, сохранить hash, plaintext в **`/data/bootstrap_token`** (0600).
 
 `/data/bootstrap_token` **не удалять автоматически** (чтобы «забыл скопировать» ≠ ротация). Удаление — только руками/флагом.
 
@@ -88,17 +88,17 @@ ConOps на `mon` читает только свой host-документ (ил
 
 ```yaml
 # ~/.config/cps/config.yaml
-current-context: mon
+current-context: app-01
 contexts:
-  mon:
-    url: https://conops.mon.internal:8443
+  app-01:
+    url: https://conops.app-01.example.internal:8443
     token: cps_…
     certificate-authority: ~/.config/cps/ca.crt  # опционально
 ```
 
 ```bash
-cps config use-context mon
-cps --context mon get apps
+cps config use-context app-01
+cps --context app-01 get apps
 ```
 
 ---

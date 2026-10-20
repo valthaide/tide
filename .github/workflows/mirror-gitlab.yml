@@ -14,8 +14,16 @@ jobs:
       - name: push to gitlab
         env:
           GITLAB_MIRROR_TOKEN: ${{ secrets.GITLAB_MIRROR_TOKEN }}
+          # Full clone URL without credentials, e.g. https://gitlab.example/group/conops.git
+          GITLAB_MIRROR_URL: ${{ secrets.GITLAB_MIRROR_URL }}
         run: |
           set -euo pipefail
-          git remote add gitlab "https://oauth2:${GITLAB_MIRROR_TOKEN}@git.tenkocrm.online/tenko/infra/conops.git"
+          if [ -z "${GITLAB_MIRROR_TOKEN:-}" ] || [ -z "${GITLAB_MIRROR_URL:-}" ]; then
+            echo "GITLAB_MIRROR_TOKEN and GITLAB_MIRROR_URL secrets are required" >&2
+            exit 1
+          fi
+          # Inject oauth2 token into https://host/path.git
+          mirror_url=$(printf '%s\n' "$GITLAB_MIRROR_URL" | sed "s#https://#https://oauth2:${GITLAB_MIRROR_TOKEN}@#")
+          git remote add gitlab "$mirror_url"
           git push --force gitlab HEAD:refs/heads/main
           git push --force --tags gitlab

@@ -6,7 +6,7 @@
 
 | Слой | Что |
 |------|-----|
-| **Puppet** | Только ConOps runtime: контроллер `conops` + CLI `cps` |
+| **Config mgmt** | Только ConOps runtime: контроллер `conops` + CLI `cps` |
 | **Fleet-репо** | На каком хосте какие apps (repo/branch/path) |
 | **App-репо** | `docker-compose.yml`, конфиги, SOPS — desired state стека |
 

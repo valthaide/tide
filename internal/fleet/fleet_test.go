@@ -11,7 +11,7 @@ func TestParseHostDocument(t *testing.T) {
 host: mon.example
 apps:
   - name: monitoring
-    repo_url: https://git.example/tenko/monitoring.git
+    repo_url: https://git.example/org/monitoring.git
     repo_auth_method: token
     poll_interval: 60s
 `))
