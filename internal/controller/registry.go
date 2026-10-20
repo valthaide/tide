@@ -10,6 +10,7 @@ import (
 
 	"github.com/conops/conops/internal/api"
 	"github.com/conops/conops/internal/credentials"
+	"github.com/conops/conops/internal/metrics"
 	"github.com/conops/conops/internal/repoauth"
 	"github.com/conops/conops/internal/store"
 	"github.com/google/uuid"
@@ -153,6 +154,27 @@ func (r *Registry) List() []*api.App {
 		return []*api.App{}
 	}
 	return apps
+}
+
+// ListAppSnapshots returns app state for Prometheus gauge collectors.
+func (r *Registry) ListAppSnapshots() []metrics.AppSnapshot {
+	apps := r.List()
+	out := make([]metrics.AppSnapshot, 0, len(apps))
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		out = append(out, metrics.AppSnapshot{
+			ID:               app.ID,
+			Name:             app.Name,
+			Status:           app.Status,
+			LastSyncAt:       app.LastSyncAt,
+			LastSyncError:    app.LastSyncError,
+			LastSeenCommit:   app.LastSeenCommit,
+			LastSyncedCommit: app.LastSyncedCommit,
+		})
+	}
+	return out
 }
 
 // Delete removes an application by ID.

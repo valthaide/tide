@@ -209,6 +209,20 @@ volumes:
   conops_data:
 ```
 
+## Metrics
+
+ConOps exposes Prometheus metrics at `GET /metrics` (no auth; bind to localhost in production).
+
+Useful series:
+- `conops_apps{status=...}` — app count by status
+- `conops_app_sync_status{app_id,app_name,status}` — current status (`1`)
+- `conops_app_last_sync_timestamp_seconds{app_id,app_name}`
+- `conops_app_last_sync_error{app_id,app_name}`
+- `conops_app_commit_drift{app_id,app_name}`
+- `conops_reconcile_loops_total`
+- `conops_app_sync_total{app_id,app_name,result}` — `success` / `error`
+- `conops_app_sync_duration_seconds{app_id,app_name}`
+
 ## Private Repositories
 
 ConOps supports private repositories on GitHub, GitLab.com, and self-hosted Git (including GitLab) via SSH deploy keys.

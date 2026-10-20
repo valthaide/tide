@@ -11,10 +11,12 @@ import (
 	"github.com/conops/conops/internal/compose"
 	"github.com/conops/conops/internal/controller"
 	"github.com/conops/conops/internal/credentials"
+	"github.com/conops/conops/internal/metrics"
 	"github.com/conops/conops/internal/store"
 	"github.com/conops/conops/internal/ui"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func main() {
@@ -88,6 +90,12 @@ func main() {
 	reconciler := controller.NewReconciler(registry, executor, logger, reconcilerCfg)
 	go reconciler.Run(ctx)
 
+	promRegistry := prometheus.NewRegistry()
+	if err := metrics.Register(promRegistry, registry); err != nil {
+		logger.Error("Failed to register metrics", "error", err)
+		os.Exit(1)
+	}
+
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)
@@ -99,6 +107,8 @@ func main() {
 		logger.Error("Failed to initialize UI handler", "error", err)
 		os.Exit(1)
 	}
+
+	r.Handle("/metrics", metrics.Handler(promRegistry))
 
 	// UI Routes
 	r.Route("/ui", func(r chi.Router) {

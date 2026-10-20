@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/conops/conops/internal/compose"
+	"github.com/conops/conops/internal/metrics"
 )
 
 // ReconcilerConfig controls how the monolith applies desired state.
@@ -106,6 +107,8 @@ func (r *Reconciler) reconcileOnce() {
 		r.running = false
 		r.mu.Unlock()
 	}()
+
+	metrics.ReconcileLoopsTotal.Inc()
 
 	var runtimeSnapshot map[string]compose.ProjectRuntimeState
 	if snapshot, err := r.captureRuntimeSnapshot(); err != nil {
@@ -221,14 +224,18 @@ func (r *Reconciler) syncApp(app *App) error {
 	deployKey, err := r.Registry.GetDeployKey(app.ID)
 	if err != nil {
 		_ = r.Registry.UpdateStatus(app.ID, "error", nil)
-		return fmt.Errorf("failed to load app credentials: %w", err)
+		err = fmt.Errorf("failed to load app credentials: %w", err)
+		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), err)
+		return err
 	}
 	defer zeroBytes(deployKey)
 
 	envVars, err := r.Registry.GetAppEnvs(app.ID)
 	if err != nil {
 		_ = r.Registry.UpdateStatus(app.ID, "error", nil)
-		return fmt.Errorf("failed to load app envs: %w", err)
+		err = fmt.Errorf("failed to load app envs: %w", err)
+		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), err)
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), r.Config.SyncTimeout)
@@ -262,6 +269,7 @@ func (r *Reconciler) syncApp(app *App) error {
 			output,
 			err.Error(),
 		)
+		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), err)
 		return err
 	}
 
@@ -277,6 +285,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	); err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to update app status", "app_id", app.ID, "error", err)
 	}
+	metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
 	return nil
 }
 
