@@ -16,11 +16,19 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /app/conops ./cmd/conops
 # Final stage
 FROM alpine:3.19
 
+ARG TARGETARCH=amd64
+ARG SOPS_VERSION=3.9.4
+
 WORKDIR /app
 
-# Install docker CLI, compose plugin, and git for monolith apply operations
-RUN apk add --no-cache docker-cli docker-cli-compose git openssh-client
-RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+# docker CLI, compose, git/ssh for monolith apply; sops for CONOPS_SOPS decrypt
+RUN apk add --no-cache docker-cli docker-cli-compose git openssh-client ca-certificates curl \
+ && curl -fsSL -o /usr/local/bin/sops \
+      "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${TARGETARCH}" \
+ && chmod 755 /usr/local/bin/sops \
+ && sops --version \
+ && apk del curl \
+ && mkdir -p /root/.ssh && chmod 700 /root/.ssh
 
 # Copy the binary from builder
 COPY --from=builder /app/conops .
