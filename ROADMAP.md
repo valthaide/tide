@@ -14,8 +14,7 @@
 
 - API **HTTPS** (серверный cert из `/data/tls` или bootstrap).
 - `/metrics` (+ `/healthz`) на **отдельном порту, bind `127.0.0.1`**.
-- Bearer token: `CONOPS_API_TOKEN` и/или `/data/bootstrap_token` (plaintext на диске, hash в БД).
-- Localhost `POST /api/v1/auth/tokens` — выпустить **ещё один** token без ротации старого.
+- Bearer token: `CONOPS_API_TOKEN` и/или `/data/bootstrap_token` (plaintext на диске, hash в БД; файл не авто-удалять).
 - `cps`: `--token` / `CONOPS_TOKEN`, `cps config` (contexts ≈ kubeconfig).
 
 ### B. Fleet GitOps (источник apps)

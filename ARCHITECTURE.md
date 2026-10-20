@@ -80,10 +80,9 @@ ConOps на `mon` читает только свой host-документ (ил
 ### Recovery без ротации старого
 
 - Есть файл → `cat /data/bootstrap_token` (тот же token).
-- Или с localhost: `POST /api/v1/auth/tokens` → **новый** named token, старые остаются.
 - Или смотреть `CONOPS_API_TOKEN` в SOPS.
 
-Ротация/revoke — только явные операции.
+Ротация — только явная операция (отдельная команда/флаг), не часть «забыл скопировать».
 
 ### cps-config (аналог kubeconfig)
 
