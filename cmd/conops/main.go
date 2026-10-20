@@ -91,7 +91,10 @@ func main() {
 	secretsCfg := secrets.LoadConfigFromEnv()
 	secretsMgr := secrets.NewManager(secretsCfg)
 	if secretsCfg.SOPSEnabled {
-		logger.Info("SOPS secrets enabled", "age_key_file", secretsCfg.SOPSAgeKeyFile)
+		logger.Info("SOPS secrets enabled",
+			"age_key_inline", secretsCfg.SOPSAgeKey != "",
+			"age_key_file", secretsCfg.SOPSAgeKeyFile != "",
+		)
 	}
 	if secretsCfg.VaultEnabled {
 		logger.Info("Vault secrets enabled", "addr", secretsCfg.VaultAddr)

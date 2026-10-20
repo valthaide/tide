@@ -17,7 +17,8 @@ import (
 // Config controls optional SOPS and Vault integration.
 type Config struct {
 	SOPSEnabled    bool
-	SOPSAgeKeyFile string
+	SOPSAgeKey     string // raw AGE-SECRET-KEY-... (CONOPS_SOPS_AGE_KEY)
+	SOPSAgeKeyFile string // path (CONOPS_SOPS_AGE_KEY_FILE)
 	VaultEnabled   bool
 	VaultAddr      string
 	VaultToken     string
@@ -30,6 +31,7 @@ func LoadConfigFromEnv() Config {
 	sopsMode := strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_SOPS")))
 	vaultMode := strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_VAULT")))
 	cfg := Config{
+		SOPSAgeKey:     strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY")),
 		SOPSAgeKeyFile: strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY_FILE")),
 		VaultAddr:      strings.TrimRight(strings.TrimSpace(os.Getenv("CONOPS_VAULT_ADDR")), "/"),
 		VaultToken:     strings.TrimSpace(os.Getenv("CONOPS_VAULT_TOKEN")),
@@ -42,8 +44,8 @@ func LoadConfigFromEnv() Config {
 	case "0", "false", "no", "off":
 		cfg.SOPSEnabled = false
 	default:
-		// auto-enable when age key is present
-		cfg.SOPSEnabled = cfg.SOPSAgeKeyFile != ""
+		// auto-enable when age key material is present
+		cfg.SOPSEnabled = cfg.SOPSAgeKey != "" || cfg.SOPSAgeKeyFile != ""
 	}
 	switch vaultMode {
 	case "1", "true", "yes", "on":
@@ -70,7 +72,7 @@ func (m *Manager) PrepareRepo(ctx context.Context, repoDir string) error {
 	if m == nil || !m.Config.SOPSEnabled {
 		return nil
 	}
-	return decryptSOPSTree(ctx, repoDir, m.Config.SOPSAgeKeyFile)
+	return decryptSOPSTree(ctx, repoDir, m.Config.SOPSAgeKey, m.Config.SOPSAgeKeyFile)
 }
 
 // ResolveEnvs expands vault://path#key references in env map values.
@@ -159,10 +161,13 @@ func (m *Manager) readVault(ctx context.Context, path string) (map[string]interf
 	return v1, nil
 }
 
-func decryptSOPSTree(ctx context.Context, root, ageKeyFile string) error {
+func decryptSOPSTree(ctx context.Context, root, ageKey, ageKeyFile string) error {
 	sopsPath, err := exec.LookPath("sops")
 	if err != nil {
 		return fmt.Errorf("sops enabled but sops binary not found in PATH")
+	}
+	if strings.TrimSpace(ageKey) == "" && strings.TrimSpace(ageKeyFile) == "" {
+		return fmt.Errorf("sops enabled but neither CONOPS_SOPS_AGE_KEY nor CONOPS_SOPS_AGE_KEY_FILE is set")
 	}
 	var files []string
 	err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
@@ -189,18 +194,21 @@ func decryptSOPSTree(ctx context.Context, root, ageKeyFile string) error {
 		return err
 	}
 	for _, path := range files {
-		if err := decryptSOPSFile(ctx, sopsPath, path, ageKeyFile); err != nil {
+		if err := decryptSOPSFile(ctx, sopsPath, path, ageKey, ageKeyFile); err != nil {
 			return fmt.Errorf("sops decrypt %s: %w", path, err)
 		}
 	}
 	return nil
 }
 
-func decryptSOPSFile(ctx context.Context, sopsPath, file, ageKeyFile string) error {
+func decryptSOPSFile(ctx context.Context, sopsPath, file, ageKey, ageKeyFile string) error {
 	cmd := exec.CommandContext(ctx, sopsPath, "-d", "-i", file)
 	env := os.Environ()
 	env = append(env, "SOPS_ABSENT_KEYS=ignore")
-	if ageKeyFile != "" {
+	// Inline key takes precedence (maps to sops SOPS_AGE_KEY).
+	if ageKey != "" {
+		env = append(env, "SOPS_AGE_KEY="+ageKey)
+	} else if ageKeyFile != "" {
 		env = append(env, "SOPS_AGE_KEY_FILE="+ageKeyFile)
 	}
 	cmd.Env = env

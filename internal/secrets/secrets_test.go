@@ -42,6 +42,7 @@ func TestResolveEnvsVault(t *testing.T) {
 
 func TestLoadConfigFromEnvAuto(t *testing.T) {
 	t.Setenv("CONOPS_SOPS", "")
+	t.Setenv("CONOPS_SOPS_AGE_KEY", "")
 	t.Setenv("CONOPS_SOPS_AGE_KEY_FILE", "/tmp/age.txt")
 	t.Setenv("CONOPS_VAULT", "")
 	t.Setenv("CONOPS_VAULT_ADDR", "https://vault.example")
@@ -49,5 +50,16 @@ func TestLoadConfigFromEnvAuto(t *testing.T) {
 	cfg := LoadConfigFromEnv()
 	if !cfg.SOPSEnabled || !cfg.VaultEnabled {
 		t.Fatalf("expected auto-enable: %+v", cfg)
+	}
+}
+
+func TestLoadConfigFromEnvAgeKeyInline(t *testing.T) {
+	t.Setenv("CONOPS_SOPS", "")
+	t.Setenv("CONOPS_SOPS_AGE_KEY_FILE", "")
+	t.Setenv("CONOPS_SOPS_AGE_KEY", "AGE-SECRET-KEY-1TEST")
+	t.Setenv("CONOPS_VAULT", "false")
+	cfg := LoadConfigFromEnv()
+	if !cfg.SOPSEnabled || cfg.SOPSAgeKey != "AGE-SECRET-KEY-1TEST" {
+		t.Fatalf("expected inline age key auto-enable: %+v", cfg)
 	}
 }
