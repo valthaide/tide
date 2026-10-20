@@ -33,6 +33,14 @@ func NewRegistry(s store.Store, credentialService *credentials.Service) *Registr
 	}
 }
 
+// PingStore checks database connectivity.
+func (r *Registry) PingStore(ctx context.Context) error {
+	if r.store == nil {
+		return fmt.Errorf("store is not configured")
+	}
+	return r.store.Ping(ctx)
+}
+
 // Add registers a new application.
 func (r *Registry) Add(app *api.App) error {
 	return r.AddWithDeployKey(app, "")

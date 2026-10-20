@@ -436,6 +436,10 @@ func (s *PostgresStore) UpdateAppStatus(ctx context.Context, id, status string, 
 	return nil
 }
 
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 func (s *PostgresStore) Close() {
 	s.pool.Close()
 }

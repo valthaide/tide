@@ -34,6 +34,7 @@ type Store interface {
 		syncError string,
 	) error
 	UpdateAppSyncProgress(ctx context.Context, id string, lastSyncAt time.Time, syncOutput string) error
+	Ping(ctx context.Context) error
 	Close()
 }
 

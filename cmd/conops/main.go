@@ -18,6 +18,9 @@ import (
 	"github.com/valthaide/conops-private/internal/store"
 )
 
+// Version is set by build ldflags when releasing the controller image.
+var Version = "dev"
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
@@ -95,12 +98,13 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	appHandler := controller.NewHandler(registry, executor, executor, logger)
+	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
 
 	r.Handle("/metrics", metrics.Handler(promRegistry))
+	r.Get("/healthz", appHandler.Healthz)
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nMetrics: /metrics\nUse CLI: cps\n"))
+		_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nHealth: /healthz\nMetrics: /metrics\nUse CLI: cps\n"))
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
@@ -108,6 +112,7 @@ func main() {
 			r.Post("/", appHandler.RegisterApp)
 			r.Get("/", appHandler.ListApps)
 			r.Get("/{id}", appHandler.GetApp)
+			r.Get("/{id}/containers", appHandler.ListAppContainers)
 			r.Patch("/{id}", appHandler.UpdateApp)
 			r.Post("/{id}/sync", appHandler.ForceSyncApp)
 			r.Delete("/{id}", appHandler.DeleteApp)

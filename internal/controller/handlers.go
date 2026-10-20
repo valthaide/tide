@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
 	"github.com/go-chi/chi/v5"
+	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/conops-private/internal/compose"
 )
 
 type registerAppRequest struct {
@@ -49,22 +50,87 @@ type RuntimeApplier interface {
 	) (string, error)
 }
 
+// RuntimeInspector inspects compose project containers.
+type RuntimeInspector interface {
+	InspectProjectContainers(ctx context.Context, projectName string) ([]compose.ServiceContainer, error)
+}
+
 // Handler handles HTTP requests for the controller.
 type Handler struct {
-	Registry *Registry
-	Cleaner  RuntimeCleaner
-	Applier  RuntimeApplier
-	Logger   *slog.Logger
+	Registry  *Registry
+	Cleaner   RuntimeCleaner
+	Applier   RuntimeApplier
+	Inspector RuntimeInspector
+	Logger    *slog.Logger
+	Version   string
 }
 
 // NewHandler creates a new controller handler.
-func NewHandler(registry *Registry, cleaner RuntimeCleaner, applier RuntimeApplier, logger *slog.Logger) *Handler {
+func NewHandler(registry *Registry, cleaner RuntimeCleaner, applier RuntimeApplier, inspector RuntimeInspector, logger *slog.Logger, version string) *Handler {
 	return &Handler{
-		Registry: registry,
-		Cleaner:  cleaner,
-		Applier:  applier,
-		Logger:   logger,
+		Registry:  registry,
+		Cleaner:   cleaner,
+		Applier:   applier,
+		Inspector: inspector,
+		Logger:    logger,
+		Version:   version,
 	}
+}
+
+// Healthz handles GET /healthz.
+func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
+	status := api.HealthStatus{
+		Status:  "ok",
+		Version: h.Version,
+		DB:      "ok",
+	}
+	if err := h.Registry.PingStore(r.Context()); err != nil {
+		status.Status = "error"
+		status.DB = err.Error()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+// ListAppContainers handles GET /api/v1/apps/{id}/containers.
+func (h *Handler) ListAppContainers(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if h.Inspector == nil {
+		http.Error(w, "runtime inspector is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	project := compose.ProjectNameForApp(app.ID)
+	runtimeContainers, err := h.Inspector.InspectProjectContainers(ctx, project)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	out := make([]api.Container, 0, len(runtimeContainers))
+	for _, c := range runtimeContainers {
+		out = append(out, api.Container{
+			Service: c.Service,
+			Name:    c.Name,
+			Image:   c.Image,
+			Status:  c.Status,
+			Health:  c.Health,
+			Ports:   c.Ports,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.APIResponse{Data: out})
 }
 
 // RegisterApp handles POST /api/v1/apps

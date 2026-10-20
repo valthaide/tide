@@ -471,6 +471,10 @@ func (s *SQLiteStore) UpdateAppStatus(ctx context.Context, id, status string, la
 	return nil
 }
 
+func (s *SQLiteStore) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 func (s *SQLiteStore) Close() {
 	s.db.Close()
 }

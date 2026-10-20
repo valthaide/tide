@@ -6,10 +6,10 @@
 
 ## Компоненты
 
-- **conops** — контроллер (контейнер): API, reconciler, `/metrics`
+- **conops** — контроллер (контейнер): API, reconciler, `/healthz`, `/metrics`
 - **cps** — CLI к контроллеру (в духе flux)
 
-Web UI убран: операторский UX — CLI + метрики.
+Web UI нет: операторский UX — CLI + метрики.
 
 ## Быстрый старт (контроллер)
 
@@ -22,17 +22,18 @@ API: http://127.0.0.1:8080 (только localhost).
 ## CLI (`cps`)
 
 ```bash
-# после релиза с бинарником cps:
-# curl -sfL .../install.sh | sh
-
 export CONOPS_URL=http://127.0.0.1:8080   # или --url
 
+cps check
+cps get controller
 cps get apps
 cps get app my-app
-cps get app my-app -o json
+cps logs app my-app --tail 50
+cps reconcile app my-app
+cps wait app my-app --timeout 5m
+cps export app my-app > app.json
 cps create app -f app.json
 cps patch app my-app --branch main
-cps reconcile app my-app
 cps delete app my-app
 ```
 
@@ -43,9 +44,10 @@ go build -o bin/cps ./cmd/cps
 go build -o bin/conops ./cmd/conops
 ```
 
-## Метрики
+## Метрики и health
 
-`GET /metrics` — статусы apps, drift, ошибки/длительность sync, reconcile loops.
+- `GET /healthz` — liveness (процесс + БД)
+- `GET /metrics` — Prometheus
 
 ## Roadmap
 

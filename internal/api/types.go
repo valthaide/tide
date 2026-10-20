@@ -27,3 +27,20 @@ type APIResponse struct {
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
+
+// Container describes a compose service container runtime state.
+type Container struct {
+	Service string `json:"service"`
+	Name    string `json:"name"`
+	Image   string `json:"image"`
+	Status  string `json:"status"`
+	Health  string `json:"health,omitempty"`
+	Ports   string `json:"ports,omitempty"`
+}
+
+// HealthStatus is returned by GET /healthz.
+type HealthStatus struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
+	DB      string `json:"db"`
+}

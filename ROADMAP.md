@@ -5,17 +5,15 @@
 ## 1. Убрать UI, усилить CLI — DONE
 
 - Web UI удалён (`/ui`, `web/`, `internal/ui`).
-- CLI → `cps` (вместо `conops-ctl`), контроллер → `conops`.
-- Команды в духе flux: `get`, `create`, `patch`, `reconcile`, `delete`.
+- CLI → `cps`, контроллер → `conops`.
+- Flux-стиль: `get`, `create`, `patch`, `reconcile`, `delete`.
+- Дополнительно: `check`, `get controller`, контейнеры в `get app`, `logs`, `wait`, `export`.
+- Позже: `suspend` / `resume` poll.
 
-## 2. `GET /healthz` (liveness) — TODO
+## 2. `GET /healthz` (liveness) — DONE
 
-Отдельно от `/metrics`:
-
-- процесс отвечает;
-- проверка, что БД открывается / доступна (ping store).
-
-Для Puppet/compose/systemd healthcheck.
+- `GET /healthz`: процесс + ping БД, поле `version`.
+- CLI: `cps check` / `cps get controller`.
 
 ## 3. HTTPS Git + token — TODO
 
