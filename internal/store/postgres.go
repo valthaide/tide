@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/conops/conops/internal/api"
+	"github.com/valthaide/conops-private/internal/api"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

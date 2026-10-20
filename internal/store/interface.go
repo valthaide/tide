@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/conops/conops/internal/api"
+	"github.com/valthaide/conops-private/internal/api"
 )
 
 var ErrCredentialNotFound = errors.New("app credential not found")

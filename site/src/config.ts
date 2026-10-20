@@ -2,8 +2,7 @@ export const siteConfig = {
   name: "ConOps",
   description: "GitOps for Docker Compose. Like Argo CD, but without Kubernetes.",
   links: {
-    github: "https://github.com/anuragxxd/conops",
-    twitter: "https://twitter.com/anurag_1201",
+    github: "https://github.com/valthaide/conops-private",
   },
   hero: {
     title: "GitOps for Docker Compose",
@@ -15,6 +14,6 @@ export const siteConfig = {
   -v /tmp/conops-runtime:/tmp/conops-runtime \\
   -v conops_data:/data \\
   -v /var/run/docker.sock:/var/run/docker.sock \\
-  anurag1201/conops:latest`
+  git.tenkocrm.online:5050/tenko/infra/monitoring/conops:latest`
   }
 }

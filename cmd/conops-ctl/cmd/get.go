@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/conops/conops/internal/api"
+	"github.com/valthaide/conops-private/internal/api"
 	"github.com/spf13/cobra"
 )
 

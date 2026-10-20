@@ -9,10 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/anuragxxd/conops/stargazers"><img src="https://img.shields.io/github/stars/anuragxxd/conops?style=flat-square" alt="GitHub stars"></a>
-  <a href="https://hub.docker.com/r/anurag1201/conops"><img src="https://img.shields.io/docker/pulls/anurag1201/conops?style=flat-square" alt="Docker Pulls"></a>
-  <a href="https://github.com/anuragxxd/conops/blob/master/LICENSE"><img src="https://img.shields.io/github/license/anuragxxd/conops?style=flat-square" alt="License"></a>
-  <a href="https://github.com/anuragxxd/conops/releases"><img src="https://img.shields.io/github/v/release/anuragxxd/conops?style=flat-square" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
+  <a href="https://github.com/valthaide/conops-private/releases"><img src="https://img.shields.io/badge/release-private-blue?style=flat-square" alt="Releases"></a>
 </p>
 
 <p align="center">
@@ -45,7 +43,7 @@ docker run \
   -v /tmp/conops-runtime:/tmp/conops-runtime \
   -v conops_data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  anurag1201/conops:latest
+  git.tenkocrm.online:5050/tenko/infra/monitoring/conops:latest
 ```
 
 Open **http://localhost:8080** and click **New App**.
@@ -65,7 +63,8 @@ Open **http://localhost:8080** and click **New App**.
 - **Docker preflight + fallback toolchain** &mdash; checks Docker API compatibility before sync
 - **Web UI** &mdash; register apps, inspect status, view containers, trigger syncs, read logs
 - **REST API + CLI** &mdash; automate everything; nothing in the UI that the API can't do
-- **Private repo support** &mdash; GitHub deploy keys with AES-GCM encryption at rest
+- **Private repo support** &mdash; SSH deploy keys (GitHub, GitLab, self-hosted) with AES-GCM encryption at rest
+- **Prometheus metrics** &mdash; `GET /metrics` for sync status, drift, and reconciler counters
 - **SQLite or PostgreSQL** &mdash; SQLite for single-node, Postgres for production
 - **Single binary** &mdash; no runtime dependencies beyond Docker and Git
 
@@ -191,7 +190,7 @@ For production, we recommend running ConOps with Docker Compose to handle persis
 ```yaml
 services:
   conops:
-    image: anurag1201/conops:latest
+    image: git.tenkocrm.online:5050/tenko/infra/monitoring/conops:latest
     ports:
       - "127.0.0.1:8080:8080"
     environment:

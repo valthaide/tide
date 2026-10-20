@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   conops:
-    image: anurag1201/conops:latest
+    image: git.tenkocrm.online:5050/tenko/infra/monitoring/conops:latest
     container_name: conops
     ports:
       - "127.0.0.1:8080:8080"

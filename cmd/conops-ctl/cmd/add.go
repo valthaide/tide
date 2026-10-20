@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/conops/conops/internal/api"
+	"github.com/valthaide/conops-private/internal/api"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )

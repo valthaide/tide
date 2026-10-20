@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/conops/conops/internal/api"
-	"github.com/conops/conops/internal/credentials"
-	"github.com/conops/conops/internal/metrics"
-	"github.com/conops/conops/internal/repoauth"
-	"github.com/conops/conops/internal/store"
+	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/conops-private/internal/credentials"
+	"github.com/valthaide/conops-private/internal/metrics"
+	"github.com/valthaide/conops-private/internal/repoauth"
+	"github.com/valthaide/conops-private/internal/store"
 	"github.com/google/uuid"
 )
 

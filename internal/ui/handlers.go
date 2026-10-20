@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/conops/conops/internal/compose"
-	"github.com/conops/conops/internal/controller"
+	"github.com/valthaide/conops-private/internal/compose"
+	"github.com/valthaide/conops-private/internal/controller"
 	"github.com/go-chi/chi/v5"
 )
 

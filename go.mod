@@ -1,4 +1,4 @@
-module github.com/conops/conops
+module github.com/valthaide/conops-private
 
 go 1.25.5
 

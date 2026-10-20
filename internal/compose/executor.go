@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/conops/conops/internal/repoauth"
+	"github.com/valthaide/conops-private/internal/repoauth"
 )
 
 // ComposeExecutor handles Docker Compose operations.

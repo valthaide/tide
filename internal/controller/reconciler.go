@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/conops/conops/internal/compose"
-	"github.com/conops/conops/internal/metrics"
+	"github.com/valthaide/conops-private/internal/compose"
+	"github.com/valthaide/conops-private/internal/metrics"
 )
 
 // ReconcilerConfig controls how the monolith applies desired state.

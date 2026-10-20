@@ -13,7 +13,7 @@ builds:
     main: ./cmd/conops-ctl
     binary: conops-ctl
     ldflags:
-      - -s -w -X github.com/conops/conops/cmd/conops-ctl/cmd.Version={{.Version}}
+      - -s -w -X github.com/valthaide/conops-private/cmd/conops-ctl/cmd.Version={{.Version}}
 
 archives:
   - format: tar.gz

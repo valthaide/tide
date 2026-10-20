@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/conops/conops/internal/api"
+	"github.com/valthaide/conops-private/internal/api"
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 )
 

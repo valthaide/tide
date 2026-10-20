@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/conops/conops/internal/repoauth"
+	"github.com/valthaide/conops-private/internal/repoauth"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
