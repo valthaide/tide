@@ -108,8 +108,8 @@ cps get apps
 
 1. Push в **app-репо** (compose/SOPS).
 2. При необходимости push в **fleet** (привязка app↔host).
-3. ConOps на хосте: sync fleet → обновить registry → poll app-репо → `compose up` (+ sops decrypt по существующей схеме на хосте).
-4. Наблюдение: `cps` по HTTPS+token, алерты по `/metrics` на localhost.
+3. ConOps на хосте: sync fleet → обновить registry → poll (и опционально webhook) → SOPS/Vault → `compose up`.
+4. Наблюдение: `cps` по HTTPS+token, алерты по `/metrics` на localhost; опционально hub собирает agent heartbeats.
 
 ---
 
@@ -120,4 +120,9 @@ cps get apps
 3. API Bearer auth + `/data/bootstrap_token` (файл не авто-удаляется).
 4. `cps config` contexts + `--token` / `CONOPS_TOKEN`.
 5. HTTPS git + `repo_auth_method: token` (`CONOPS_GIT_TOKEN` / `git_token`).
-6. Алерто-ready метрики (`sync_in_progress`, success age, `requeue{reason}`).
+6. Алерто-ready метрики (`sync_in_progress`, success age, `requeue{reason}`, `sync_errors{code,stage}`).
+7. Concurrent sync limit (`CONOPS_MAX_CONCURRENT_SYNCS`).
+8. Structured sync errors (JSON в БД → code/stage в API).
+9. SOPS/age + Vault при sync.
+10. Optional git webhooks (`CONOPS_WEBHOOK_SECRET`).
+11. Modes: `standalone` / `agent` / `hub`.

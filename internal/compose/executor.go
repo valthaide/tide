@@ -16,6 +16,8 @@ import (
 	"unicode"
 
 	"github.com/valthaide/conops-private/internal/repoauth"
+	"github.com/valthaide/conops-private/internal/secrets"
+	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
 // ComposeExecutor handles Docker Compose operations.
@@ -23,6 +25,7 @@ type ComposeExecutor struct {
 	WorkDir  string
 	ToolsDir string
 	Logger   *slog.Logger
+	Secrets  *secrets.Manager
 
 	toolchainMu      sync.Mutex
 	dockerResolution dockerCommandResolution
@@ -134,7 +137,25 @@ func (e *ComposeExecutor) Apply(
 	appendLogBlock(&syncLog, repoLog)
 	emitProgress()
 	if err != nil {
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("prepare repo failed: %w", err)
+		return strings.TrimSpace(syncLog.String()), syncerr.Wrap(syncerr.CodeGitFetch, syncerr.StageFetch, fmt.Errorf("prepare repo failed: %w", err))
+	}
+
+	if e.Secrets != nil {
+		appendLogSection(&syncLog, "Secrets")
+		resolved, resErr := e.Secrets.ResolveEnvs(ctx, envVars)
+		if resErr != nil {
+			appendLogLine(&syncLog, resErr.Error())
+			emitProgress()
+			return strings.TrimSpace(syncLog.String()), syncerr.Wrap(syncerr.CodeSecretsVault, syncerr.StageSecrets, resErr)
+		}
+		envVars = resolved
+		if prepErr := e.Secrets.PrepareRepo(ctx, repoDir); prepErr != nil {
+			appendLogLine(&syncLog, prepErr.Error())
+			emitProgress()
+			return strings.TrimSpace(syncLog.String()), syncerr.Wrap(syncerr.CodeSecretsSOPS, syncerr.StageSecrets, prepErr)
+		}
+		appendLogLine(&syncLog, "ok")
+		emitProgress()
 	}
 
 	composeFullPath := filepath.Join(repoDir, composePath)

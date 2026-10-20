@@ -18,6 +18,8 @@ type App struct {
 	LastSyncedCommitMessage string    `json:"last_synced_commit_message"`
 	LastSyncOutput          string    `json:"last_sync_output"`
 	LastSyncError           string    `json:"last_sync_error"`
+	LastSyncErrorCode       string    `json:"last_sync_error_code,omitempty"`
+	LastSyncErrorStage      string    `json:"last_sync_error_stage,omitempty"`
 	LastSyncAt              time.Time `json:"last_sync_at"`
 	Status                  string    `json:"status"` // e.g., "synced", "pending", "error"
 	Suspended               bool      `json:"suspended"`

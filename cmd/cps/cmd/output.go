@@ -153,7 +153,11 @@ func printAppDetail(app api.App) {
 	fmt.Printf("Synced Commit:  %s\n", orDash(app.LastSyncedCommit))
 	fmt.Printf("Synced Message: %s\n", orDash(app.LastSyncedCommitMessage))
 	fmt.Printf("Last Sync At:   %s\n", formatTime(app.LastSyncAt))
-	fmt.Printf("Last Sync Err:  %s\n", orDash(app.LastSyncError))
+	errDisp := app.LastSyncError
+	if app.LastSyncErrorCode != "" && app.LastSyncErrorCode != "unknown" {
+		errDisp = app.LastSyncErrorCode + "/" + app.LastSyncErrorStage + ": " + app.LastSyncError
+	}
+	fmt.Printf("Last Sync Err:  %s\n", orDash(errDisp))
 	if out := strings.TrimSpace(app.LastSyncOutput); out != "" {
 		fmt.Printf("\n--- Last Sync Output ---\n%s\n", out)
 	}

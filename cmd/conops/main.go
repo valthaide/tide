@@ -12,12 +12,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/valthaide/conops-private/internal/agent"
 	"github.com/valthaide/conops-private/internal/apiauth"
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/controller"
 	"github.com/valthaide/conops-private/internal/credentials"
 	"github.com/valthaide/conops-private/internal/fleet"
 	"github.com/valthaide/conops-private/internal/metrics"
+	"github.com/valthaide/conops-private/internal/secrets"
 	"github.com/valthaide/conops-private/internal/store"
 	"github.com/valthaide/conops-private/internal/tlsutil"
 )
@@ -27,6 +29,8 @@ var Version = "dev"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	mode := agent.ResolveMode()
+	logger.Info("Starting ConOps", "version", Version, "mode", mode)
 
 	dataDir := "/data"
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -81,18 +85,20 @@ func main() {
 	}
 
 	registry := controller.NewRegistry(dbStore, credentialService)
-
-	watcher := controller.NewGitWatcher(registry, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go watcher.Start(ctx)
 
-	reconcilerCfg, err := controller.LoadReconcilerConfigFromEnv()
-	if err != nil {
-		logger.Error("Failed to load reconciler config", "error", err)
-		os.Exit(1)
+	secretsCfg := secrets.LoadConfigFromEnv()
+	secretsMgr := secrets.NewManager(secretsCfg)
+	if secretsCfg.SOPSEnabled {
+		logger.Info("SOPS secrets enabled", "age_key_file", secretsCfg.SOPSAgeKeyFile)
 	}
+	if secretsCfg.VaultEnabled {
+		logger.Info("Vault secrets enabled", "addr", secretsCfg.VaultAddr)
+	}
+
 	executor := compose.NewComposeExecutor(logger)
+	executor.Secrets = secretsMgr
 	if runtimeDir := strings.TrimSpace(os.Getenv("CONOPS_RUNTIME_DIR")); runtimeDir != "" {
 		executor.WorkDir = runtimeDir
 	}
@@ -102,20 +108,44 @@ func main() {
 		executor.ToolsDir = filepath.Join(dataDir, "conops-tools")
 	}
 	logger.Info("Runtime workspace configured", "dir", executor.WorkDir, "tools_dir", executor.ToolsDir)
-	reconciler := controller.NewReconciler(registry, executor, logger, reconcilerCfg)
-	go reconciler.Run(ctx)
 
-	fleetCfg, err := fleet.LoadConfigFromEnv(dataDir)
-	if err != nil {
-		logger.Error("Failed to load fleet config", "error", err)
-		os.Exit(1)
-	}
-	if fleetCfg.Enabled() {
-		logger.Info("Fleet reconciler enabled", "repo", fleetCfg.RepoURL, "host", fleetCfg.Host, "interval", fleetCfg.Interval.String())
-		fleetReconciler := fleet.NewReconciler(fleetCfg, registry, executor, logger)
-		go fleetReconciler.Run(ctx)
+	var reconciler *controller.Reconciler
+	if mode != agent.ModeHub {
+		watcher := controller.NewGitWatcher(registry, logger)
+		go watcher.Start(ctx)
+
+		reconcilerCfg, loadErr := controller.LoadReconcilerConfigFromEnv()
+		if loadErr != nil {
+			logger.Error("Failed to load reconciler config", "error", loadErr)
+			os.Exit(1)
+		}
+		logger.Info("Reconciler config", "max_concurrent", reconcilerCfg.MaxConcurrent, "interval", reconcilerCfg.Interval.String())
+		reconciler = controller.NewReconciler(registry, executor, logger, reconcilerCfg)
+		go reconciler.Run(ctx)
+
+		fleetCfg, fleetErr := fleet.LoadConfigFromEnv(dataDir)
+		if fleetErr != nil {
+			logger.Error("Failed to load fleet config", "error", fleetErr)
+			os.Exit(1)
+		}
+		if fleetCfg.Enabled() {
+			logger.Info("Fleet reconciler enabled", "repo", fleetCfg.RepoURL, "host", fleetCfg.Host, "interval", fleetCfg.Interval.String())
+			fleetReconciler := fleet.NewReconciler(fleetCfg, registry, executor, logger)
+			go fleetReconciler.Run(ctx)
+		} else {
+			logger.Info("Fleet reconciler disabled (set CONOPS_FLEET_REPO_URL to enable)")
+		}
 	} else {
-		logger.Info("Fleet reconciler disabled (set CONOPS_FLEET_REPO_URL to enable)")
+		logger.Info("Hub mode: local git/fleet reconcile disabled")
+	}
+
+	if mode == agent.ModeAgent {
+		if rep := agent.NewReporterFromEnv(registry, Version, logger); rep != nil {
+			logger.Info("Agent reporter enabled", "hub", rep.HubURL, "host", rep.Host)
+			go rep.Run(ctx)
+		} else {
+			logger.Warn("CONOPS_MODE=agent but CONOPS_HUB_URL is empty")
+		}
 	}
 
 	promRegistry := prometheus.NewRegistry()
@@ -125,28 +155,51 @@ func main() {
 	}
 
 	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
+	if reconciler != nil {
+		appHandler.SyncGate = reconciler
+	}
+
+	webhookHandler := controller.NewWebhookHandlerFromEnv(registry, logger)
+	var hubHandler *agent.Handler
+	if mode == agent.ModeHub {
+		hubHandler = &agent.Handler{Store: agent.NewHubStore(), Logger: logger}
+	}
 
 	apiRouter := chi.NewRouter()
 	apiRouter.Use(middleware.Logger)
 	apiRouter.Use(middleware.Recoverer)
-	apiRouter.Use(auth.Middleware)
-	apiRouter.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nHealth: /healthz\nUse CLI: cps\n"))
-	})
-	// Same health payload as metrics listener, behind Bearer (for cps check).
-	apiRouter.Get("/healthz", appHandler.Healthz)
-	apiRouter.Route("/api/v1", func(r chi.Router) {
-		r.Route("/apps", func(r chi.Router) {
-			r.Post("/", appHandler.RegisterApp)
-			r.Get("/", appHandler.ListApps)
-			r.Get("/{id}", appHandler.GetApp)
-			r.Get("/{id}/containers", appHandler.ListAppContainers)
-			r.Patch("/{id}", appHandler.UpdateApp)
-			r.Post("/{id}/sync", appHandler.ForceSyncApp)
-			r.Post("/{id}/suspend", appHandler.SuspendApp)
-			r.Post("/{id}/resume", appHandler.ResumeApp)
-			r.Delete("/{id}", appHandler.DeleteApp)
+
+	// Webhooks use their own secret (not API bearer).
+	if webhookHandler != nil {
+		logger.Info("Git webhooks enabled at POST /api/v1/hooks/git")
+		apiRouter.Post("/api/v1/hooks/git", webhookHandler.GitPush)
+	}
+
+	apiRouter.Group(func(r chi.Router) {
+		r.Use(auth.Middleware)
+		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nHealth: /healthz\nUse CLI: cps\n"))
+		})
+		r.Get("/healthz", appHandler.Healthz)
+		r.Route("/api/v1", func(r chi.Router) {
+			if hubHandler != nil {
+				r.Post("/agents/heartbeat", hubHandler.Heartbeat)
+				r.Get("/agents", hubHandler.ListAgents)
+			}
+			if mode != agent.ModeHub {
+				r.Route("/apps", func(r chi.Router) {
+					r.Post("/", appHandler.RegisterApp)
+					r.Get("/", appHandler.ListApps)
+					r.Get("/{id}", appHandler.GetApp)
+					r.Get("/{id}/containers", appHandler.ListAppContainers)
+					r.Patch("/{id}", appHandler.UpdateApp)
+					r.Post("/{id}/sync", appHandler.ForceSyncApp)
+					r.Post("/{id}/suspend", appHandler.SuspendApp)
+					r.Post("/{id}/resume", appHandler.ResumeApp)
+					r.Delete("/{id}", appHandler.DeleteApp)
+				})
+			}
 		})
 	})
 

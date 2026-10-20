@@ -5,19 +5,22 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/metrics"
+	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
 // ReconcilerConfig controls how the monolith applies desired state.
 type ReconcilerConfig struct {
-	Interval    time.Duration
-	SyncTimeout time.Duration
-	RetryErrors bool
+	Interval       time.Duration
+	SyncTimeout    time.Duration
+	RetryErrors    bool
+	MaxConcurrent  int
 }
 
 // LoadReconcilerConfigFromEnv loads reconciler config from environment variables.
@@ -46,31 +49,79 @@ func LoadReconcilerConfigFromEnv() (ReconcilerConfig, error) {
 
 	retryErrors := strings.EqualFold(os.Getenv("CONOPS_RETRY_ERRORS"), "true")
 
+	maxConcurrent := 2
+	if value := strings.TrimSpace(os.Getenv("CONOPS_MAX_CONCURRENT_SYNCS")); value != "" {
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_MAX_CONCURRENT_SYNCS: %s", value)
+		}
+		maxConcurrent = n
+	}
+
 	return ReconcilerConfig{
-		Interval:    interval,
-		SyncTimeout: timeout,
-		RetryErrors: retryErrors,
+		Interval:      interval,
+		SyncTimeout:   timeout,
+		RetryErrors:   retryErrors,
+		MaxConcurrent: maxConcurrent,
 	}, nil
+}
+
+// AppRuntime applies compose state and inspects running projects.
+// *compose.ComposeExecutor implements this; tests use a fake.
+type AppRuntime interface {
+	Apply(
+		ctx context.Context,
+		appID, content string,
+		envVars map[string]string,
+		repoURL, branch, composePath, commitHash string,
+		repoAuthMethod string,
+		repoSecret []byte,
+		onProgress func(string),
+	) (string, error)
+	SnapshotProjects(ctx context.Context) (map[string]compose.ProjectRuntimeState, error)
 }
 
 // Reconciler applies desired state directly on the host (monolith mode).
 type Reconciler struct {
 	Registry *Registry
-	Executor *compose.ComposeExecutor
+	Executor AppRuntime
 	Logger   *slog.Logger
 	Config   ReconcilerConfig
 
 	mu      sync.Mutex
 	running bool
+	sem     chan struct{}
 }
 
 // NewReconciler creates a new reconciler.
-func NewReconciler(registry *Registry, executor *compose.ComposeExecutor, logger *slog.Logger, cfg ReconcilerConfig) *Reconciler {
+func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger, cfg ReconcilerConfig) *Reconciler {
+	if cfg.MaxConcurrent < 1 {
+		cfg.MaxConcurrent = 2
+	}
 	return &Reconciler{
 		Registry: registry,
 		Executor: executor,
 		Logger:   logger,
 		Config:   cfg,
+		sem:      make(chan struct{}, cfg.MaxConcurrent),
+	}
+}
+
+// AcquireSync slot for force-sync and reconcile (shared concurrency limit).
+func (r *Reconciler) AcquireSync(ctx context.Context) error {
+	select {
+	case r.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ReleaseSync releases a previously acquired sync slot.
+func (r *Reconciler) ReleaseSync() {
+	select {
+	case <-r.sem:
+	default:
 	}
 }
 
@@ -120,6 +171,7 @@ func (r *Reconciler) reconcileOnce() {
 	}
 
 	apps := r.Registry.List()
+	var wg sync.WaitGroup
 	for _, app := range apps {
 		if app.Suspended {
 			continue
@@ -128,7 +180,6 @@ func (r *Reconciler) reconcileOnce() {
 			if r.syncLooksStale(app) {
 				r.requeuePending(app, "recovering_interrupted_sync")
 			} else {
-				// Skip apps with an active in-flight sync.
 				continue
 			}
 		}
@@ -153,10 +204,25 @@ func (r *Reconciler) reconcileOnce() {
 			continue
 		}
 
-		if err := r.syncApp(app); err != nil && r.Logger != nil {
-			r.Logger.Error("App sync failed", "app_id", app.ID, "error", err)
-		}
+		appCopy := app
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), r.Config.SyncTimeout+time.Minute)
+			defer cancel()
+			if err := r.AcquireSync(ctx); err != nil {
+				if r.Logger != nil {
+					r.Logger.Warn("Sync slot wait failed", "app_id", appCopy.ID, "error", err)
+				}
+				return
+			}
+			defer r.ReleaseSync()
+			if err := r.syncApp(appCopy); err != nil && r.Logger != nil {
+				r.Logger.Error("App sync failed", "app_id", appCopy.ID, "error", err)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 func (r *Reconciler) captureRuntimeSnapshot() (map[string]compose.ProjectRuntimeState, error) {
@@ -227,19 +293,19 @@ func (r *Reconciler) syncApp(app *App) error {
 
 	repoSecret, err := r.Registry.GetRepoSecret(app.ID)
 	if err != nil {
-		_ = r.Registry.UpdateStatus(app.ID, "error", nil)
-		err = fmt.Errorf("failed to load app credentials: %w", err)
-		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), err)
-		return err
+		se := syncerr.Wrap(syncerr.CodeCredentials, syncerr.StageCredentials, err)
+		_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
+		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
+		return se
 	}
 	defer zeroBytes(repoSecret)
 
 	envVars, err := r.Registry.GetAppEnvs(app.ID)
 	if err != nil {
-		_ = r.Registry.UpdateStatus(app.ID, "error", nil)
-		err = fmt.Errorf("failed to load app envs: %w", err)
-		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), err)
-		return err
+		se := syncerr.Wrap(syncerr.CodeCredentials, syncerr.StageCredentials, err)
+		_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
+		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
+		return se
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), r.Config.SyncTimeout)
@@ -261,21 +327,22 @@ func (r *Reconciler) syncApp(app *App) error {
 	)
 	progress.Flush()
 	if err != nil {
+		se := syncerr.Classify(err)
 		if r.Logger != nil {
-			r.Logger.Error("Sync apply failed", "app_id", app.ID, "commit", app.LastSeenCommit, "output", truncateOutput(output))
+			r.Logger.Error("Sync apply failed", "app_id", app.ID, "commit", app.LastSeenCommit, "code", se.Code, "stage", se.Stage, "output", truncateOutput(output))
 		}
 		now := time.Now()
-		_ = r.Registry.UpdateSyncResult(
+		_ = r.Registry.UpdateSyncResultErr(
 			app.ID,
 			"error",
 			now,
 			app.LastSyncedCommit,
 			app.LastSyncedCommitMessage,
 			output,
-			err.Error(),
+			se,
 		)
-		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), err)
-		return err
+		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
+		return se
 	}
 
 	now := time.Now()

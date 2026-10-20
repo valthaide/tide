@@ -51,8 +51,8 @@ conops_app_commit_drift{app_id="app-1",app_name="demo"} 0
 conops_app_commit_drift{app_id="app-2",app_name="broken"} 1
 # HELP conops_app_last_sync_error Whether the app currently has a last sync error (1=yes, 0=no).
 # TYPE conops_app_last_sync_error gauge
-conops_app_last_sync_error{app_id="app-1",app_name="demo"} 0
-conops_app_last_sync_error{app_id="app-2",app_name="broken"} 1
+conops_app_last_sync_error{app_id="app-1",app_name="demo",code="none",stage="none"} 0
+conops_app_last_sync_error{app_id="app-2",app_name="broken",code="none",stage="none"} 1
 # HELP conops_app_sync_status Current sync status of an app (1 for the active status).
 # TYPE conops_app_sync_status gauge
 conops_app_sync_status{app_id="app-1",app_name="demo",status="synced"} 1

@@ -13,13 +13,15 @@ const namespace = "conops"
 
 // AppSnapshot is the app state exposed to Prometheus gauges.
 type AppSnapshot struct {
-	ID               string
-	Name             string
-	Status           string
-	LastSyncAt       time.Time
-	LastSyncError    string
-	LastSeenCommit   string
-	LastSyncedCommit string
+	ID                 string
+	Name               string
+	Status             string
+	LastSyncAt         time.Time
+	LastSyncError      string
+	LastSyncErrorCode  string
+	LastSyncErrorStage string
+	LastSeenCommit     string
+	LastSyncedCommit   string
 }
 
 // AppLister provides app snapshots for gauge metrics on each scrape.
@@ -52,6 +54,12 @@ var (
 		Name:      "app_requeue_total",
 		Help:      "Number of times an app was requeued for reconciliation, by reason.",
 	}, []string{"app_id", "app_name", "reason"})
+
+	SyncErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "app_sync_errors_total",
+		Help:      "Number of sync failures by structured code and stage.",
+	}, []string{"app_id", "app_name", "code", "stage"})
 )
 
 // Register registers process counters/histograms and an apps collector.
@@ -61,6 +69,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		SyncTotal,
 		SyncDurationSeconds,
 		RequeueTotal,
+		SyncErrorsTotal,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {
@@ -113,7 +122,7 @@ func newAppsCollector(lister AppLister) *appsCollector {
 		lastSyncErrorDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "app_last_sync_error"),
 			"Whether the app currently has a last sync error (1=yes, 0=no).",
-			[]string{"app_id", "app_name"},
+			[]string{"app_id", "app_name", "code", "stage"},
 			nil,
 		),
 		commitDriftDesc: prometheus.NewDesc(
@@ -181,10 +190,18 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.lastSyncTimestampDesc, prometheus.GaugeValue, lastSync, id, name)
 
 		var hasError float64
+		code := strings.TrimSpace(app.LastSyncErrorCode)
+		stage := strings.TrimSpace(app.LastSyncErrorStage)
+		if code == "" {
+			code = "none"
+		}
+		if stage == "" {
+			stage = "none"
+		}
 		if strings.TrimSpace(app.LastSyncError) != "" {
 			hasError = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.lastSyncErrorDesc, prometheus.GaugeValue, hasError, id, name)
+		ch <- prometheus.MustNewConstMetric(c.lastSyncErrorDesc, prometheus.GaugeValue, hasError, id, name, code, stage)
 
 		var drift float64
 		seen := strings.TrimSpace(app.LastSeenCommit)
@@ -223,6 +240,15 @@ func ObserveSync(appID, appName string, duration time.Duration, err error) {
 	result := "success"
 	if err != nil {
 		result = "error"
+		code, stage := "unknown", "unknown"
+		type coded interface {
+			GetCode() string
+			GetStage() string
+		}
+		if c, ok := err.(coded); ok {
+			code, stage = c.GetCode(), c.GetStage()
+		}
+		SyncErrorsTotal.WithLabelValues(appID, appName, code, stage).Inc()
 	}
 	SyncTotal.WithLabelValues(appID, appName, result).Inc()
 	SyncDurationSeconds.WithLabelValues(appID, appName).Observe(duration.Seconds())

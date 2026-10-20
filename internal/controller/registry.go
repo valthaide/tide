@@ -8,12 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/credentials"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/repoauth"
 	"github.com/valthaide/conops-private/internal/store"
-	"github.com/google/uuid"
+	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
 // App is aliased to api.App for compatibility, though we should prefer api.App.
@@ -155,7 +156,12 @@ func (r *Registry) AddWithDeployKey(app *api.App, deployKey string) error {
 
 // Get retrieves an application by ID.
 func (r *Registry) Get(id string) (*api.App, error) {
-	return r.store.GetApp(context.Background(), id)
+	app, err := r.store.GetApp(context.Background(), id)
+	if err != nil {
+		return nil, err
+	}
+	enrichAppSyncError(app)
+	return app, nil
 }
 
 // List returns all registered applications.
@@ -164,6 +170,9 @@ func (r *Registry) List() []*api.App {
 	if err != nil {
 		// Log error? For now return empty list to be safe for UI.
 		return []*api.App{}
+	}
+	for _, app := range apps {
+		enrichAppSyncError(app)
 	}
 	return apps
 }
@@ -177,16 +186,30 @@ func (r *Registry) ListAppSnapshots() []metrics.AppSnapshot {
 			continue
 		}
 		out = append(out, metrics.AppSnapshot{
-			ID:               app.ID,
-			Name:             app.Name,
-			Status:           app.Status,
-			LastSyncAt:       app.LastSyncAt,
-			LastSyncError:    app.LastSyncError,
-			LastSeenCommit:   app.LastSeenCommit,
-			LastSyncedCommit: app.LastSyncedCommit,
+			ID:                 app.ID,
+			Name:               app.Name,
+			Status:             app.Status,
+			LastSyncAt:         app.LastSyncAt,
+			LastSyncError:      app.LastSyncError,
+			LastSyncErrorCode:  app.LastSyncErrorCode,
+			LastSyncErrorStage: app.LastSyncErrorStage,
+			LastSeenCommit:     app.LastSeenCommit,
+			LastSyncedCommit:   app.LastSyncedCommit,
 		})
 	}
 	return out
+}
+
+func enrichAppSyncError(app *api.App) {
+	if app == nil {
+		return
+	}
+	code, stage, msg := syncerr.Decode(app.LastSyncError)
+	app.LastSyncErrorCode = code
+	app.LastSyncErrorStage = stage
+	if msg != "" {
+		app.LastSyncError = msg
+	}
 }
 
 // Delete removes an application by ID.
@@ -409,6 +432,7 @@ func (r *Registry) SetSuspended(id string, suspended bool) error {
 }
 
 // UpdateSyncResult stores sync execution metadata.
+// syncError may be a plain string or syncerr.Encode(...) JSON.
 func (r *Registry) UpdateSyncResult(
 	id string,
 	status string,
@@ -428,6 +452,19 @@ func (r *Registry) UpdateSyncResult(
 		syncOutput,
 		syncError,
 	)
+}
+
+// UpdateSyncResultErr stores sync metadata with a structured error.
+func (r *Registry) UpdateSyncResultErr(
+	id string,
+	status string,
+	lastSyncAt time.Time,
+	syncedCommit string,
+	syncedCommitMessage string,
+	syncOutput string,
+	err error,
+) error {
+	return r.UpdateSyncResult(id, status, lastSyncAt, syncedCommit, syncedCommitMessage, syncOutput, syncerr.Encode(err))
 }
 
 // UpdateSyncProgress stores in-flight sync logs while status is syncing.

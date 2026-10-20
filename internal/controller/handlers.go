@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/compose"
+	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
 type registerAppRequest struct {
@@ -57,12 +58,19 @@ type RuntimeInspector interface {
 	InspectProjectContainers(ctx context.Context, projectName string) ([]compose.ServiceContainer, error)
 }
 
+// SyncGate limits concurrent syncs (optional; usually the Reconciler).
+type SyncGate interface {
+	AcquireSync(ctx context.Context) error
+	ReleaseSync()
+}
+
 // Handler handles HTTP requests for the controller.
 type Handler struct {
 	Registry  *Registry
 	Cleaner   RuntimeCleaner
 	Applier   RuntimeApplier
 	Inspector RuntimeInspector
+	SyncGate  SyncGate
 	Logger    *slog.Logger
 	Version   string
 }
@@ -401,6 +409,15 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 	syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	if h.SyncGate != nil {
+		if err := h.SyncGate.AcquireSync(syncCtx); err != nil {
+			_ = h.Registry.UpdateStatus(app.ID, "pending", nil)
+			http.Error(w, "sync queue timeout", http.StatusServiceUnavailable)
+			return
+		}
+		defer h.SyncGate.ReleaseSync()
+	}
+
 	progress := newSyncProgressReporter(h.Registry, h.Logger, app.ID, syncProgressFlushInterval)
 	output, err := h.Applier.Apply(
 		syncCtx,
@@ -417,18 +434,19 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 	)
 	progress.Flush()
 	if err != nil {
+		se := syncerr.Classify(err)
 		now := time.Now()
-		_ = h.Registry.UpdateSyncResult(
+		_ = h.Registry.UpdateSyncResultErr(
 			app.ID,
 			"error",
 			now,
 			app.LastSyncedCommit,
 			app.LastSyncedCommitMessage,
 			output,
-			err.Error(),
+			se,
 		)
 		if h.Logger != nil {
-			h.Logger.Error("Force sync failed", "id", app.ID, "error", err)
+			h.Logger.Error("Force sync failed", "id", app.ID, "code", se.Code, "stage", se.Stage, "error", err)
 		}
 		http.Error(w, "force sync failed", http.StatusInternalServerError)
 		return

@@ -6,38 +6,48 @@
 
 | Слой | Что |
 |------|-----|
-| **Config mgmt** | Только ConOps runtime: контроллер `conops` + CLI `cps` |
-| **Fleet-репо** | На каком хосте какие apps (repo/branch/path) |
-| **App-репо** | `docker-compose.yml`, конфиги, SOPS — desired state стека |
+| **Config mgmt** | Runtime: `conops` + `cps`, TLS, API token |
+| **Fleet-репо** | Какие apps на каком хосте |
+| **App-репо** | compose + опционально SOPS / vault refs |
 
 Подробности: [ARCHITECTURE.md](ARCHITECTURE.md). План: [ROADMAP.md](ROADMAP.md).
 
 ## Компоненты
 
-- **conops** — контроллер (HTTPS API + localhost metrics, fleet + app reconcile)
-- **cps** — CLI к API (`--token`, `cps config`)
+- **conops** — контроллер (HTTPS API, localhost metrics, fleet, sync)
+- **cps** — CLI (`--token`, `cps config`)
 
-## Локальная сборка
+## Режимы (`CONOPS_MODE`)
 
-```bash
-go build -o bin/conops ./cmd/conops
-go build -o bin/cps ./cmd/cps
-```
+| Mode | Поведение |
+|------|-----------|
+| `standalone` (default) | Полный контроллер на хосте |
+| `agent` | То же + heartbeat на hub (`CONOPS_HUB_URL`) |
+| `hub` | Агрегация агентов (`GET /api/v1/agents`), без локального reconcile |
 
 ## Быстрый старт CLI
 
 ```bash
-# конфиг: ~/.conops/config (можно из /etc/conops/secrets.env)
-sudo cps config init
-# или вручную:
-# cps config set-context --name local --url https://127.0.0.1:8443 --token "$TOKEN" --insecure-skip-tls-verify
-
-cps check
+cps config set-context --name local \
+  --url https://127.0.0.1:8443 \
+  --token "$(cat bootstrap_token)" \
+  --insecure-skip-tls-verify
 cps get apps
-cps reconcile app my-app
 ```
 
-Metrics/healthz: `http://127.0.0.1:8081/metrics`, `/healthz`.
+Metrics: `http://127.0.0.1:8081/metrics` · Health: `/healthz`
+
+## Важные env (v1)
+
+| Env | Назначение |
+|-----|------------|
+| `CONOPS_API_TOKEN` / `bootstrap_token` | Bearer API |
+| `CONOPS_MAX_CONCURRENT_SYNCS` | Лимит параллельных sync (default 2) |
+| `CONOPS_WEBHOOK_SECRET` | Включает `POST /api/v1/hooks/git` |
+| `CONOPS_SOPS_AGE_KEY_FILE` / `CONOPS_SOPS` | SOPS decrypt в runtime checkout |
+| `CONOPS_VAULT_ADDR` + `CONOPS_VAULT_TOKEN` | Resolve `vault://path#key` в env |
+| `CONOPS_FLEET_REPO_URL` | Fleet GitOps |
+| `CONOPS_MODE` / `CONOPS_HUB_URL` | agent/hub |
 
 ## Лицензия
 
