@@ -1,0 +1,21 @@
+name: mirror to gitlab
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: push to gitlab
+        env:
+          GITLAB_MIRROR_TOKEN: ${{ secrets.GITLAB_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add gitlab "https://oauth2:${GITLAB_MIRROR_TOKEN}@git.tenkocrm.online/tenko/infra/conops.git"
+          git push --force gitlab HEAD:refs/heads/main
+          git push --force --tags gitlab
