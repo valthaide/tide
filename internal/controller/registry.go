@@ -348,6 +348,17 @@ func (r *Registry) UpdateStatus(id, status string, lastSyncAt *time.Time) error 
 	return r.store.UpdateAppStatus(context.Background(), id, status, lastSyncAt)
 }
 
+// SetSuspended pauses or resumes automatic git polling and reconciliation.
+func (r *Registry) SetSuspended(id string, suspended bool) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	if _, err := r.Get(id); err != nil {
+		return err
+	}
+	return r.store.SetAppSuspended(context.Background(), id, suspended)
+}
+
 // UpdateSyncResult stores sync execution metadata.
 func (r *Registry) UpdateSyncResult(
 	id string,

@@ -7,8 +7,7 @@
 - Web UI удалён (`/ui`, `web/`, `internal/ui`).
 - CLI → `cps`, контроллер → `conops`.
 - Flux-стиль: `get`, `create`, `patch`, `reconcile`, `delete`.
-- Дополнительно: `check`, `get controller`, контейнеры в `get app`, `logs`, `wait`, `export`.
-- Позже: `suspend` / `resume` poll.
+- Дополнительно: `check`, `get controller`, контейнеры в `get app`, `logs`, `wait`, `export`, `suspend` / `resume`.
 
 ## 2. `GET /healthz` (liveness) — DONE
 

@@ -91,9 +91,16 @@ func truncate(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
+func suspendedValue(app api.App) string {
+	if app.Suspended {
+		return "True"
+	}
+	return "False"
+}
+
 func printAppsTable(apps []api.App) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tREADY\tSTATUS\tDRIFT\tREVISION\tLAST SYNC\tMESSAGE")
+	fmt.Fprintln(w, "NAME\tREADY\tSTATUS\tSUSPENDED\tDRIFT\tREVISION\tLAST SYNC\tMESSAGE")
 	for _, app := range apps {
 		rev := shortCommit(app.LastSyncedCommit)
 		if rev == "" {
@@ -102,10 +109,11 @@ func printAppsTable(apps []api.App) {
 		if rev == "" {
 			rev = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			app.Name,
 			readyValue(app),
 			app.Status,
+			suspendedValue(app),
 			driftValue(app),
 			rev,
 			relativeTime(app.LastSyncAt),
@@ -120,6 +128,7 @@ func printAppDetail(app api.App) {
 	fmt.Printf("ID:             %s\n", app.ID)
 	fmt.Printf("Ready:          %s\n", readyValue(app))
 	fmt.Printf("Status:         %s\n", app.Status)
+	fmt.Printf("Suspended:      %s\n", suspendedValue(app))
 	fmt.Printf("Drift:          %s\n", driftValue(app))
 	fmt.Printf("Repo:           %s\n", app.RepoURL)
 	fmt.Printf("Auth:           %s\n", app.RepoAuthMethod)

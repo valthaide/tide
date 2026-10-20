@@ -71,6 +71,9 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "last_sync_error TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "suspended INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
@@ -114,10 +117,15 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, app *api.App) error {
 		last_sync_output,
 		last_sync_error,
 		last_sync_at,
-		status
+		status,
+		suspended
 	)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
+	suspended := 0
+	if app.Suspended {
+		suspended = 1
+	}
 	_, err := s.db.ExecContext(
 		ctx,
 		query,
@@ -136,6 +144,7 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, app *api.App) error {
 		app.LastSyncError,
 		app.LastSyncAt,
 		app.Status,
+		suspended,
 	)
 	return err
 }
@@ -157,13 +166,15 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		COALESCE(last_sync_output, ''),
 		COALESCE(last_sync_error, ''),
 		last_sync_at,
-		status
+		status,
+		COALESCE(suspended, 0)
 	FROM apps
 	WHERE id = ?
 	`
 	row := s.db.QueryRowContext(ctx, query, id)
 
 	var app api.App
+	var suspended int
 	err := row.Scan(
 		&app.ID,
 		&app.Name,
@@ -180,10 +191,12 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		&app.LastSyncError,
 		&app.LastSyncAt,
 		&app.Status,
+		&suspended,
 	)
 	if err != nil {
 		return nil, err
 	}
+	app.Suspended = suspended != 0
 	return &app, nil
 }
 
@@ -204,7 +217,8 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(last_sync_output, ''),
 		COALESCE(last_sync_error, ''),
 		last_sync_at,
-		status
+		status,
+		COALESCE(suspended, 0)
 	FROM apps
 	`
 	rows, err := s.db.QueryContext(ctx, query)
@@ -216,6 +230,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 	var apps []*api.App
 	for rows.Next() {
 		var app api.App
+		var suspended int
 		if err := rows.Scan(
 			&app.ID,
 			&app.Name,
@@ -232,9 +247,11 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.LastSyncError,
 			&app.LastSyncAt,
 			&app.Status,
+			&suspended,
 		); err != nil {
 			continue
 		}
+		app.Suspended = suspended != 0
 		apps = append(apps, &app)
 	}
 	return apps, nil
@@ -265,6 +282,25 @@ func (s *SQLiteStore) DeleteApp(ctx context.Context, id string) error {
 	}
 
 	return tx.Commit()
+}
+
+func (s *SQLiteStore) SetAppSuspended(ctx context.Context, id string, suspended bool) error {
+	value := 0
+	if suspended {
+		value = 1
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE apps SET suspended = ? WHERE id = ?`, value, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
 }
 
 func (s *SQLiteStore) UpdateApp(ctx context.Context, id, name, branch, composePath, pollInterval string) error {

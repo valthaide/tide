@@ -27,6 +27,7 @@ var exportAppCmd = &cobra.Command{
 			"branch":           app.Branch,
 			"compose_path":     app.ComposePath,
 			"poll_interval":    app.PollInterval,
+			"suspended":        app.Suspended,
 		}
 		// Always JSON for export (backup/transfer).
 		if err := printJSON(manifest); err != nil {

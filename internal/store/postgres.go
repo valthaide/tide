@@ -78,6 +78,9 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_sync_error TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+		return err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
@@ -120,9 +123,10 @@ func (s *PostgresStore) CreateApp(ctx context.Context, app *api.App) error {
 		last_sync_output,
 		last_sync_error,
 		last_sync_at,
-		status
+		status,
+		suspended
 	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	`
 	_, err := s.pool.Exec(
 		ctx,
@@ -142,6 +146,7 @@ func (s *PostgresStore) CreateApp(ctx context.Context, app *api.App) error {
 		app.LastSyncError,
 		app.LastSyncAt,
 		app.Status,
+		app.Suspended,
 	)
 	return err
 }
@@ -163,7 +168,8 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		COALESCE(last_sync_output, ''),
 		COALESCE(last_sync_error, ''),
 		last_sync_at,
-		status
+		status,
+		COALESCE(suspended, FALSE)
 	FROM apps
 	WHERE id = $1
 	`
@@ -186,6 +192,7 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		&app.LastSyncError,
 		&app.LastSyncAt,
 		&app.Status,
+		&app.Suspended,
 	)
 	if err != nil {
 		return nil, err
@@ -210,7 +217,8 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(last_sync_output, ''),
 		COALESCE(last_sync_error, ''),
 		last_sync_at,
-		status
+		status,
+		COALESCE(suspended, FALSE)
 	FROM apps
 	`
 	rows, err := s.pool.Query(ctx, query)
@@ -238,6 +246,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.LastSyncError,
 			&app.LastSyncAt,
 			&app.Status,
+			&app.Suspended,
 		); err != nil {
 			continue
 		}
@@ -252,6 +261,17 @@ func (s *PostgresStore) DeleteApp(ctx context.Context, id string) error {
 	}
 	query := `DELETE FROM apps WHERE id = $1`
 	ct, err := s.pool.Exec(ctx, query, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetAppSuspended(ctx context.Context, id string, suspended bool) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE apps SET suspended = $1 WHERE id = $2`, suspended, id)
 	if err != nil {
 		return err
 	}

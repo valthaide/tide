@@ -316,6 +316,39 @@ func (h *Handler) UpdateApp(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// SuspendApp handles POST /api/v1/apps/{id}/suspend.
+func (h *Handler) SuspendApp(w http.ResponseWriter, r *http.Request) {
+	h.setSuspended(w, r, true)
+}
+
+// ResumeApp handles POST /api/v1/apps/{id}/resume.
+func (h *Handler) ResumeApp(w http.ResponseWriter, r *http.Request) {
+	h.setSuspended(w, r, false)
+}
+
+func (h *Handler) setSuspended(w http.ResponseWriter, r *http.Request, suspended bool) {
+	id := chi.URLParam(r, "id")
+	if err := h.Registry.SetSuspended(id, suspended); err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	msg := "App resumed"
+	if suspended {
+		msg = "App suspended"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.APIResponse{Message: msg, Data: app})
+}
+
 // ForceSyncApp handles POST /api/v1/apps/{id}/sync.
 func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 	if h.Applier == nil {

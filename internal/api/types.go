@@ -19,7 +19,8 @@ type App struct {
 	LastSyncOutput          string    `json:"last_sync_output"`
 	LastSyncError           string    `json:"last_sync_error"`
 	LastSyncAt              time.Time `json:"last_sync_at"`
-	Status                  string    `json:"status"` // e.g., "active", "error"
+	Status                  string    `json:"status"` // e.g., "synced", "pending", "error"
+	Suspended               bool      `json:"suspended"`
 }
 
 // APIResponse is a standard wrapper for API responses.

@@ -121,6 +121,9 @@ func (r *Reconciler) reconcileOnce() {
 
 	apps := r.Registry.List()
 	for _, app := range apps {
+		if app.Suspended {
+			continue
+		}
 		if app.Status == "syncing" {
 			if r.syncLooksStale(app) {
 				r.requeuePending(app, "recovering_interrupted_sync")

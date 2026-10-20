@@ -31,11 +31,15 @@ cps get app my-app
 cps logs app my-app --tail 50
 cps reconcile app my-app
 cps wait app my-app --timeout 5m
+cps suspend app my-app
+cps resume app my-app
 cps export app my-app > app.json
 cps create app -f app.json
 cps patch app my-app --branch main
 cps delete app my-app
 ```
+
+Подключение CLI → контроллер: HTTP на `--url` / `CONOPS_URL` (по умолчанию `http://127.0.0.1:8080`), без auth.
 
 Сборка локально:
 

@@ -46,6 +46,14 @@ func (w *GitWatcher) Start(ctx context.Context) {
 		activeIDs := make(map[string]bool)
 
 		for _, app := range apps {
+			if app.Suspended {
+				if cancel, running := pollers[app.ID]; running {
+					cancel()
+					delete(pollers, app.ID)
+					w.Logger.Info("Stopped app poller (suspended)", "id", app.ID)
+				}
+				continue
+			}
 			activeIDs[app.ID] = true
 			if _, running := pollers[app.ID]; !running {
 				// Start a new poller for this app

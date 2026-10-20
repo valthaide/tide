@@ -115,6 +115,8 @@ func main() {
 			r.Get("/{id}/containers", appHandler.ListAppContainers)
 			r.Patch("/{id}", appHandler.UpdateApp)
 			r.Post("/{id}/sync", appHandler.ForceSyncApp)
+			r.Post("/{id}/suspend", appHandler.SuspendApp)
+			r.Post("/{id}/resume", appHandler.ResumeApp)
 			r.Delete("/{id}", appHandler.DeleteApp)
 		})
 	})
