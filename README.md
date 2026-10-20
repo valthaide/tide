@@ -1,61 +1,43 @@
 # ConOps
 
-Приватный форк [ConOps](https://github.com/anuragxxd/conops) — GitOps-контроллер для Docker Compose без Kubernetes.
+Приватный форк [ConOps](https://github.com/anuragxxd/conops) — GitOps-контроллер для Docker Compose (модель близка к Flux, без Kubernetes).
 
-Указываете Git-репозиторий с `docker-compose.yml`: ConOps клонирует его, поднимает стек, следит за коммитами и сам чинит drift контейнеров.
+## Модель
+
+| Слой | Что |
+|------|-----|
+| **Puppet** | Только ConOps runtime: контроллер `conops` + CLI `cps` |
+| **Fleet-репо** | На каком хосте какие apps (repo/branch/path) |
+| **App-репо** | `docker-compose.yml`, конфиги, SOPS — desired state стека |
+
+Подробности: [ARCHITECTURE.md](ARCHITECTURE.md). План работ: [ROADMAP.md](ROADMAP.md).
 
 ## Компоненты
 
-- **conops** — контроллер (контейнер): API, reconciler, `/healthz`, `/metrics`
-- **cps** — CLI к контроллеру (в духе flux)
+- **conops** — контроллер на хосте (reconcile fleet + app repos, compose)
+- **cps** — CLI к API контроллера
 
-Web UI нет: операторский UX — CLI + метрики.
-
-## Быстрый старт (контроллер)
+## Локальная сборка
 
 ```bash
+go build -o bin/conops ./cmd/conops
+go build -o bin/cps ./cmd/cps
 docker compose up -d --build
 ```
 
-API: http://127.0.0.1:8080 (только localhost).
-
-## CLI (`cps`)
+## CLI (сейчас)
 
 ```bash
-export CONOPS_URL=http://127.0.0.1:8080   # или --url
+export CONOPS_URL=http://127.0.0.1:8080
 
 cps check
-cps get controller
 cps get apps
 cps get app my-app
-cps logs app my-app --tail 50
 cps reconcile app my-app
-cps wait app my-app --timeout 5m
-cps suspend app my-app
-cps resume app my-app
-cps export app my-app > app.json
-cps create app -f app.json
-cps patch app my-app --branch main
-cps delete app my-app
+cps suspend app my-app && cps resume app my-app
 ```
 
-Подключение CLI → контроллер: HTTP на `--url` / `CONOPS_URL` (по умолчанию `http://127.0.0.1:8080`), без auth.
-
-Сборка локально:
-
-```bash
-go build -o bin/cps ./cmd/cps
-go build -o bin/conops ./cmd/conops
-```
-
-## Метрики и health
-
-- `GET /healthz` — liveness (процесс + БД)
-- `GET /metrics` — Prometheus
-
-## Roadmap
-
-См. [ROADMAP.md](ROADMAP.md).
+Целевое подключение: HTTPS API + Bearer token + `cps config` contexts (см. architecture).
 
 ## Лицензия
 
