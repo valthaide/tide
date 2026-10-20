@@ -99,8 +99,18 @@ func suspendedValue(app api.App) string {
 }
 
 func printAppsTable(apps []api.App) {
+	color := colorEnabled()
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tREADY\tSTATUS\tSUSPENDED\tDRIFT\tREVISION\tLAST SYNC\tMESSAGE")
+	fmt.Fprintln(w, strings.Join([]string{
+		colorHeader(color, "NAME"),
+		colorHeader(color, "READY"),
+		colorHeader(color, "STATUS"),
+		colorHeader(color, "SUSPENDED"),
+		colorHeader(color, "DRIFT"),
+		colorHeader(color, "REVISION"),
+		colorHeader(color, "LAST SYNC"),
+		colorHeader(color, "MESSAGE"),
+	}, "\t"))
 	for _, app := range apps {
 		rev := shortCommit(app.LastSyncedCommit)
 		if rev == "" {
@@ -110,14 +120,14 @@ func printAppsTable(apps []api.App) {
 			rev = "-"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			app.Name,
-			readyValue(app),
-			app.Status,
-			suspendedValue(app),
-			driftValue(app),
-			rev,
-			relativeTime(app.LastSyncAt),
-			messageFor(app),
+			colorData(color, app.Name),
+			paintReady(color, readyValue(app)),
+			colorData(color, app.Status),
+			paintBool(color, suspendedValue(app)),
+			paintBool(color, driftValue(app)),
+			colorData(color, rev),
+			colorData(color, relativeTime(app.LastSyncAt)),
+			colorData(color, messageFor(app)),
 		)
 	}
 	_ = w.Flush()

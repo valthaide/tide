@@ -31,7 +31,7 @@ func init() {
 	rootCmd.PersistentFlags().String("url", "", "Controller URL (default from cps config or https://127.0.0.1:8443)")
 	rootCmd.PersistentFlags().String("token", "", "API bearer token (or CONOPS_TOKEN / cps config)")
 	rootCmd.PersistentFlags().String("context", "", "cps config context name")
-	rootCmd.PersistentFlags().String("config", "", "Path to cps config file")
+	rootCmd.PersistentFlags().String("config", "", "Path to cps config file (default ~/.conops/config)")
 	rootCmd.PersistentFlags().Bool("insecure", false, "Skip TLS certificate verification")
 	rootCmd.PersistentFlags().String("certificate-authority", "", "Path to CA certificate for HTTPS")
 	rootCmd.PersistentFlags().StringP("output", "o", "table", "Output format: table|json")

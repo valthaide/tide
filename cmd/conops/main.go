@@ -132,8 +132,10 @@ func main() {
 	apiRouter.Use(auth.Middleware)
 	apiRouter.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nUse CLI: cps\n"))
+		_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nHealth: /healthz\nUse CLI: cps\n"))
 	})
+	// Same health payload as metrics listener, behind Bearer (for cps check).
+	apiRouter.Get("/healthz", appHandler.Healthz)
 	apiRouter.Route("/api/v1", func(r chi.Router) {
 		r.Route("/apps", func(r chi.Router) {
 			r.Post("/", appHandler.RegisterApp)

@@ -3,10 +3,11 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"github.com/valthaide/conops-private/internal/api"
 )
 
@@ -20,16 +21,25 @@ var checkCmd = &cobra.Command{
 
 func printControllerStatus() error {
 	client := NewClient()
-	url := viper.GetString("url")
+	url := client.BaseURL
 	resp, err := client.Get("/healthz")
 	if err != nil {
 		return fmt.Errorf("controller unreachable at %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read /healthz: %w", err)
+	}
+
 	var health api.HealthStatus
-	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
-		return fmt.Errorf("decode /healthz: %w", err)
+	if err := json.Unmarshal(body, &health); err != nil {
+		snippet := strings.TrimSpace(string(body))
+		if len(snippet) > 120 {
+			snippet = snippet[:120] + "…"
+		}
+		return fmt.Errorf("decode /healthz (HTTP %d): %w; body=%q", resp.StatusCode, err, snippet)
 	}
 
 	if outputFormat() == "json" {

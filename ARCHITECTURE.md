@@ -87,18 +87,19 @@ ConOps на хосте читает только свой host-документ 
 ### cps-config (аналог kubeconfig)
 
 ```yaml
-# ~/.config/cps/config.yaml
+# ~/.conops/config
 current-context: app-01
 contexts:
   app-01:
     url: https://conops.app-01.example.internal:8443
     token: cps_…
-    certificate-authority: ~/.config/cps/ca.crt  # опционально
+    certificate-authority: ~/.conops/ca.crt  # опционально
 ```
 
 ```bash
-cps config use-context app-01
-cps --context app-01 get apps
+# из /etc/conops/secrets.env (нужны права на чтение файла)
+sudo cps config init
+cps get apps
 ```
 
 ---

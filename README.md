@@ -27,12 +27,10 @@ go build -o bin/cps ./cmd/cps
 ## Быстрый старт CLI
 
 ```bash
-# после старта conops: token в ./bootstrap_token (или CONOPS_API_TOKEN)
-cps config set-context --name local \
-  --url https://127.0.0.1:8443 \
-  --token "$(cat bootstrap_token)" \
-  --insecure-skip-tls-verify
-cps config use-context local
+# конфиг: ~/.conops/config (можно из /etc/conops/secrets.env)
+sudo cps config init
+# или вручную:
+# cps config set-context --name local --url https://127.0.0.1:8443 --token "$TOKEN" --insecure-skip-tls-verify
 
 cps check
 cps get apps
