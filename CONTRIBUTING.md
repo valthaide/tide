@@ -11,7 +11,7 @@ cd conops-private
 go run ./cmd/conops
 go test ./...
 go build -o bin/conops ./cmd/conops
-go build -o bin/conops-ctl ./cmd/conops-ctl
+go build -o bin/cps ./cmd/cps
 ```
 
 ## Code Style

@@ -1,5 +1,5 @@
 version: 2
-project_name: conops-ctl
+project_name: cps
 builds:
   - env:
       - CGO_ENABLED=0
@@ -10,10 +10,10 @@ builds:
     goarch:
       - amd64
       - arm64
-    main: ./cmd/conops-ctl
-    binary: conops-ctl
+    main: ./cmd/cps
+    binary: cps
     ldflags:
-      - -s -w -X github.com/valthaide/conops-private/cmd/conops-ctl/cmd.Version={{.Version}}
+      - -s -w -X github.com/valthaide/conops-private/cmd/cps/cmd.Version={{.Version}}
 
 archives:
   - format: tar.gz

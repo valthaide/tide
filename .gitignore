@@ -7,4 +7,6 @@ site/dist
 site/node_modules
 site/src/README.md
 .DS_Store
-conops-ctl
+/bin/
+/cps
+/conops

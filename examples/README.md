@@ -46,17 +46,17 @@ This configuration:
 
 ## CLI Examples
 
-### Using conops-ctl
+### Using cps
 
 ```bash
-# List all registered apps
-./bin/conops-ctl apps list
+# List apps
+./bin/cps get apps
 
 # Register an app from JSON file
-./bin/conops-ctl apps add examples/basic-app.json
+./bin/cps create app -f examples/basic-app.json
 
-# Delete an app by ID
-./bin/conops-ctl apps delete <app-id>
+# Delete an app by name or ID
+./bin/cps delete app <name-or-id>
 ```
 
 ## Common Use Cases

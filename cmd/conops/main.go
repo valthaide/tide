@@ -8,15 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/controller"
 	"github.com/valthaide/conops-private/internal/credentials"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/store"
-	"github.com/valthaide/conops-private/internal/ui"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 func main() {
@@ -24,7 +23,6 @@ func main() {
 
 	dataDir := "/data"
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		// Fallback for local development if /data doesn't exist
 		dataDir = "."
 	}
 
@@ -45,9 +43,7 @@ func main() {
 		}
 		logger.Info("Using PostgreSQL store")
 	} else {
-		// Default to SQLite
 		dbPath := filepath.Join(dataDir, "conops.db")
-
 		dbStore, err = store.NewSQLiteStore(dbPath)
 		if err != nil {
 			logger.Error("Failed to initialize sqlite store", "error", err)
@@ -66,7 +62,6 @@ func main() {
 
 	registry := controller.NewRegistry(dbStore, credentialService)
 
-	// Start Git Watcher
 	watcher := controller.NewGitWatcher(registry, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -97,36 +92,15 @@ func main() {
 	}
 
 	r := chi.NewRouter()
-
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
 	appHandler := controller.NewHandler(registry, executor, executor, logger)
-	uiHandler, err := ui.NewHandler(registry, executor, "web/templates")
-	if err != nil {
-		logger.Error("Failed to initialize UI handler", "error", err)
-		os.Exit(1)
-	}
 
 	r.Handle("/metrics", metrics.Handler(promRegistry))
-
-	// UI Routes
-	r.Route("/ui", func(r chi.Router) {
-		r.Get("/apps", uiHandler.ServeAppsPage)
-		r.Get("/apps/new", uiHandler.ServeNewAppPage)
-		r.Get("/apps/fragment", uiHandler.ServeAppsFragment)
-		r.Get("/apps/{id}", uiHandler.ServeAppDetailPage)
-		r.Get("/apps/{id}/fragment", uiHandler.ServeAppDetailFragment)
-		r.Get("/apps/{id}/edit", uiHandler.ServeEditAppPage)
-		r.Post("/apps", uiHandler.HandleAddApp)
-		r.Post("/apps/add", uiHandler.HandleAddApp)
-		r.Post("/apps/{id}/edit", uiHandler.HandleEditApp)
-		r.Handle("/static/*", http.StripPrefix("/ui/static/", http.FileServer(http.Dir("web/static"))))
-	})
-
-	// Redirect root to UI
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/ui/apps", http.StatusFound)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ConOps controller\nAPI: /api/v1/apps\nMetrics: /metrics\nUse CLI: cps\n"))
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {

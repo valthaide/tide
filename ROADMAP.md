@@ -1,18 +1,14 @@
 # Ближайшие изменения
 
-Зафиксировано 2026-10-20. Порядок ≈ приоритет реализации.
+Зафиксировано 2026-10-20. Тег релиза — только после закрытия всего списка.
 
-## 1. Убрать UI, усилить CLI
+## 1. Убрать UI, усилить CLI — DONE
 
-- Удалить Web UI (`/ui`, `web/templates`, связанные handler’ы).
-- Источник правды для оператора: CLI + API + `/metrics`.
-- Улучшить CLI: статус apps, drift, last error, sync; удобный `list`/`get` (в духе flux).
-- **Имена бинарников:**
-  - CLI → `cps` (вместо `conops-ctl`)
-  - контроллер в контейнере → `conops` (без переименования)
-- Обновить `install.sh`, `.goreleaser.yaml`, README.
+- Web UI удалён (`/ui`, `web/`, `internal/ui`).
+- CLI → `cps` (вместо `conops-ctl`), контроллер → `conops`.
+- Команды в духе flux: `get`, `create`, `patch`, `reconcile`, `delete`.
 
-## 2. `GET /healthz` (liveness)
+## 2. `GET /healthz` (liveness) — TODO
 
 Отдельно от `/metrics`:
 
@@ -21,7 +17,7 @@
 
 Для Puppet/compose/systemd healthcheck.
 
-## 3. HTTPS Git + token
+## 3. HTTPS Git + token — TODO
 
 Рядом с `deploy_key`:
 
@@ -30,7 +26,7 @@
 - хранение token как у deploy key (AES-GCM);
 - без `known_hosts` / SSH.
 
-## 4. Алерто-ready метрики
+## 4. Алерто-ready метрики — TODO
 
 Дополнить существующий `/metrics`:
 
@@ -40,4 +36,4 @@
 
 ---
 
-Вне этого списка пока не расширять scope (auth UI не нужен после удаления UI; SOPS/webhooks — следующей очередью).
+Вне этого списка пока не расширять scope.

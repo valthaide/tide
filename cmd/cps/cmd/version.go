@@ -6,12 +6,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// versionCmd represents the version command
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Print the version number of conops-ctl",
+	Short: "Print cps version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("conops-ctl v0.1.0")
+		fmt.Println(Version)
 	},
 }
 

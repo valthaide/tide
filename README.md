@@ -4,30 +4,52 @@
 
 Указываете Git-репозиторий с `docker-compose.yml`: ConOps клонирует его, поднимает стек, следит за коммитами и сам чинит drift контейнеров.
 
-## Что умеет этот форк
+## Компоненты
 
-- SSH deploy keys для GitHub, GitLab и self-hosted Git
-- Prometheus-метрики: `GET /metrics`
-- UI / REST API / CLI (`conops-ctl`)
+- **conops** — контроллер (контейнер): API, reconciler, `/metrics`
+- **cps** — CLI к контроллеру (в духе flux)
 
-## Быстрый старт
+Web UI убран: операторский UX — CLI + метрики.
+
+## Быстрый старт (контроллер)
 
 ```bash
 docker compose up -d --build
 ```
 
-UI: http://127.0.0.1:8080 (только localhost — auth нет, есть доступ к Docker socket).
+API: http://127.0.0.1:8080 (только localhost).
 
-CLI:
+## CLI (`cps`)
 
 ```bash
-curl -sfL https://raw.githubusercontent.com/valthaide/conops-private/master/install.sh | sh
-conops-ctl apps list
+# после релиза с бинарником cps:
+# curl -sfL .../install.sh | sh
+
+export CONOPS_URL=http://127.0.0.1:8080   # или --url
+
+cps get apps
+cps get app my-app
+cps get app my-app -o json
+cps create app -f app.json
+cps patch app my-app --branch main
+cps reconcile app my-app
+cps delete app my-app
+```
+
+Сборка локально:
+
+```bash
+go build -o bin/cps ./cmd/cps
+go build -o bin/conops ./cmd/conops
 ```
 
 ## Метрики
 
-`GET /metrics` — статусы apps, drift коммитов, ошибки sync, длительность sync, счётчик reconcile-циклов.
+`GET /metrics` — статусы apps, drift, ошибки/длительность sync, reconcile loops.
+
+## Roadmap
+
+См. [ROADMAP.md](ROADMAP.md).
 
 ## Лицензия
 
