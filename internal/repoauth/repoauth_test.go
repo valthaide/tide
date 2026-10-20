@@ -38,7 +38,7 @@ func TestParseSSHEndpoint(t *testing.T) {
 	}{
 		{url: "git@github.com:org/repo.git", wantHost: "github.com", wantPort: "22"},
 		{url: "git@gitlab.com:group/project.git", wantHost: "gitlab.com", wantPort: "22"},
-		{url: "git@git.tenkocrm.online:tenko/infra/puppet.git", wantHost: "git.tenkocrm.online", wantPort: "22"},
+		{url: "git@git.example.com:group/infra/puppet.git", wantHost: "git.example.com", wantPort: "22"},
 		{url: "ssh://git@git.example.com:2222/group/repo.git", wantHost: "git.example.com", wantPort: "2222"},
 		{url: "ssh://git@gitlab.com/group/repo.git", wantHost: "gitlab.com", wantPort: "22"},
 		{url: "https://github.com/org/repo.git", wantHost: "github.com", wantPort: ""},
@@ -72,7 +72,7 @@ func TestValidateCreateInputAllowsNonGitHubSSH(t *testing.T) {
 
 	cases := []string{
 		"git@gitlab.com:group/repo.git",
-		"git@git.tenkocrm.online:tenko/app.git",
+		"git@git.example.com:group/app.git",
 		"ssh://git@git.example.com:2222/group/repo.git",
 		"git@github.com:org/repo.git",
 	}
@@ -92,14 +92,14 @@ func TestValidateCreateInputRejectsHTTPSDeployKey(t *testing.T) {
 }
 
 func TestKnownHostsContainsAndFormat(t *testing.T) {
-	endpoint := SSHEndpoint{Host: "git.tenkocrm.online", Port: "22"}
+	endpoint := SSHEndpoint{Host: "git.example.com", Port: "22"}
 	content := "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
 	if knownHostsContains(content, endpoint) {
 		t.Fatal("expected host missing")
 	}
 
 	line := formatKnownHostsEntry(endpoint, githubFallbackSSHKeys[0])
-	if !strings.HasPrefix(line, "git.tenkocrm.online ssh-ed25519 ") {
+	if !strings.HasPrefix(line, "git.example.com ssh-ed25519 ") {
 		t.Fatalf("unexpected known_hosts line: %s", line)
 	}
 	if !knownHostsContains(content+"\n"+line+"\n", endpoint) {
@@ -119,7 +119,7 @@ func TestKnownHostsContainsAndFormat(t *testing.T) {
 func TestResolveKnownHostsForRepoUsesSeedFile(t *testing.T) {
 	dir := t.TempDir()
 	seed := filepath.Join(dir, "known_hosts")
-	endpoint := SSHEndpoint{Host: "git.tenkocrm.online", Port: "22"}
+	endpoint := SSHEndpoint{Host: "git.example.com", Port: "22"}
 	line := formatKnownHostsEntry(endpoint, githubFallbackSSHKeys[0]) + "\n"
 	if err := os.WriteFile(seed, []byte(line), 0600); err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestResolveKnownHostsForRepoUsesSeedFile(t *testing.T) {
 	managedKnownHosts.path = ""
 	managedKnownHosts.mu.Unlock()
 
-	path, err := ResolveKnownHostsForRepo("git@git.tenkocrm.online:tenko/infra/puppet.git")
+	path, err := ResolveKnownHostsForRepo("git@git.example.com:group/infra/puppet.git")
 	if err != nil {
 		t.Fatalf("ResolveKnownHostsForRepo: %v", err)
 	}
