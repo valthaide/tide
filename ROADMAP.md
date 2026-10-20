@@ -8,8 +8,8 @@
 - Источник правды для оператора: CLI + API + `/metrics`.
 - Улучшить CLI: статус apps, drift, last error, sync; удобный `list`/`get` (в духе flux).
 - **Имена бинарников:**
-  - CLI → `conops` (вместо `conops-ctl`)
-  - контроллер/daemon → `conopsd` (сейчас `cmd/conops`)
+  - CLI → `cps` (вместо `conops-ctl`)
+  - контроллер в контейнере → `conops` (без переименования)
 - Обновить `install.sh`, `.goreleaser.yaml`, README.
 
 ## 2. `GET /healthz` (liveness)
