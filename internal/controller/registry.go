@@ -12,6 +12,7 @@ import (
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/credentials"
 	"github.com/valthaide/conops-private/internal/metrics"
+	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/repoauth"
 	"github.com/valthaide/conops-private/internal/store"
 	"github.com/valthaide/conops-private/internal/syncerr"
@@ -208,8 +209,9 @@ func enrichAppSyncError(app *api.App) {
 	app.LastSyncErrorCode = code
 	app.LastSyncErrorStage = stage
 	if msg != "" {
-		app.LastSyncError = msg
+		app.LastSyncError = redact.String(msg)
 	}
+	app.LastSyncOutput = redact.String(app.LastSyncOutput)
 }
 
 // Delete removes an application by ID.
@@ -335,6 +337,74 @@ func (r *Registry) GetAppEnvs(id string) (map[string]string, error) {
 // GetDeployKey returns the decrypted deploy key for the app if configured.
 func (r *Registry) GetDeployKey(id string) ([]byte, error) {
 	return r.GetRepoSecret(id)
+}
+
+// ClearRepoSecret removes stored deploy key / git token ciphertext (keeps env credentials).
+// Used for fleet-managed token apps that must read CONOPS_GIT_TOKEN from the process env.
+func (r *Registry) ClearRepoSecret(id string) error {
+	return r.store.ClearAppRepoSecret(context.Background(), id)
+}
+
+// UpdateRepoSecret encrypts and stores a new deploy key / git token for the app.
+func (r *Registry) UpdateRepoSecret(id, secret string) error {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return r.ClearRepoSecret(id)
+	}
+	app, err := r.Get(id)
+	if err != nil {
+		return err
+	}
+	if app.RepoAuthMethod == repoauth.MethodDeployKey {
+		secret = repoauth.NormalizeDeployKey(secret)
+	}
+	if r.credentials == nil || !r.credentials.Enabled() {
+		return fmt.Errorf("encryption support is unavailable: set %s", credentials.EncryptionKeyEnv)
+	}
+	plaintext := []byte(secret)
+	defer zeroBytes(plaintext)
+	ciphertext, nonce, err := r.credentials.Encrypt(plaintext)
+	if err != nil {
+		return err
+	}
+	cred := &store.AppCredential{
+		AppID:               id,
+		DeployKeyCiphertext: ciphertext,
+		DeployKeyNonce:      nonce,
+	}
+	return r.store.UpsertAppCredential(context.Background(), cred)
+}
+
+// UpdateEnvHash stores the last successfully applied external env_file content hash.
+func (r *Registry) UpdateEnvHash(id, hash string) error {
+	return r.store.UpdateAppEnvHash(context.Background(), id, hash)
+}
+
+// ResetStuckSyncing marks apps left in "syncing" after a process crash as pending.
+func (r *Registry) ResetStuckSyncing() int {
+	n := 0
+	for _, app := range r.List() {
+		if app == nil || app.Status != "syncing" {
+			continue
+		}
+		if err := r.UpdateStatus(app.ID, "pending", nil); err != nil {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// HasStoredRepoSecret reports whether encrypted repo credentials exist in the DB.
+func (r *Registry) HasStoredRepoSecret(id string) (bool, error) {
+	cred, err := r.store.GetAppCredential(context.Background(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrCredentialNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(cred.DeployKeyCiphertext) > 0, nil
 }
 
 // GetRepoSecret returns the decrypted deploy key or git token for the app.

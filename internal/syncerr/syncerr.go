@@ -15,8 +15,9 @@ const (
 	CodeSecretsSOPS  = "secrets_sops"
 	CodeSecretsVault = "secrets_vault"
 	CodeCredentials  = "credentials"
-	CodeTimeout      = "timeout"
-	CodeUnknown      = "unknown"
+	CodeTimeout        = "timeout"
+	CodeEnvFileMissing = "env_file_missing"
+	CodeUnknown        = "unknown"
 )
 
 // Stages of a sync pipeline.
@@ -151,6 +152,8 @@ func Classify(err error) *Error {
 	case strings.Contains(lower, "authentication") || strings.Contains(lower, "permission denied") ||
 		strings.Contains(lower, "invalid deploy key") || strings.Contains(lower, "git token"):
 		return New(CodeGitAuth, StageFetch, msg)
+	case strings.Contains(lower, "env_file missing") || strings.Contains(lower, "env_file_missing"):
+		return New(CodeEnvFileMissing, StageCompose, msg)
 	case strings.Contains(lower, "prepare repo") || strings.Contains(lower, "fetch") || strings.Contains(lower, "clone"):
 		return New(CodeGitFetch, StageFetch, msg)
 	case strings.Contains(lower, "sops"):

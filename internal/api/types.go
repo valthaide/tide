@@ -21,6 +21,7 @@ type App struct {
 	LastSyncErrorCode       string    `json:"last_sync_error_code,omitempty"`
 	LastSyncErrorStage      string    `json:"last_sync_error_stage,omitempty"`
 	LastSyncAt              time.Time `json:"last_sync_at"`
+	LastAppliedEnvHash      string    `json:"last_applied_env_hash,omitempty"`
 	Status                  string    `json:"status"` // e.g., "synced", "pending", "error"
 	Suspended               bool      `json:"suspended"`
 }
@@ -46,4 +47,19 @@ type HealthStatus struct {
 	Status  string `json:"status"`
 	Version string `json:"version"`
 	DB      string `json:"db"`
+}
+
+// Operation tracks an asynchronous reconcile.
+type Operation struct {
+	ID         string    `json:"id"`
+	AppID      string    `json:"app_id"`
+	AppName    string    `json:"app_name,omitempty"`
+	Kind       string    `json:"kind"` // reconcile
+	Status     string    `json:"status"` // pending|running|succeeded|failed
+	Code       string    `json:"code,omitempty"`
+	Stage      string    `json:"stage,omitempty"`
+	Message    string    `json:"message,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	StartedAt  time.Time `json:"started_at,omitempty"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
 }

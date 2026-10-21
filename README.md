@@ -8,7 +8,7 @@
 |------|-----|
 | **Config mgmt** | Runtime: `conops` + `cps`, TLS, API token |
 | **Fleet-репо** | Какие apps на каком хосте |
-| **App-репо** | compose + опционально SOPS / vault refs |
+| **App-репо** | compose + env_file / опционально vault refs |
 
 Подробности: [ARCHITECTURE.md](ARCHITECTURE.md). План: [ROADMAP.md](ROADMAP.md).
 
@@ -44,7 +44,7 @@ Metrics: `http://127.0.0.1:8081/metrics` · Health: `/healthz`
 | `CONOPS_API_TOKEN` / `bootstrap_token` | Bearer API |
 | `CONOPS_MAX_CONCURRENT_SYNCS` | Лимит параллельных sync (default 2) |
 | `CONOPS_WEBHOOK_SECRET` | Включает `POST /api/v1/hooks/git` |
-| `CONOPS_SOPS` / `CONOPS_SOPS_AGE_KEY` / `CONOPS_SOPS_AGE_KEY_FILE` | SOPS decrypt (`AGE_KEY` = inline, иначе file) |
+| `CONOPS_SOPS` | must stay unset/false (SOPS removed; secrets via Puppet/hiera-eyaml env files) |
 | `CONOPS_VAULT_ADDR` + `CONOPS_VAULT_TOKEN` | Resolve `vault://path#key` в env |
 | `CONOPS_FLEET_REPO_URL` | Fleet GitOps |
 | `CONOPS_MODE` / `CONOPS_HUB_URL` | agent/hub |

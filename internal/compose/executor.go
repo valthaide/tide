@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/repoauth"
 	"github.com/valthaide/conops-private/internal/secrets"
 	"github.com/valthaide/conops-private/internal/syncerr"
@@ -81,27 +82,27 @@ func (e *ComposeExecutor) Apply(
 		appendLogLine(&syncLog, "failed to resolve runtime directory")
 		appendLogLine(&syncLog, err.Error())
 		emitProgress()
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("resolve app dir failed: %w", err)
+		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("resolve app dir failed: %w", err)
 	}
-	if err := os.MkdirAll(appDirAbs, 0755); err != nil {
+	if err := os.MkdirAll(appDirAbs, 0700); err != nil {
 		appendLogSection(&syncLog, "Sync setup")
 		appendLogLine(&syncLog, "failed to create runtime directory")
 		appendLogLine(&syncLog, err.Error())
 		emitProgress()
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("failed to create app dir: %w", err)
+		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("failed to create app dir: %w", err)
 	}
 
 	if strings.TrimSpace(repoURL) == "" {
 		appendLogSection(&syncLog, "Validation")
 		appendLogLine(&syncLog, "repo url is empty")
 		emitProgress()
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("repo url is empty")
+		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("repo url is empty")
 	}
 	if strings.TrimSpace(composePath) == "" {
 		appendLogSection(&syncLog, "Validation")
 		appendLogLine(&syncLog, "compose path is empty")
 		emitProgress()
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("compose path is empty")
+		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("compose path is empty")
 	}
 	if strings.TrimSpace(branch) == "" {
 		branch = "main"
@@ -109,7 +110,7 @@ func (e *ComposeExecutor) Apply(
 
 	appendLogSection(&syncLog, "Sync started")
 	appendLogLine(&syncLog, fmt.Sprintf("app_id: %s", appID))
-	appendLogLine(&syncLog, fmt.Sprintf("repository: %s", repoURL))
+	appendLogLine(&syncLog, fmt.Sprintf("repository: %s", redact.StripUserinfoFromURL(repoURL)))
 	appendLogLine(&syncLog, fmt.Sprintf("branch: %s", branch))
 	if strings.TrimSpace(commitHash) != "" {
 		appendLogLine(&syncLog, fmt.Sprintf("target_commit: %s", commitHash))
@@ -124,7 +125,7 @@ func (e *ComposeExecutor) Apply(
 		appendLogLine(&syncLog, "failed")
 		appendLogLine(&syncLog, err.Error())
 		emitProgress()
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("docker preflight failed: %w", err)
+		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("docker preflight failed: %w", err)
 	}
 	for _, line := range preflight.LogLines() {
 		appendLogLine(&syncLog, line)
@@ -137,7 +138,7 @@ func (e *ComposeExecutor) Apply(
 	appendLogBlock(&syncLog, repoLog)
 	emitProgress()
 	if err != nil {
-		return strings.TrimSpace(syncLog.String()), syncerr.Wrap(syncerr.CodeGitFetch, syncerr.StageFetch, fmt.Errorf("prepare repo failed: %w", err))
+		return redact.String(strings.TrimSpace(syncLog.String())), syncerr.Wrap(syncerr.CodeGitFetch, syncerr.StageFetch, fmt.Errorf("prepare repo failed: %w", err))
 	}
 
 	if e.Secrets != nil {
@@ -146,13 +147,13 @@ func (e *ComposeExecutor) Apply(
 		if resErr != nil {
 			appendLogLine(&syncLog, resErr.Error())
 			emitProgress()
-			return strings.TrimSpace(syncLog.String()), syncerr.Wrap(syncerr.CodeSecretsVault, syncerr.StageSecrets, resErr)
+			return redact.String(strings.TrimSpace(syncLog.String())), syncerr.Wrap(syncerr.CodeSecretsVault, syncerr.StageSecrets, resErr)
 		}
 		envVars = resolved
 		if prepErr := e.Secrets.PrepareRepo(ctx, repoDir); prepErr != nil {
 			appendLogLine(&syncLog, prepErr.Error())
 			emitProgress()
-			return strings.TrimSpace(syncLog.String()), syncerr.Wrap(syncerr.CodeSecretsSOPS, syncerr.StageSecrets, prepErr)
+			return redact.String(strings.TrimSpace(syncLog.String())), syncerr.Wrap(syncerr.CodeSecretsSOPS, syncerr.StageSecrets, prepErr)
 		}
 		appendLogLine(&syncLog, "ok")
 		emitProgress()
@@ -165,7 +166,7 @@ func (e *ComposeExecutor) Apply(
 		appendLogLine(&syncLog, fmt.Sprintf("compose directory does not exist: %s", composeDir))
 		appendLogLine(&syncLog, err.Error())
 		emitProgress()
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("compose dir not found: %w", err)
+		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("compose dir not found: %w", err)
 	}
 
 	// Prepare env var override files if needed (must happen after composeDir is determined)
@@ -174,12 +175,12 @@ func (e *ComposeExecutor) Apply(
 
 	wroteCompose := false
 	if strings.TrimSpace(content) != "" {
-		if err := os.WriteFile(composeFullPath, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(composeFullPath, []byte(content), 0600); err != nil {
 			appendLogSection(&syncLog, "Compose file")
 			appendLogLine(&syncLog, fmt.Sprintf("failed to write compose file: %s", composeFullPath))
 			appendLogLine(&syncLog, err.Error())
 			emitProgress()
-			return strings.TrimSpace(syncLog.String()), fmt.Errorf("failed to write compose file: %w", err)
+			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("failed to write compose file: %w", err)
 		}
 		wroteCompose = true
 	} else {
@@ -188,7 +189,7 @@ func (e *ComposeExecutor) Apply(
 			appendLogLine(&syncLog, fmt.Sprintf("compose file not found: %s", composeFullPath))
 			appendLogLine(&syncLog, err.Error())
 			emitProgress()
-			return strings.TrimSpace(syncLog.String()), fmt.Errorf("compose file not found: %w", err)
+			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("compose file not found: %w", err)
 		}
 	}
 	composeFileName := filepath.Base(composeFullPath)
@@ -203,7 +204,7 @@ func (e *ComposeExecutor) Apply(
 			appendLogLine(&syncLog, "failed to prepare environment variables")
 			appendLogLine(&syncLog, envErr.Error())
 			emitProgress()
-			return strings.TrimSpace(syncLog.String()), fmt.Errorf("env prepare failed: %w", envErr)
+			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("env prepare failed: %w", envErr)
 		}
 		defer envFilesCleanup()
 	}
@@ -242,7 +243,7 @@ func (e *ComposeExecutor) Apply(
 		onProgress,
 	)
 	if err != nil {
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("pull failed: %w", err)
+		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("pull failed: %w", err)
 	}
 
 	// Up detached
@@ -266,13 +267,13 @@ func (e *ComposeExecutor) Apply(
 		onProgress,
 	)
 	if err != nil {
-		return strings.TrimSpace(syncLog.String()), fmt.Errorf("up failed: %w", err)
+		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("up failed: %w", err)
 	}
 
 	appendLogSection(&syncLog, "Sync completed")
 	appendLogLine(&syncLog, "application reconciled successfully")
 	emitProgress()
-	return strings.TrimSpace(syncLog.String()), nil
+	return redact.String(strings.TrimSpace(syncLog.String())), nil
 }
 
 // Destroy tears down app containers and networks without removing volumes.
@@ -403,8 +404,8 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 	cloneURL, gitEnv, cleanup, err := e.buildGitAuth(appDir, repoURL, repoAuthMethod, repoSecret)
 	if err != nil {
 		appendLogLine(&repoLog, "failed to configure git auth environment")
-		appendLogLine(&repoLog, err.Error())
-		return strings.TrimSpace(repoLog.String()), err
+		appendLogLine(&repoLog, redact.String(err.Error()))
+		return redact.String(strings.TrimSpace(repoLog.String())), err
 	}
 	defer cleanup()
 
@@ -412,7 +413,13 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		appendLogLine(&repoLog, "repository cache missing; cloning fresh copy")
 		err := e.cloneRepo(ctx, &repoLog, appDir, repoDir, cloneURL, branch, commitHash, gitEnv)
-		return strings.TrimSpace(repoLog.String()), err
+		return redact.String(strings.TrimSpace(repoLog.String())), err
+	}
+
+	if cleanErr := e.ensureCleanOriginURL(ctx, repoDir, cloneURL, gitEnv); cleanErr != nil {
+		appendLogLine(&repoLog, "failed to sanitize remote.origin.url")
+		appendLogLine(&repoLog, redact.String(cleanErr.Error()))
+		return redact.String(strings.TrimSpace(repoLog.String())), cleanErr
 	}
 
 	appendLogLine(&repoLog, "repository cache found; fetching latest refs")
@@ -425,13 +432,35 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 		appendLogLine(&repoLog, err.Error())
 		if rmErr := os.RemoveAll(repoDir); rmErr != nil {
 			appendLogLine(&repoLog, "failed to discard repository cache")
-			return strings.TrimSpace(repoLog.String()), fmt.Errorf("discard repo cache %s: %w", repoDir, rmErr)
+			return redact.String(strings.TrimSpace(repoLog.String())), fmt.Errorf("discard repo cache %s: %w", repoDir, rmErr)
 		}
 		cloneErr := e.cloneRepo(ctx, &repoLog, appDir, repoDir, cloneURL, branch, commitHash, gitEnv)
-		return strings.TrimSpace(repoLog.String()), cloneErr
+		return redact.String(strings.TrimSpace(repoLog.String())), cloneErr
 	}
 
-	return strings.TrimSpace(repoLog.String()), nil
+	return redact.String(strings.TrimSpace(repoLog.String())), nil
+}
+
+// ensureCleanOriginURL rewrites remote.origin.url if a previous clone embedded userinfo.
+func (e *ComposeExecutor) ensureCleanOriginURL(ctx context.Context, repoDir, cleanURL string, gitEnv map[string]string) error {
+	cleanURL = repoauth.CleanHTTPSURL(cleanURL)
+	if cleanURL == "" {
+		return nil
+	}
+	out, err := e.runCommand(ctx, "git", []string{"config", "--get", "remote.origin.url"}, repoDir, gitEnv, nil)
+	if err != nil {
+		// Missing origin is fine; clone/fetch paths set it.
+		return nil
+	}
+	current := strings.TrimSpace(out)
+	if current == "" || current == cleanURL {
+		return nil
+	}
+	if !strings.Contains(current, "@") {
+		return nil
+	}
+	_, setErr := e.runCommand(ctx, "git", []string{"remote", "set-url", "origin", cleanURL}, repoDir, gitEnv, nil)
+	return setErr
 }
 
 // cloneRepo clones into repoDir, which must not already exist.
@@ -561,9 +590,9 @@ func (e *ComposeExecutor) prepareEnvOverrides(appDir string, serviceEnvs map[str
 	return []string{"-f", overrideAbs}, cleanup, nil
 }
 
-// buildGitAuth returns the clone URL (possibly token-injected), git env, and cleanup.
+// buildGitAuth returns a clean clone URL (never embeds credentials), git env, and cleanup.
 func (e *ComposeExecutor) buildGitAuth(appDir, repoURL, method string, secret []byte) (cloneURL string, env map[string]string, cleanup func(), err error) {
-	cloneURL = repoURL
+	cloneURL = repoauth.CleanHTTPSURL(repoURL)
 	method = repoauth.NormalizeMethod(method)
 	noop := func() {}
 
@@ -573,11 +602,12 @@ func (e *ComposeExecutor) buildGitAuth(appDir, repoURL, method string, secret []
 		if token == "" {
 			return "", nil, noop, fmt.Errorf("git token is empty")
 		}
-		injected, injErr := repoauth.InjectTokenIntoHTTPSURL(repoURL, token)
-		if injErr != nil {
-			return "", nil, noop, injErr
+		redact.Default.AddSecret(token)
+		clean, authEnv, authErr := repoauth.HTTPSAuthEnv(repoURL, token)
+		if authErr != nil {
+			return "", nil, noop, authErr
 		}
-		return injected, map[string]string{"GIT_TERMINAL_PROMPT": "0"}, noop, nil
+		return clean, authEnv, noop, nil
 	case repoauth.MethodDeployKey:
 		if len(secret) == 0 {
 			return "", nil, noop, fmt.Errorf("deploy key is empty")
@@ -675,10 +705,10 @@ func (e *ComposeExecutor) runCommandWithTranscript(
 		return value
 	}
 
-	command := formatCommand(cmd, args)
+	command := redact.String(formatCommand(cmd, args))
 	appendToTranscript("$ " + command + "\n")
 	if onProgress != nil {
-		onProgress(snapshot())
+		onProgress(redact.String(snapshot()))
 	}
 
 	sawOutput := false
@@ -686,12 +716,12 @@ func (e *ComposeExecutor) runCommandWithTranscript(
 		if chunk == "" {
 			return
 		}
-		appendToTranscript(chunk)
+		appendToTranscript(redact.String(chunk))
 		mu.Lock()
 		sawOutput = true
 		mu.Unlock()
 		if onProgress != nil {
-			onProgress(snapshot())
+			onProgress(redact.String(snapshot()))
 		}
 	})
 	mu.Lock()
@@ -700,16 +730,16 @@ func (e *ComposeExecutor) runCommandWithTranscript(
 	if noOutput {
 		appendToTranscript("(no output)\n")
 		if onProgress != nil {
-			onProgress(snapshot())
+			onProgress(redact.String(snapshot()))
 		}
 	}
 	if err != nil {
-		appendToTranscript("ERROR: " + err.Error() + "\n")
+		appendToTranscript("ERROR: " + redact.String(err.Error()) + "\n")
 		if onProgress != nil {
-			onProgress(snapshot())
+			onProgress(redact.String(snapshot()))
 		}
 	}
-	return output, err
+	return redact.String(output), err
 }
 
 func (e *ComposeExecutor) runCommand(
@@ -793,7 +823,7 @@ func (e *ComposeExecutor) execProcess(
 
 	e.Logger.Info(
 		"Executing command",
-		"cmd", command.String(),
+		"cmd", redact.String(formatCommand(cmd, args)),
 		"dir", workDir,
 		"env_keys", sortedKeys(env),
 	)
@@ -842,8 +872,9 @@ func (e *ComposeExecutor) execProcess(
 	streamErr := <-readDone
 	_ = pipeReader.Close()
 
+	cmdDisplay := redact.String(formatCommand(cmd, args))
 	if streamErr != nil && e.Logger != nil {
-		e.Logger.Warn("Command output stream failed", "cmd", command.String(), "error", streamErr)
+		e.Logger.Warn("Command output stream failed", "cmd", cmdDisplay, "error", streamErr)
 	}
 
 	outputMu.Lock()
@@ -851,7 +882,7 @@ func (e *ComposeExecutor) execProcess(
 	outputMu.Unlock()
 	trimmed := strings.TrimSpace(output)
 	if trimmed != "" {
-		e.Logger.Info("Command output", "cmd", command.String(), "output", truncateOutput(trimmed))
+		e.Logger.Info("Command output", "cmd", cmdDisplay, "output", redact.String(truncateOutput(trimmed)))
 	}
 
 	if waitErr != nil {
@@ -861,25 +892,25 @@ func (e *ComposeExecutor) execProcess(
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
-			e.Logger.Error("Command context ended", "cmd", command.String(), "context_err", ctx.Err())
+			e.Logger.Error("Command context ended", "cmd", cmdDisplay, "context_err", ctx.Err())
 		}
 		e.Logger.Error(
 			"Command failed",
-			"cmd", command.String(),
+			"cmd", cmdDisplay,
 			"dir", workDir,
 			"exit_code", exitCode,
 			"elapsed_ms", time.Since(start).Milliseconds(),
 		)
-		return output, fmt.Errorf("command failed: %w", waitErr)
+		return redact.String(output), fmt.Errorf("command failed: %w", waitErr)
 	}
 
 	e.Logger.Info(
 		"Command succeeded",
-		"cmd", command.String(),
+		"cmd", cmdDisplay,
 		"elapsed_ms", time.Since(start).Milliseconds(),
 	)
 
-	return output, nil
+	return redact.String(output), nil
 }
 
 func (e *ComposeExecutor) listContainerIDsForCleanup(ctx context.Context, projectName, workingDir string) ([]string, error) {

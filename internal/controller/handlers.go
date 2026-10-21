@@ -3,15 +3,16 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/compose"
+	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
@@ -66,13 +67,15 @@ type SyncGate interface {
 
 // Handler handles HTTP requests for the controller.
 type Handler struct {
-	Registry  *Registry
-	Cleaner   RuntimeCleaner
-	Applier   RuntimeApplier
-	Inspector RuntimeInspector
-	SyncGate  SyncGate
-	Logger    *slog.Logger
-	Version   string
+	Registry    *Registry
+	Cleaner     RuntimeCleaner
+	Applier     RuntimeApplier
+	Inspector   RuntimeInspector
+	SyncGate    SyncGate
+	Ops         *OperationStore
+	Logger      *slog.Logger
+	Version     string
+	SyncTimeout time.Duration
 }
 
 // NewHandler creates a new controller handler.
@@ -82,6 +85,7 @@ func NewHandler(registry *Registry, cleaner RuntimeCleaner, applier RuntimeAppli
 		Cleaner:   cleaner,
 		Applier:   applier,
 		Inspector: inspector,
+		Ops:       NewOperationStore(),
 		Logger:    logger,
 		Version:   version,
 	}
@@ -363,7 +367,7 @@ func (h *Handler) setSuspended(w http.ResponseWriter, r *http.Request, suspended
 	_ = json.NewEncoder(w).Encode(api.APIResponse{Message: msg, Data: app})
 }
 
-// ForceSyncApp handles POST /api/v1/apps/{id}/sync.
+// ForceSyncApp handles POST /api/v1/apps/{id}/sync (synchronous).
 func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 	if h.Applier == nil {
 		http.Error(w, "runtime applier is not configured", http.StatusServiceUnavailable)
@@ -378,8 +382,121 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if app.Status == "syncing" {
-		http.Error(w, "sync already in progress", http.StatusConflict)
+		if op, ok := h.Ops.ActiveForApp(app.ID); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message":      "sync already in progress",
+				"code":         "sync_in_progress",
+				"stage":        syncerr.StageUnknown,
+				"operation_id": op.ID,
+			})
+			return
+		}
+		writeSyncError(w, http.StatusConflict, syncerr.New("sync_in_progress", syncerr.StageUnknown, "sync already in progress"))
 		return
+	}
+
+	if se := h.runAppSync(app); se != nil {
+		writeSyncError(w, httpStatusForSyncErr(se), se)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(api.APIResponse{
+		Message: "App synced successfully",
+	})
+}
+
+// ReconcileApp handles POST /api/v1/apps/{id}/reconcile (asynchronous).
+// Returns 202 with operation_id; concurrent POSTs while running return the same id.
+func (h *Handler) ReconcileApp(w http.ResponseWriter, r *http.Request) {
+	if h.Applier == nil {
+		http.Error(w, "runtime applier is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if h.Ops == nil {
+		h.Ops = NewOperationStore()
+	}
+
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	op, existing := h.Ops.StartReconcile(app.ID, app.Name)
+	if existing {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"message":      "reconcile already in progress",
+			"operation_id": op.ID,
+			"data":         op,
+		})
+		return
+	}
+
+	go h.runReconcileOperation(op.ID, app.ID)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":      "reconcile accepted",
+		"operation_id": op.ID,
+		"data":         op,
+	})
+}
+
+// GetOperation handles GET /api/v1/operations/{id}.
+func (h *Handler) GetOperation(w http.ResponseWriter, r *http.Request) {
+	if h.Ops == nil {
+		http.Error(w, "operation not found", http.StatusNotFound)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	op, ok := h.Ops.Get(id)
+	if !ok {
+		http.Error(w, "operation not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.APIResponse{Data: op})
+}
+
+func (h *Handler) runReconcileOperation(opID, appID string) {
+	h.Ops.MarkRunning(opID)
+	app, err := h.Registry.Get(appID)
+	if err != nil {
+		h.Ops.Finish(opID, OpFailed, syncerr.CodeUnknown, syncerr.StageUnknown, redact.String(err.Error()))
+		return
+	}
+	if se := h.runAppSync(app); se != nil {
+		h.Ops.Finish(opID, OpFailed, se.Code, se.Stage, redact.String(se.Message))
+		return
+	}
+	h.Ops.Finish(opID, OpSucceeded, "", "", "")
+}
+
+func (h *Handler) syncTimeout() time.Duration {
+	timeout := h.SyncTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+		if value := strings.TrimSpace(os.Getenv("CONOPS_SYNC_TIMEOUT")); value != "" {
+			if parsed, parseErr := time.ParseDuration(value); parseErr == nil && parsed > 0 {
+				timeout = parsed
+			}
+		}
+	}
+	return timeout
+}
+
+// runAppSync performs a synchronous apply for the app. Returns nil on success.
+func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
+	if app == nil {
+		return syncerr.New(syncerr.CodeUnknown, syncerr.StageUnknown, "app is nil")
 	}
 
 	syncStartedAt := time.Now()
@@ -390,30 +507,29 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 	repoSecret, err := h.Registry.GetRepoSecret(app.ID)
 	if err != nil {
 		_ = h.Registry.UpdateStatus(app.ID, "error", nil)
-		http.Error(w, fmt.Sprintf("failed to load app credentials: %v", err), http.StatusInternalServerError)
-		return
+		return syncerr.Wrap(syncerr.CodeCredentials, syncerr.StageCredentials, err)
 	}
 	defer zeroBytes(repoSecret)
+	if len(repoSecret) > 0 {
+		redact.Default.AddSecret(string(repoSecret))
+	}
 
 	envVars, err := h.Registry.GetAppEnvs(app.ID)
 	if err != nil {
 		_ = h.Registry.UpdateStatus(app.ID, "error", nil)
-		http.Error(w, fmt.Sprintf("failed to load app envs: %v", err), http.StatusInternalServerError)
-		return
+		return syncerr.Wrap(syncerr.CodeCredentials, syncerr.StageCredentials, err)
+	}
+	for _, v := range envVars {
+		redact.Default.AddSecret(v)
 	}
 
-	// Derive from Background so the sync survives reverse-proxy or client
-	// disconnects. The reconciler already does this; match that behaviour
-	// and honour the same configurable timeout (default 5m, override with
-	// CONOPS_SYNC_TIMEOUT).
-	syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	syncCtx, cancel := context.WithTimeout(context.Background(), h.syncTimeout())
 	defer cancel()
 
 	if h.SyncGate != nil {
 		if err := h.SyncGate.AcquireSync(syncCtx); err != nil {
 			_ = h.Registry.UpdateStatus(app.ID, "pending", nil)
-			http.Error(w, "sync queue timeout", http.StatusServiceUnavailable)
-			return
+			return syncerr.New(syncerr.CodeTimeout, syncerr.StageUnknown, "sync queue timeout")
 		}
 		defer h.SyncGate.ReleaseSync()
 	}
@@ -435,6 +551,7 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 	progress.Flush()
 	if err != nil {
 		se := syncerr.Classify(err)
+		se.Message = redact.String(se.Message)
 		now := time.Now()
 		_ = h.Registry.UpdateSyncResultErr(
 			app.ID,
@@ -442,14 +559,13 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 			now,
 			app.LastSyncedCommit,
 			app.LastSyncedCommitMessage,
-			output,
+			redact.String(output),
 			se,
 		)
 		if h.Logger != nil {
-			h.Logger.Error("Force sync failed", "id", app.ID, "code", se.Code, "stage", se.Stage, "error", err)
+			h.Logger.Error("Force sync failed", "id", app.ID, "code", se.Code, "stage", se.Stage, "error", redact.String(err.Error()))
 		}
-		http.Error(w, "force sync failed", http.StatusInternalServerError)
-		return
+		return se
 	}
 
 	now := time.Now()
@@ -459,14 +575,48 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 		now,
 		app.LastSeenCommit,
 		app.LastSeenCommitMessage,
-		output,
+		redact.String(output),
 		"",
 	); err != nil && h.Logger != nil {
 		h.Logger.Warn("Failed to update sync status after force sync", "id", app.ID, "error", err)
 	}
+	if hasher, ok := h.Applier.(EnvFileHasher); ok {
+		if hash, hashErr := hasher.ExternalEnvHashForApp(app.ID, app.ComposePath); hashErr == nil && hash != "" {
+			_ = h.Registry.UpdateEnvHash(app.ID, hash)
+		}
+	}
+	return nil
+}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(api.APIResponse{
-		Message: "App synced successfully",
+func httpStatusForSyncErr(se *syncerr.Error) int {
+	if se == nil {
+		return http.StatusInternalServerError
+	}
+	switch se.Code {
+	case syncerr.CodeGitAuth, syncerr.CodeGitFetch:
+		return http.StatusBadGateway
+	case syncerr.CodeComposeApply, syncerr.CodeEnvFileMissing:
+		return http.StatusUnprocessableEntity
+	case syncerr.CodeTimeout:
+		return http.StatusGatewayTimeout
+	case "sync_in_progress":
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func writeSyncError(w http.ResponseWriter, status int, se *syncerr.Error) {
+	if se == nil {
+		http.Error(w, "force sync failed", status)
+		return
+	}
+	se.Message = redact.String(se.Message)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"message": redact.String(se.Message),
+		"code":    se.Code,
+		"stage":   se.Stage,
 	})
 }

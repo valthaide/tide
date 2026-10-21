@@ -56,6 +56,9 @@ func NewClient() *APIClient {
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("CONOPS_TOKEN"))
 	}
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("CONOPS_API_TOKEN"))
+	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -73,10 +76,17 @@ func NewClient() *APIClient {
 	}
 	transport.TLSClientConfig = tlsCfg
 
+	timeout := 30 * time.Second
+	if value := strings.TrimSpace(os.Getenv("CONOPS_SYNC_TIMEOUT")); value != "" {
+		if parsed, err := time.ParseDuration(value); err == nil && parsed > timeout {
+			timeout = parsed + time.Minute
+		}
+	}
+
 	return &APIClient{
 		BaseURL: url,
 		Token:   token,
-		Client:  &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		Client:  &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
 

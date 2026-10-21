@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+	if path != "" && path != ":memory:" && !strings.HasPrefix(path, "file::memory:") {
+		_ = os.Chmod(path, 0600)
 	}
 
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
@@ -72,6 +76,9 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	if err := addSQLiteColumnIfMissing(db, "apps", "suspended INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "last_applied_env_hash TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
 
@@ -167,7 +174,8 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		COALESCE(last_sync_error, ''),
 		last_sync_at,
 		status,
-		COALESCE(suspended, 0)
+		COALESCE(suspended, 0),
+		COALESCE(last_applied_env_hash, '')
 	FROM apps
 	WHERE id = ?
 	`
@@ -192,6 +200,7 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		&app.LastSyncAt,
 		&app.Status,
 		&suspended,
+		&app.LastAppliedEnvHash,
 	)
 	if err != nil {
 		return nil, err
@@ -218,7 +227,8 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(last_sync_error, ''),
 		last_sync_at,
 		status,
-		COALESCE(suspended, 0)
+		COALESCE(suspended, 0),
+		COALESCE(last_applied_env_hash, '')
 	FROM apps
 	`
 	rows, err := s.db.QueryContext(ctx, query)
@@ -248,6 +258,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.LastSyncAt,
 			&app.Status,
 			&suspended,
+			&app.LastAppliedEnvHash,
 		); err != nil {
 			continue
 		}
@@ -366,6 +377,30 @@ func (s *SQLiteStore) GetAppCredential(ctx context.Context, id string) (*AppCred
 func (s *SQLiteStore) DeleteAppCredential(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM app_credentials WHERE app_id = ?`, id)
 	return err
+}
+
+func (s *SQLiteStore) ClearAppRepoSecret(ctx context.Context, appID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE app_credentials
+		SET deploy_key_ciphertext = NULL, deploy_key_nonce = NULL
+		WHERE app_id = ?
+	`, appID)
+	return err
+}
+
+func (s *SQLiteStore) UpdateAppEnvHash(ctx context.Context, id, envHash string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE apps SET last_applied_env_hash = ? WHERE id = ?`, envHash, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
 }
 
 func (s *SQLiteStore) UpdateAppCredentials(ctx context.Context, appID string, envCiphertext, envNonce []byte) error {

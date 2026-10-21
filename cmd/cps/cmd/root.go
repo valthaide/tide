@@ -29,7 +29,8 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().String("url", "", "Controller URL (default from cps config or https://127.0.0.1:8443)")
-	rootCmd.PersistentFlags().String("token", "", "API bearer token (or CONOPS_TOKEN / cps config)")
+	rootCmd.PersistentFlags().String("token", "", "DEPRECATED: visible in ps; use CONOPS_TOKEN / CONOPS_API_TOKEN or cps config")
+	_ = rootCmd.PersistentFlags().MarkDeprecated("token", "visible in process list; prefer CONOPS_TOKEN / CONOPS_API_TOKEN or `cps config`")
 	rootCmd.PersistentFlags().String("context", "", "cps config context name")
 	rootCmd.PersistentFlags().String("config", "", "Path to cps config file (default ~/.conops/config)")
 	rootCmd.PersistentFlags().Bool("insecure", false, "Skip TLS certificate verification")

@@ -21,7 +21,9 @@ type Store interface {
 	UpsertAppCredential(ctx context.Context, credential *AppCredential) error
 	GetAppCredential(ctx context.Context, id string) (*AppCredential, error)
 	DeleteAppCredential(ctx context.Context, id string) error
+	ClearAppRepoSecret(ctx context.Context, appID string) error
 	UpdateAppCredentials(ctx context.Context, appID string, envCiphertext, envNonce []byte) error
+	UpdateAppEnvHash(ctx context.Context, id, envHash string) error
 	UpdateAppCommit(ctx context.Context, id, commitHash, commitMessage string) error
 	UpdateAppStatus(ctx context.Context, id, status string, lastSyncAt *time.Time) error
 	UpdateAppSyncResult(

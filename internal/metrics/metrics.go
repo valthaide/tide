@@ -60,6 +60,44 @@ var (
 		Name:      "app_sync_errors_total",
 		Help:      "Number of sync failures by structured code and stage.",
 	}, []string{"app_id", "app_name", "code", "stage"})
+
+	GitAuthFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "git_auth_failures_total",
+		Help:      "Number of git authentication failures (app or fleet).",
+	}, []string{"scope", "name"})
+
+	FleetLastSuccessTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "fleet_last_success_timestamp_seconds",
+		Help:      "Unix timestamp of the last successful fleet reconcile.",
+	})
+
+	FleetErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "fleet_errors_total",
+		Help:      "Number of fleet reconcile failures by code.",
+	}, []string{"code"})
+)
+
+var (
+	envDrift = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_env_drift",
+		Help:      "Whether external compose env_file content differs from last applied hash (1=yes).",
+	}, []string{"app_id", "app_name"})
+
+	envHashApplied = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_env_hash_applied_timestamp_seconds",
+		Help:      "Unix timestamp when the current external env_file hash was last applied.",
+	}, []string{"app_id", "app_name"})
+
+	syncErrorInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_sync_error_info",
+		Help:      "Last sync error code/stage as a gauge (1=active for that code/stage).",
+	}, []string{"app", "code", "stage"})
 )
 
 // Register registers process counters/histograms and an apps collector.
@@ -70,6 +108,12 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		SyncDurationSeconds,
 		RequeueTotal,
 		SyncErrorsTotal,
+		GitAuthFailuresTotal,
+		FleetLastSuccessTimestamp,
+		FleetErrorsTotal,
+		envDrift,
+		envHashApplied,
+		syncErrorInfo,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {
@@ -249,6 +293,12 @@ func ObserveSync(appID, appName string, duration time.Duration, err error) {
 			code, stage = c.GetCode(), c.GetStage()
 		}
 		SyncErrorsTotal.WithLabelValues(appID, appName, code, stage).Inc()
+		SetSyncErrorInfo(appName, code, stage)
+		if code == "git_auth" {
+			GitAuthFailuresTotal.WithLabelValues("app", appName).Inc()
+		}
+	} else {
+		ClearSyncErrorInfo(appName)
 	}
 	SyncTotal.WithLabelValues(appID, appName, result).Inc()
 	SyncDurationSeconds.WithLabelValues(appID, appName).Observe(duration.Seconds())
@@ -261,4 +311,63 @@ func ObserveRequeue(appID, appName, reason string) {
 		reason = "unknown"
 	}
 	RequeueTotal.WithLabelValues(appID, appName, reason).Inc()
+}
+
+// SetEnvDrift sets whether an app's external env_file hash differs from applied.
+func SetEnvDrift(appID, appName string, drifted bool) {
+	v := 0.0
+	if drifted {
+		v = 1
+	}
+	envDrift.WithLabelValues(appID, appName).Set(v)
+}
+
+// SetEnvHashApplied records when an env hash was applied.
+func SetEnvHashApplied(appID, appName string, at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	envHashApplied.WithLabelValues(appID, appName).Set(float64(at.Unix()))
+}
+
+// SetSyncErrorInfo exposes the latest sync error code/stage for alerts.
+func SetSyncErrorInfo(app, code, stage string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		return
+	}
+	syncErrorInfo.DeletePartialMatch(prometheus.Labels{"app": app})
+	if code == "" {
+		code = "unknown"
+	}
+	if stage == "" {
+		stage = "unknown"
+	}
+	syncErrorInfo.WithLabelValues(app, code, stage).Set(1)
+}
+
+// ClearSyncErrorInfo clears the last sync error info gauge for an app.
+func ClearSyncErrorInfo(app string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		return
+	}
+	syncErrorInfo.DeletePartialMatch(prometheus.Labels{"app": app})
+}
+
+// ObserveFleetSuccess records a successful fleet reconcile.
+func ObserveFleetSuccess() {
+	FleetLastSuccessTimestamp.Set(float64(time.Now().Unix()))
+}
+
+// ObserveFleetError increments fleet error counter.
+func ObserveFleetError(code string) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		code = "unknown"
+	}
+	FleetErrorsTotal.WithLabelValues(code).Inc()
+	if code == "git_auth" {
+		GitAuthFailuresTotal.WithLabelValues("fleet", "fleet").Inc()
+	}
 }

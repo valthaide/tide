@@ -81,6 +81,11 @@ type AppRuntime interface {
 	SnapshotProjects(ctx context.Context) (map[string]compose.ProjectRuntimeState, error)
 }
 
+// EnvFileHasher optionally hashes absolute compose env_file paths outside the repo.
+type EnvFileHasher interface {
+	ExternalEnvHashForApp(appID, composePath string) (string, error)
+}
+
 // Reconciler applies desired state directly on the host (monolith mode).
 type Reconciler struct {
 	Registry *Registry
@@ -193,6 +198,11 @@ func (r *Reconciler) reconcileOnce() {
 				r.requeuePending(app, reason)
 			}
 		}
+		if app.Status == "synced" {
+			if reason := r.envFileDriftReason(app); reason != "" {
+				r.requeuePending(app, reason)
+			}
+		}
 
 		switch app.Status {
 		case "pending":
@@ -250,6 +260,45 @@ func (r *Reconciler) runtimeDriftReason(appID string, snapshot map[string]compos
 	if state.RunningCount < state.ContainerCount {
 		return "runtime_not_running"
 	}
+	return ""
+}
+
+func (r *Reconciler) envFileDriftReason(app *App) string {
+	hasher, ok := r.Executor.(EnvFileHasher)
+	if !ok || app == nil {
+		return ""
+	}
+	hash, err := hasher.ExternalEnvHashForApp(app.ID, app.ComposePath)
+	if err != nil {
+		se := syncerr.Classify(err)
+		if se.Code == syncerr.CodeEnvFileMissing {
+			_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
+			metrics.SetEnvDrift(app.ID, app.Name, true)
+			if r.Logger != nil {
+				r.Logger.Error("env_file missing", "app_id", app.ID, "code", se.Code)
+			}
+		}
+		return ""
+	}
+	if hash == "" {
+		metrics.SetEnvDrift(app.ID, app.Name, false)
+		return ""
+	}
+	if app.LastAppliedEnvHash == "" {
+		// First observation after upgrade: record without forcing a redeploy.
+		_ = r.Registry.UpdateEnvHash(app.ID, hash)
+		metrics.SetEnvDrift(app.ID, app.Name, false)
+		metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())
+		return ""
+	}
+	if hash != app.LastAppliedEnvHash {
+		metrics.SetEnvDrift(app.ID, app.Name, true)
+		if r.Logger != nil {
+			r.Logger.Info("env_file changed", "app_id", app.ID)
+		}
+		return "env_file_changed"
+	}
+	metrics.SetEnvDrift(app.ID, app.Name, false)
 	return ""
 }
 
@@ -357,8 +406,23 @@ func (r *Reconciler) syncApp(app *App) error {
 	); err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to update app status", "app_id", app.ID, "error", err)
 	}
+	r.recordAppliedEnvHash(app)
 	metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
 	return nil
+}
+
+func (r *Reconciler) recordAppliedEnvHash(app *App) {
+	hasher, ok := r.Executor.(EnvFileHasher)
+	if !ok || app == nil {
+		return
+	}
+	hash, err := hasher.ExternalEnvHashForApp(app.ID, app.ComposePath)
+	if err != nil || hash == "" {
+		return
+	}
+	_ = r.Registry.UpdateEnvHash(app.ID, hash)
+	metrics.SetEnvDrift(app.ID, app.Name, false)
+	metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())
 }
 
 func truncateOutput(value string) string {

@@ -14,7 +14,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/repoauth"
+	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
 // AppManager applies fleet desired state to the local app registry.
@@ -23,6 +25,9 @@ type AppManager interface {
 	FindByName(name string) *api.App
 	AddWithDeployKeyAndEnvs(app *api.App, secret string, serviceEnvs map[string]string) error
 	UpdateApp(id, name, branch, composePath, pollInterval string, serviceEnvs map[string]string) error
+	UpdateRepoSecret(id, secret string) error
+	ClearRepoSecret(id string) error
+	GetRepoSecret(id string) ([]byte, error)
 	SetSuspended(id string, suspended bool) error
 	Delete(id string) error
 }
@@ -70,16 +75,22 @@ func (r *Reconciler) Run(ctx context.Context) {
 func (r *Reconciler) syncOnce(ctx context.Context) {
 	doc, err := r.loadDesired(ctx)
 	if err != nil {
+		se := syncerr.Classify(err)
+		metrics.ObserveFleetError(se.GetCode())
 		if r.Logger != nil {
-			r.Logger.Error("Fleet sync failed", "error", err)
+			r.Logger.Error("Fleet sync failed", "code", se.GetCode(), "error", err)
 		}
 		return
 	}
 	if err := r.applyDesired(ctx, doc); err != nil {
+		se := syncerr.Classify(err)
+		metrics.ObserveFleetError(se.GetCode())
 		if r.Logger != nil {
-			r.Logger.Error("Fleet apply failed", "error", err)
+			r.Logger.Error("Fleet apply failed", "code", se.GetCode(), "error", err)
 		}
+		return
 	}
+	metrics.ObserveFleetSuccess()
 }
 
 func (r *Reconciler) loadDesired(ctx context.Context) (*HostDocument, error) {
@@ -116,16 +127,7 @@ func (r *Reconciler) ensureFleetCheckout(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	cloneURL := r.Config.RepoURL
-	if repoauth.NormalizeMethod(r.Config.AuthMethod) == repoauth.MethodToken {
-		token := repoauth.ResolveGitToken(r.Config.Token)
-		injected, injErr := repoauth.InjectTokenIntoHTTPSURL(r.Config.RepoURL, token)
-		if injErr != nil {
-			return "", injErr
-		}
-		// go-git uses Auth; keep original URL and auth method.
-		_ = injected
-	}
+	cloneURL := repoauth.CleanHTTPSURL(r.Config.RepoURL)
 
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); os.IsNotExist(err) {
 		_, err = git.PlainClone(repoDir, false, &git.CloneOptions{
@@ -309,12 +311,44 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 	if err := r.Apps.UpdateApp(existing.ID, spec.Name, spec.Branch, spec.ComposePath, spec.PollInterval, nil); err != nil {
 		return err
 	}
+	if err := r.syncFleetSecret(existing.ID, method, secret, spec); err != nil {
+		return err
+	}
 	if existing.Suspended != spec.Suspended {
 		if err := r.Apps.SetSuspended(existing.ID, spec.Suspended); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// syncFleetSecret keeps deploy_key_file contents up to date and clears stored
+// tokens for fleet token apps (env is the source of truth).
+func (r *Reconciler) syncFleetSecret(appID, method, secret string, spec AppSpec) error {
+	switch method {
+	case repoauth.MethodToken:
+		if strings.TrimSpace(spec.DeployKeyFile) == "" {
+			// Prefer CONOPS_GIT_TOKEN from process env; do not keep a DB copy.
+			return r.Apps.ClearRepoSecret(appID)
+		}
+		return r.Apps.UpdateRepoSecret(appID, secret)
+	case repoauth.MethodDeployKey:
+		current, err := r.Apps.GetRepoSecret(appID)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			for i := range current {
+				current[i] = 0
+			}
+		}()
+		if string(current) == secret {
+			return nil
+		}
+		return r.Apps.UpdateRepoSecret(appID, secret)
+	default:
+		return nil
+	}
 }
 
 func (r *Reconciler) resolveAppSecret(spec AppSpec, method string) (string, error) {
@@ -331,7 +365,11 @@ func (r *Reconciler) resolveAppSecret(spec AppSpec, method string) (string, erro
 			return strings.TrimSpace(string(data)), nil
 		}
 		if method == repoauth.MethodToken {
-			return repoauth.ResolveGitToken(""), nil
+			// Empty secret → ResolveGitToken("") reads CONOPS_GIT_TOKEN on each use.
+			if t := repoauth.ResolveGitToken(""); t == "" {
+				return "", fmt.Errorf("CONOPS_GIT_TOKEN is empty")
+			}
+			return "", nil
 		}
 		return "", fmt.Errorf("deploy_key_file is required for deploy_key auth")
 	default:

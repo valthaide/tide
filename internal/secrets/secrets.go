@@ -1,24 +1,20 @@
 package secrets
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
-// Config controls optional SOPS and Vault integration.
+// Config controls optional Vault integration.
+// SOPS support was removed from this fork; CONOPS_SOPS=true is a startup error.
 type Config struct {
-	SOPSEnabled    bool
-	SOPSAgeKey     string // raw AGE-SECRET-KEY-... (CONOPS_SOPS_AGE_KEY)
-	SOPSAgeKeyFile string // path (CONOPS_SOPS_AGE_KEY_FILE)
+	SOPSEnabled    bool // always false; retained so callers can detect misconfig
 	VaultEnabled   bool
 	VaultAddr      string
 	VaultToken     string
@@ -26,26 +22,21 @@ type Config struct {
 	HTTPClient     *http.Client
 }
 
-// LoadConfigFromEnv reads CONOPS_SOPS_* and CONOPS_VAULT_*.
+// LoadConfigFromEnv reads CONOPS_SOPS / CONOPS_VAULT_*.
 func LoadConfigFromEnv() Config {
 	sopsMode := strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_SOPS")))
 	vaultMode := strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_VAULT")))
 	cfg := Config{
-		SOPSAgeKey:     strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY")),
-		SOPSAgeKeyFile: strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY_FILE")),
 		VaultAddr:      strings.TrimRight(strings.TrimSpace(os.Getenv("CONOPS_VAULT_ADDR")), "/"),
 		VaultToken:     strings.TrimSpace(os.Getenv("CONOPS_VAULT_TOKEN")),
 		VaultNamespace: strings.TrimSpace(os.Getenv("CONOPS_VAULT_NAMESPACE")),
 		HTTPClient:     &http.Client{Timeout: 30 * time.Second},
 	}
 	switch sopsMode {
-	case "1", "true", "yes", "on", "auto":
+	case "1", "true", "yes", "on":
 		cfg.SOPSEnabled = true
-	case "0", "false", "no", "off":
-		cfg.SOPSEnabled = false
 	default:
-		// auto-enable when age key material is present
-		cfg.SOPSEnabled = cfg.SOPSAgeKey != "" || cfg.SOPSAgeKeyFile != ""
+		cfg.SOPSEnabled = false
 	}
 	switch vaultMode {
 	case "1", "true", "yes", "on":
@@ -58,6 +49,20 @@ func LoadConfigFromEnv() Config {
 	return cfg
 }
 
+// Validate returns an error when the process is configured to use removed features.
+func (c Config) Validate() error {
+	if c.SOPSEnabled {
+		return fmt.Errorf("CONOPS_SOPS is enabled but SOPS support was removed from this ConOps fork; unset CONOPS_SOPS (TENKO uses hiera-eyaml → secrets.env)")
+	}
+	if age := strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY")); age != "" {
+		return fmt.Errorf("CONOPS_SOPS_AGE_KEY is set but SOPS support was removed; unset it")
+	}
+	if ageFile := strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY_FILE")); ageFile != "" {
+		return fmt.Errorf("CONOPS_SOPS_AGE_KEY_FILE is set but SOPS support was removed; unset it")
+	}
+	return nil
+}
+
 // Manager applies secret backends during sync.
 type Manager struct {
 	Config Config
@@ -67,12 +72,14 @@ func NewManager(cfg Config) *Manager {
 	return &Manager{Config: cfg}
 }
 
-// PrepareRepo decrypts SOPS files in-place under repoDir (runtime checkout only).
+// PrepareRepo is a no-op (SOPS removed).
 func (m *Manager) PrepareRepo(ctx context.Context, repoDir string) error {
-	if m == nil || !m.Config.SOPSEnabled {
-		return nil
+	_ = ctx
+	_ = repoDir
+	if m != nil && m.Config.SOPSEnabled {
+		return fmt.Errorf("SOPS is not supported in this ConOps build")
 	}
-	return decryptSOPSTree(ctx, repoDir, m.Config.SOPSAgeKey, m.Config.SOPSAgeKeyFile)
+	return nil
 }
 
 // ResolveEnvs expands vault://path#key references in env map values.
@@ -118,7 +125,6 @@ func (m *Manager) readVault(ctx context.Context, path string) (map[string]interf
 		return nil, fmt.Errorf("vault addr/token not configured")
 	}
 	path = strings.TrimPrefix(path, "/")
-	// KV v2: secret/data/foo → /v1/secret/data/foo
 	url := m.Config.VaultAddr + "/v1/" + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -147,7 +153,6 @@ func (m *Manager) readVault(ctx context.Context, path string) (map[string]interf
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
-	// KV v2 nests under data.data
 	var v2 struct {
 		Data map[string]interface{} `json:"data"`
 	}
@@ -159,77 +164,6 @@ func (m *Manager) readVault(ctx context.Context, path string) (map[string]interf
 		return nil, err
 	}
 	return v1, nil
-}
-
-func decryptSOPSTree(ctx context.Context, root, ageKey, ageKeyFile string) error {
-	sopsPath, err := exec.LookPath("sops")
-	if err != nil {
-		return fmt.Errorf("sops enabled but sops binary not found in PATH")
-	}
-	if strings.TrimSpace(ageKey) == "" && strings.TrimSpace(ageKeyFile) == "" {
-		return fmt.Errorf("sops enabled but neither CONOPS_SOPS_AGE_KEY nor CONOPS_SOPS_AGE_KEY_FILE is set")
-	}
-	var files []string
-	err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if info.IsDir() {
-			base := info.Name()
-			if base == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		name := info.Name()
-		lower := strings.ToLower(name)
-		if strings.Contains(lower, ".sops.") || strings.HasSuffix(lower, ".sops.yaml") ||
-			strings.HasSuffix(lower, ".sops.yml") || strings.HasSuffix(lower, ".sops.json") ||
-			strings.HasSuffix(lower, ".enc.yaml") || strings.HasSuffix(lower, ".enc.yml") {
-			files = append(files, path)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	for _, path := range files {
-		if err := decryptSOPSFile(ctx, sopsPath, path, ageKey, ageKeyFile); err != nil {
-			return fmt.Errorf("sops decrypt %s: %w", path, err)
-		}
-	}
-	return nil
-}
-
-func decryptSOPSFile(ctx context.Context, sopsPath, file, ageKey, ageKeyFile string) error {
-	cmd := exec.CommandContext(ctx, sopsPath, "-d", "-i", file)
-	env := os.Environ()
-	env = append(env, "SOPS_ABSENT_KEYS=ignore")
-	// Inline key takes precedence (maps to sops SOPS_AGE_KEY).
-	if ageKey != "" {
-		env = append(env, "SOPS_AGE_KEY="+ageKey)
-	} else if ageKeyFile != "" {
-		env = append(env, "SOPS_AGE_KEY_FILE="+ageKeyFile)
-	}
-	cmd.Env = env
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w (%s)", err, truncate(stderr.String(), 300))
-	}
-	// Rename *.sops.yaml → *.yaml when pattern matches, so compose can include cleartext name.
-	dir := filepath.Dir(file)
-	base := filepath.Base(file)
-	for _, pat := range []string{".sops.yaml", ".sops.yml", ".sops.json"} {
-		if strings.HasSuffix(strings.ToLower(base), pat) {
-			out := filepath.Join(dir, base[:len(base)-len(pat)]+pat[len(".sops"):])
-			if err := os.Rename(file, out); err != nil {
-				return err
-			}
-			return nil
-		}
-	}
-	return nil
 }
 
 func truncate(s string, n int) string {

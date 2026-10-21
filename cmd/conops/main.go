@@ -18,7 +18,9 @@ import (
 	"github.com/valthaide/conops-private/internal/controller"
 	"github.com/valthaide/conops-private/internal/credentials"
 	"github.com/valthaide/conops-private/internal/fleet"
+	"github.com/valthaide/conops-private/internal/fsperm"
 	"github.com/valthaide/conops-private/internal/metrics"
+	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/secrets"
 	"github.com/valthaide/conops-private/internal/store"
 	"github.com/valthaide/conops-private/internal/tlsutil"
@@ -28,13 +30,22 @@ import (
 var Version = "dev"
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	fsperm.ApplyUmask077()
+	redact.Default.ReloadFromEnv()
+	logger := slog.New(redact.WrapSlog(slog.NewJSONHandler(os.Stdout, nil), redact.Default))
 	mode := agent.ResolveMode()
 	logger.Info("Starting ConOps", "version", Version, "mode", mode)
 
 	dataDir := "/data"
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		dataDir = "."
+	}
+	_ = fsperm.EnsurePrivateDir(dataDir)
+
+	secretsCfg := secrets.LoadConfigFromEnv()
+	if err := secretsCfg.Validate(); err != nil {
+		logger.Error("Invalid secrets configuration", "error", err)
+		os.Exit(1)
 	}
 
 	var dbStore store.Store
@@ -60,15 +71,18 @@ func main() {
 			logger.Error("Failed to initialize sqlite store", "error", err)
 			os.Exit(1)
 		}
+		_ = fsperm.EnsurePrivateFile(dbPath)
 		logger.Info("Using SQLite store")
 	}
 	defer dbStore.Close()
 
-	credentialService, err := credentials.NewServiceFromEnv(filepath.Join(dataDir, "conops-encryption.key"))
+	keyPath := filepath.Join(dataDir, "conops-encryption.key")
+	credentialService, err := credentials.NewServiceFromEnv(keyPath)
 	if err != nil {
 		logger.Error("Failed to initialize credential encryption", "error", err)
 		os.Exit(1)
 	}
+	_ = fsperm.EnsurePrivateFile(keyPath)
 	logger.Info("Credential encryption is enabled", "source", credentialService.KeySource())
 
 	auth, err := apiauth.Setup(dataDir)
@@ -85,17 +99,14 @@ func main() {
 	}
 
 	registry := controller.NewRegistry(dbStore, credentialService)
+	if n := registry.ResetStuckSyncing(); n > 0 {
+		logger.Info("Reset stuck syncing apps to pending", "count", n)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	secretsCfg := secrets.LoadConfigFromEnv()
 	secretsMgr := secrets.NewManager(secretsCfg)
-	if secretsCfg.SOPSEnabled {
-		logger.Info("SOPS secrets enabled",
-			"age_key_inline", secretsCfg.SOPSAgeKey != "",
-			"age_key_file", secretsCfg.SOPSAgeKeyFile != "",
-		)
-	}
 	if secretsCfg.VaultEnabled {
 		logger.Info("Vault secrets enabled", "addr", secretsCfg.VaultAddr)
 	}
@@ -110,19 +121,25 @@ func main() {
 	} else if dataDir != "." {
 		executor.ToolsDir = filepath.Join(dataDir, "conops-tools")
 	}
+	_ = fsperm.EnsurePrivateDir(executor.WorkDir)
+	if err := fsperm.HardenRuntimeTree(executor.WorkDir); err != nil {
+		logger.Warn("Failed to harden runtime permissions", "dir", executor.WorkDir, "error", err)
+	}
 	logger.Info("Runtime workspace configured", "dir", executor.WorkDir, "tools_dir", executor.ToolsDir)
 
 	var reconciler *controller.Reconciler
+	var reconcilerCfg controller.ReconcilerConfig
 	if mode != agent.ModeHub {
 		watcher := controller.NewGitWatcher(registry, logger)
 		go watcher.Start(ctx)
 
-		reconcilerCfg, loadErr := controller.LoadReconcilerConfigFromEnv()
+		var loadErr error
+		reconcilerCfg, loadErr = controller.LoadReconcilerConfigFromEnv()
 		if loadErr != nil {
 			logger.Error("Failed to load reconciler config", "error", loadErr)
 			os.Exit(1)
 		}
-		logger.Info("Reconciler config", "max_concurrent", reconcilerCfg.MaxConcurrent, "interval", reconcilerCfg.Interval.String())
+		logger.Info("Reconciler config", "max_concurrent", reconcilerCfg.MaxConcurrent, "interval", reconcilerCfg.Interval.String(), "sync_timeout", reconcilerCfg.SyncTimeout.String())
 		reconciler = controller.NewReconciler(registry, executor, logger, reconcilerCfg)
 		go reconciler.Run(ctx)
 
@@ -158,6 +175,7 @@ func main() {
 	}
 
 	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
+	appHandler.SyncTimeout = reconcilerCfg.SyncTimeout
 	if reconciler != nil {
 		appHandler.SyncGate = reconciler
 	}
@@ -198,10 +216,12 @@ func main() {
 					r.Get("/{id}/containers", appHandler.ListAppContainers)
 					r.Patch("/{id}", appHandler.UpdateApp)
 					r.Post("/{id}/sync", appHandler.ForceSyncApp)
+					r.Post("/{id}/reconcile", appHandler.ReconcileApp)
 					r.Post("/{id}/suspend", appHandler.SuspendApp)
 					r.Post("/{id}/resume", appHandler.ResumeApp)
 					r.Delete("/{id}", appHandler.DeleteApp)
 				})
+				r.Get("/operations/{id}", appHandler.GetOperation)
 			}
 		})
 	})
