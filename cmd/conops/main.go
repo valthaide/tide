@@ -30,7 +30,6 @@ import (
 var Version = "dev"
 
 func main() {
-	fsperm.ApplyUmask077()
 	redact.Default.ReloadFromEnv()
 	logger := slog.New(redact.WrapSlog(slog.NewJSONHandler(os.Stdout, nil), redact.Default))
 	mode := agent.ResolveMode()
@@ -43,9 +42,8 @@ func main() {
 	_ = fsperm.EnsurePrivateDir(dataDir)
 
 	secretsCfg := secrets.LoadConfigFromEnv()
-	if err := secretsCfg.Validate(); err != nil {
-		logger.Error("Invalid secrets configuration", "error", err)
-		os.Exit(1)
+	for _, w := range secretsCfg.Warnings() {
+		logger.Warn(w)
 	}
 
 	var dbStore store.Store
@@ -121,9 +119,9 @@ func main() {
 	} else if dataDir != "." {
 		executor.ToolsDir = filepath.Join(dataDir, "conops-tools")
 	}
-	_ = fsperm.EnsurePrivateDir(executor.WorkDir)
-	if err := fsperm.HardenRuntimeTree(executor.WorkDir); err != nil {
-		logger.Warn("Failed to harden runtime permissions", "dir", executor.WorkDir, "error", err)
+	_ = fsperm.EnsureSharedDir(executor.WorkDir)
+	if err := fsperm.MigrateRuntimePermissions(executor.WorkDir); err != nil {
+		logger.Warn("Failed to migrate runtime permissions", "dir", executor.WorkDir, "error", err)
 	}
 	logger.Info("Runtime workspace configured", "dir", executor.WorkDir, "tools_dir", executor.ToolsDir)
 
@@ -173,6 +171,7 @@ func main() {
 		logger.Error("Failed to register metrics", "error", err)
 		os.Exit(1)
 	}
+	metrics.SetBuildInfo(Version)
 
 	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
 	appHandler.SyncTimeout = reconcilerCfg.SyncTimeout

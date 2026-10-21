@@ -78,14 +78,38 @@ var (
 		Name:      "fleet_errors_total",
 		Help:      "Number of fleet reconcile failures by code.",
 	}, []string{"code"})
+
+	ReconcileLastSuccessTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "reconcile_last_success_timestamp",
+		Help:      "Unix timestamp of the last successful app reconcile/apply.",
+	})
+
+	DeployBlockedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "deploy_blocked",
+		Help:      "Number of deploys blocked before apply (e.g. CI gate).",
+	}, []string{"app", "reason"})
+
+	WatchActionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "watch_file_actions_total",
+		Help:      "Number of watch_files restart/reload actions applied.",
+	}, []string{"app"})
+
+	BuildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "build_info",
+		Help:      "Build version information (value always 1).",
+	}, []string{"version"})
 )
 
 var (
 	envDrift = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
-		Name:      "app_env_drift",
+		Name:      "env_drift",
 		Help:      "Whether external compose env_file content differs from last applied hash (1=yes).",
-	}, []string{"app_id", "app_name"})
+	}, []string{"app"})
 
 	envHashApplied = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
@@ -111,6 +135,10 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		GitAuthFailuresTotal,
 		FleetLastSuccessTimestamp,
 		FleetErrorsTotal,
+		ReconcileLastSuccessTimestamp,
+		DeployBlockedTotal,
+		WatchActionsTotal,
+		BuildInfo,
 		envDrift,
 		envHashApplied,
 		syncErrorInfo,
@@ -314,12 +342,53 @@ func ObserveRequeue(appID, appName, reason string) {
 }
 
 // SetEnvDrift sets whether an app's external env_file hash differs from applied.
-func SetEnvDrift(appID, appName string, drifted bool) {
+func SetEnvDrift(app string, drifted bool) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
 	v := 0.0
 	if drifted {
 		v = 1
 	}
-	envDrift.WithLabelValues(appID, appName).Set(v)
+	envDrift.WithLabelValues(app).Set(v)
+}
+
+// ObserveReconcileSuccess records last successful reconcile timestamp.
+func ObserveReconcileSuccess() {
+	ReconcileLastSuccessTimestamp.Set(float64(time.Now().Unix()))
+}
+
+// ObserveDeployBlocked increments deploy_blocked for an app/reason.
+func ObserveDeployBlocked(app, reason string) {
+	app = strings.TrimSpace(app)
+	reason = strings.TrimSpace(reason)
+	if app == "" {
+		app = "unknown"
+	}
+	if reason == "" {
+		reason = "unknown"
+	}
+	DeployBlockedTotal.WithLabelValues(app, reason).Inc()
+}
+
+// ObserveWatchAction increments watch_file action counter.
+func ObserveWatchAction(app string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	WatchActionsTotal.WithLabelValues(app).Inc()
+}
+
+// SetBuildInfo sets conops_build_info{version=...} 1.
+func SetBuildInfo(version string) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "dev"
+	}
+	BuildInfo.Reset()
+	BuildInfo.WithLabelValues(version).Set(1)
 }
 
 // SetEnvHashApplied records when an env hash was applied.

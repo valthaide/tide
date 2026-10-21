@@ -84,6 +84,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_applied_env_hash TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_applied_watch_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS deploy_policy_json TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
@@ -173,7 +179,9 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		last_sync_at,
 		status,
 		COALESCE(suspended, FALSE),
-		COALESCE(last_applied_env_hash, '')
+		COALESCE(last_applied_env_hash, ''),
+		COALESCE(last_applied_watch_hash, ''),
+		COALESCE(deploy_policy_json, '')
 	FROM apps
 	WHERE id = $1
 	`
@@ -198,10 +206,13 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		&app.Status,
 		&app.Suspended,
 		&app.LastAppliedEnvHash,
+		&app.LastAppliedWatchHash,
+		&app.DeployPolicyJSON,
 	)
 	if err != nil {
 		return nil, err
 	}
+	app.ApplyPolicy()
 	return &app, nil
 }
 
@@ -224,7 +235,9 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		last_sync_at,
 		status,
 		COALESCE(suspended, FALSE),
-		COALESCE(last_applied_env_hash, '')
+		COALESCE(last_applied_env_hash, ''),
+		COALESCE(last_applied_watch_hash, ''),
+		COALESCE(deploy_policy_json, '')
 	FROM apps
 	`
 	rows, err := s.pool.Query(ctx, query)
@@ -254,9 +267,12 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.Status,
 			&app.Suspended,
 			&app.LastAppliedEnvHash,
+			&app.LastAppliedWatchHash,
+			&app.DeployPolicyJSON,
 		); err != nil {
 			continue
 		}
+		app.ApplyPolicy()
 		apps = append(apps, &app)
 	}
 	return apps, nil
@@ -359,6 +375,28 @@ func (s *PostgresStore) ClearAppRepoSecret(ctx context.Context, appID string) er
 
 func (s *PostgresStore) UpdateAppEnvHash(ctx context.Context, id, envHash string) error {
 	ct, err := s.pool.Exec(ctx, `UPDATE apps SET last_applied_env_hash = $1 WHERE id = $2`, envHash, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateAppWatchHash(ctx context.Context, id, watchHash string) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE apps SET last_applied_watch_hash = $1 WHERE id = $2`, watchHash, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateAppDeployPolicy(ctx context.Context, id, policyJSON string) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE apps SET deploy_policy_json = $1 WHERE id = $2`, policyJSON, id)
 	if err != nil {
 		return err
 	}

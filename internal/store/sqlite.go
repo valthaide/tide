@@ -81,6 +81,12 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "last_applied_env_hash TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "last_applied_watch_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "deploy_policy_json TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
@@ -175,7 +181,9 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		last_sync_at,
 		status,
 		COALESCE(suspended, 0),
-		COALESCE(last_applied_env_hash, '')
+		COALESCE(last_applied_env_hash, ''),
+		COALESCE(last_applied_watch_hash, ''),
+		COALESCE(deploy_policy_json, '')
 	FROM apps
 	WHERE id = ?
 	`
@@ -201,11 +209,14 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		&app.Status,
 		&suspended,
 		&app.LastAppliedEnvHash,
+		&app.LastAppliedWatchHash,
+		&app.DeployPolicyJSON,
 	)
 	if err != nil {
 		return nil, err
 	}
 	app.Suspended = suspended != 0
+	app.ApplyPolicy()
 	return &app, nil
 }
 
@@ -228,7 +239,9 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		last_sync_at,
 		status,
 		COALESCE(suspended, 0),
-		COALESCE(last_applied_env_hash, '')
+		COALESCE(last_applied_env_hash, ''),
+		COALESCE(last_applied_watch_hash, ''),
+		COALESCE(deploy_policy_json, '')
 	FROM apps
 	`
 	rows, err := s.db.QueryContext(ctx, query)
@@ -259,10 +272,13 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.Status,
 			&suspended,
 			&app.LastAppliedEnvHash,
+			&app.LastAppliedWatchHash,
+			&app.DeployPolicyJSON,
 		); err != nil {
 			continue
 		}
 		app.Suspended = suspended != 0
+		app.ApplyPolicy()
 		apps = append(apps, &app)
 	}
 	return apps, nil
@@ -390,6 +406,37 @@ func (s *SQLiteStore) ClearAppRepoSecret(ctx context.Context, appID string) erro
 
 func (s *SQLiteStore) UpdateAppEnvHash(ctx context.Context, id, envHash string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE apps SET last_applied_env_hash = ? WHERE id = ?`, envHash, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+
+func (s *SQLiteStore) UpdateAppWatchHash(ctx context.Context, id, watchHash string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE apps SET last_applied_watch_hash = ? WHERE id = ?`, watchHash, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateAppDeployPolicy(ctx context.Context, id, policyJSON string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE apps SET deploy_policy_json = ? WHERE id = ?`, policyJSON, id)
 	if err != nil {
 		return err
 	}

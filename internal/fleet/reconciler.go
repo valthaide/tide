@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/conops-private/internal/deploypolicy"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/repoauth"
 	"github.com/valthaide/conops-private/internal/syncerr"
@@ -25,6 +26,7 @@ type AppManager interface {
 	FindByName(name string) *api.App
 	AddWithDeployKeyAndEnvs(app *api.App, secret string, serviceEnvs map[string]string) error
 	UpdateApp(id, name, branch, composePath, pollInterval string, serviceEnvs map[string]string) error
+	UpdateDeployPolicy(id, policyJSON string) error
 	UpdateRepoSecret(id, secret string) error
 	ClearRepoSecret(id string) error
 	GetRepoSecret(id string) ([]byte, error)
@@ -269,6 +271,9 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 		if err := r.Apps.AddWithDeployKeyAndEnvs(app, secret, nil); err != nil {
 			return err
 		}
+		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec)); err != nil {
+			return err
+		}
 		if spec.Suspended {
 			_ = r.Apps.SetSuspended(app.ID, true)
 		}
@@ -299,6 +304,9 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 		if err := r.Apps.AddWithDeployKeyAndEnvs(app, secret, nil); err != nil {
 			return err
 		}
+		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec)); err != nil {
+			return err
+		}
 		if spec.Suspended {
 			_ = r.Apps.SetSuspended(app.ID, true)
 		}
@@ -309,6 +317,9 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 	}
 
 	if err := r.Apps.UpdateApp(existing.ID, spec.Name, spec.Branch, spec.ComposePath, spec.PollInterval, nil); err != nil {
+		return err
+	}
+	if err := r.Apps.UpdateDeployPolicy(existing.ID, policyJSONFromSpec(spec)); err != nil {
 		return err
 	}
 	if err := r.syncFleetSecret(existing.ID, method, secret, spec); err != nil {
@@ -349,6 +360,22 @@ func (r *Reconciler) syncFleetSecret(appID, method, secret string, spec AppSpec)
 	default:
 		return nil
 	}
+}
+
+func policyJSONFromSpec(spec AppSpec) string {
+	p := deploypolicy.Policy{
+		RequirePipelineSuccess: spec.RequirePipelineSuccess,
+	}
+	for _, w := range spec.WatchFiles {
+		p.WatchFiles = append(p.WatchFiles, deploypolicy.WatchFile{
+			Path:          w.Path,
+			Action:        w.Action,
+			Service:       w.Service,
+			ReloadURL:     w.ReloadURL,
+			ReloadCommand: w.ReloadCommand,
+		})
+	}
+	return deploypolicy.Encode(p)
 }
 
 func (r *Reconciler) resolveAppSecret(spec AppSpec, method string) (string, error) {

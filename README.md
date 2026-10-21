@@ -10,7 +10,8 @@
 | **Fleet-репо** | Какие apps на каком хосте |
 | **App-репо** | compose + env_file / опционально vault refs |
 
-Подробности: [ARCHITECTURE.md](ARCHITECTURE.md). План: [ROADMAP.md](ROADMAP.md).
+Подробности: [ARCHITECTURE.md](ARCHITECTURE.md). План: [ROADMAP.md](ROADMAP.md).  
+Changelog: [CHANGELOG.md](CHANGELOG.md). Пути vs Puppet: [docs/PATH_OWNERSHIP.md](docs/PATH_OWNERSHIP.md).
 
 ## Компоненты
 
@@ -44,10 +45,28 @@ Metrics: `http://127.0.0.1:8081/metrics` · Health: `/healthz`
 | `CONOPS_API_TOKEN` / `bootstrap_token` | Bearer API |
 | `CONOPS_MAX_CONCURRENT_SYNCS` | Лимит параллельных sync (default 2) |
 | `CONOPS_WEBHOOK_SECRET` | Включает `POST /api/v1/hooks/git` |
-| `CONOPS_SOPS` | must stay unset/false (SOPS removed; secrets via Puppet/hiera-eyaml env files) |
+| `CONOPS_SOPS` | ignored (warning); remove from env |
 | `CONOPS_VAULT_ADDR` + `CONOPS_VAULT_TOKEN` | Resolve `vault://path#key` в env |
 | `CONOPS_FLEET_REPO_URL` | Fleet GitOps |
+| `CONOPS_GITLAB_API_TOKEN` | optional; CI gate `require_pipeline_success` (`read_api`) |
 | `CONOPS_MODE` / `CONOPS_HUB_URL` | agent/hub |
+
+### Fleet app options (v1.0.4+)
+
+```yaml
+apps:
+  - name: monitoring
+    repo_url: https://git.example/group/monitoring.git
+    repo_auth_method: token
+    require_pipeline_success: true
+    watch_files:
+      - path: prometheus.yml
+        action: reload
+        reload_url: http://127.0.0.1:9090/-/reload
+      - path: rules/alerts.yml
+        action: restart
+        service: prometheus
+```
 
 ## Лицензия
 

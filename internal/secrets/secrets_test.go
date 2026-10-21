@@ -4,22 +4,23 @@ import (
 	"testing"
 )
 
-func TestValidateRejectsSOPS(t *testing.T) {
+func TestWarningsForSOPS(t *testing.T) {
 	t.Setenv("CONOPS_SOPS", "true")
 	t.Setenv("CONOPS_SOPS_AGE_KEY", "")
 	t.Setenv("CONOPS_SOPS_AGE_KEY_FILE", "")
 	cfg := LoadConfigFromEnv()
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when CONOPS_SOPS=true")
+	warns := cfg.Warnings()
+	if len(warns) == 0 {
+		t.Fatal("expected warning when CONOPS_SOPS=true")
 	}
 }
 
-func TestValidateOKWhenSOPSOff(t *testing.T) {
-	t.Setenv("CONOPS_SOPS", "false")
+func TestNoWarningsWhenClean(t *testing.T) {
+	t.Setenv("CONOPS_SOPS", "")
 	t.Setenv("CONOPS_SOPS_AGE_KEY", "")
 	t.Setenv("CONOPS_SOPS_AGE_KEY_FILE", "")
 	cfg := LoadConfigFromEnv()
-	if err := cfg.Validate(); err != nil {
-		t.Fatal(err)
+	if warns := cfg.Warnings(); len(warns) != 0 {
+		t.Fatalf("unexpected warnings: %v", warns)
 	}
 }

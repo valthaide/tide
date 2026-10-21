@@ -1,6 +1,10 @@
 package api
 
-import "time"
+import (
+	"time"
+
+	"github.com/valthaide/conops-private/internal/deploypolicy"
+)
 
 // App represents a Git repository configuration to track.
 // Moved from controller/registry.go to avoid circular dependency with store package.
@@ -22,8 +26,36 @@ type App struct {
 	LastSyncErrorStage      string    `json:"last_sync_error_stage,omitempty"`
 	LastSyncAt              time.Time `json:"last_sync_at"`
 	LastAppliedEnvHash      string    `json:"last_applied_env_hash,omitempty"`
+	LastAppliedWatchHash    string    `json:"last_applied_watch_hash,omitempty"`
+	DeployPolicyJSON        string    `json:"-"`
+	RequirePipelineSuccess  bool      `json:"require_pipeline_success"`
+	WatchFiles              []deploypolicy.WatchFile `json:"watch_files,omitempty"`
 	Status                  string    `json:"status"` // e.g., "synced", "pending", "error"
 	Suspended               bool      `json:"suspended"`
+}
+
+// Policy returns the decoded deploy policy for the app.
+func (a *App) Policy() deploypolicy.Policy {
+	if a == nil {
+		return deploypolicy.Policy{}
+	}
+	if len(a.WatchFiles) > 0 || a.RequirePipelineSuccess {
+		return deploypolicy.Policy{
+			RequirePipelineSuccess: a.RequirePipelineSuccess,
+			WatchFiles:             a.WatchFiles,
+		}
+	}
+	return deploypolicy.Decode(a.DeployPolicyJSON)
+}
+
+// ApplyPolicy fills structured fields from stored JSON.
+func (a *App) ApplyPolicy() {
+	if a == nil {
+		return
+	}
+	p := deploypolicy.Decode(a.DeployPolicyJSON)
+	a.RequirePipelineSuccess = p.RequirePipelineSuccess
+	a.WatchFiles = p.WatchFiles
 }
 
 // APIResponse is a standard wrapper for API responses.

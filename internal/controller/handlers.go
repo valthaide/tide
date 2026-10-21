@@ -11,7 +11,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/conops-private/internal/cigate"
 	"github.com/valthaide/conops-private/internal/compose"
+	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/syncerr"
 )
@@ -504,6 +506,23 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 		h.Logger.Warn("Failed to mark app syncing", "id", app.ID, "error", err)
 	}
 
+	if policy := app.Policy(); policy.RequirePipelineSuccess {
+		commit := app.LastSeenCommit
+		if commit != "" && commit != app.LastSyncedCommit {
+			checker := &cigate.Checker{Token: cigate.TokenFromEnv()}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			res := checker.CheckCommit(ctx, app.RepoURL, commit)
+			cancel()
+			if !res.Allowed {
+				se := syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate,
+					"deploy blocked: pipeline status="+res.Status+" reason="+res.Reason)
+				_ = h.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
+				metrics.ObserveDeployBlocked(app.Name, res.Reason)
+				return se
+			}
+		}
+	}
+
 	repoSecret, err := h.Registry.GetRepoSecret(app.ID)
 	if err != nil {
 		_ = h.Registry.UpdateStatus(app.ID, "error", nil)
@@ -595,7 +614,7 @@ func httpStatusForSyncErr(se *syncerr.Error) int {
 	switch se.Code {
 	case syncerr.CodeGitAuth, syncerr.CodeGitFetch:
 		return http.StatusBadGateway
-	case syncerr.CodeComposeApply, syncerr.CodeEnvFileMissing:
+	case syncerr.CodeComposeApply, syncerr.CodeEnvFileMissing, syncerr.CodeBlockedByCI:
 		return http.StatusUnprocessableEntity
 	case syncerr.CodeTimeout:
 		return http.StatusGatewayTimeout

@@ -18,14 +18,25 @@ type HostDocument struct {
 
 // AppSpec is a desired application registration from fleet git.
 type AppSpec struct {
-	Name           string `yaml:"name"`
-	RepoURL        string `yaml:"repo_url"`
-	Branch         string `yaml:"branch"`
-	ComposePath    string `yaml:"compose_path"`
-	RepoAuthMethod string `yaml:"repo_auth_method"`
-	PollInterval   string `yaml:"poll_interval"`
-	DeployKeyFile  string `yaml:"deploy_key_file"`
-	Suspended      bool   `yaml:"suspended"`
+	Name                   string              `yaml:"name"`
+	RepoURL                string              `yaml:"repo_url"`
+	Branch                 string              `yaml:"branch"`
+	ComposePath            string              `yaml:"compose_path"`
+	RepoAuthMethod         string              `yaml:"repo_auth_method"`
+	PollInterval           string              `yaml:"poll_interval"`
+	DeployKeyFile          string              `yaml:"deploy_key_file"`
+	Suspended              bool                `yaml:"suspended"`
+	RequirePipelineSuccess bool                `yaml:"require_pipeline_success"`
+	WatchFiles             []WatchFileSpec     `yaml:"watch_files"`
+}
+
+// WatchFileSpec is a path watched for content changes after sync.
+type WatchFileSpec struct {
+	Path          string `yaml:"path"`
+	Action        string `yaml:"action"` // restart | reload
+	Service       string `yaml:"service"`
+	ReloadURL     string `yaml:"reload_url"`
+	ReloadCommand string `yaml:"reload_command"`
 }
 
 // Config controls fleet reconciliation.

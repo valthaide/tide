@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/valthaide/conops-private/internal/cigate"
 	"github.com/valthaide/conops-private/internal/compose"
+	"github.com/valthaide/conops-private/internal/deploypolicy"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/syncerr"
 )
@@ -84,6 +86,13 @@ type AppRuntime interface {
 // EnvFileHasher optionally hashes absolute compose env_file paths outside the repo.
 type EnvFileHasher interface {
 	ExternalEnvHashForApp(appID, composePath string) (string, error)
+}
+
+// WatchFileManager hashes watch_files and applies restart/reload actions.
+type WatchFileManager interface {
+	WatchFilesHashForApp(appID string, files []deploypolicy.WatchFile) (string, error)
+	RestartService(ctx context.Context, appID, composePath, service string) (string, error)
+	HTTPReload(ctx context.Context, reloadURL string) error
 }
 
 // Reconciler applies desired state directly on the host (monolith mode).
@@ -203,6 +212,9 @@ func (r *Reconciler) reconcileOnce() {
 				r.requeuePending(app, reason)
 			}
 		}
+		if app.Status == "synced" {
+			r.handleWatchFileDrift(app)
+		}
 
 		switch app.Status {
 		case "pending":
@@ -273,7 +285,7 @@ func (r *Reconciler) envFileDriftReason(app *App) string {
 		se := syncerr.Classify(err)
 		if se.Code == syncerr.CodeEnvFileMissing {
 			_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
-			metrics.SetEnvDrift(app.ID, app.Name, true)
+			metrics.SetEnvDrift(app.Name, true)
 			if r.Logger != nil {
 				r.Logger.Error("env_file missing", "app_id", app.ID, "code", se.Code)
 			}
@@ -281,24 +293,24 @@ func (r *Reconciler) envFileDriftReason(app *App) string {
 		return ""
 	}
 	if hash == "" {
-		metrics.SetEnvDrift(app.ID, app.Name, false)
+		metrics.SetEnvDrift(app.Name, false)
 		return ""
 	}
 	if app.LastAppliedEnvHash == "" {
 		// First observation after upgrade: record without forcing a redeploy.
 		_ = r.Registry.UpdateEnvHash(app.ID, hash)
-		metrics.SetEnvDrift(app.ID, app.Name, false)
+		metrics.SetEnvDrift(app.Name, false)
 		metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())
 		return ""
 	}
 	if hash != app.LastAppliedEnvHash {
-		metrics.SetEnvDrift(app.ID, app.Name, true)
+		metrics.SetEnvDrift(app.Name, true)
 		if r.Logger != nil {
 			r.Logger.Info("env_file changed", "app_id", app.ID)
 		}
 		return "env_file_changed"
 	}
-	metrics.SetEnvDrift(app.ID, app.Name, false)
+	metrics.SetEnvDrift(app.Name, false)
 	return ""
 }
 
@@ -338,6 +350,13 @@ func (r *Reconciler) syncApp(app *App) error {
 	syncStartedAt := time.Now()
 	if err := r.Registry.UpdateStatus(app.ID, "syncing", &syncStartedAt); err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to mark app syncing", "app_id", app.ID, "error", err)
+	}
+
+	if se := r.checkPipelineGate(app); se != nil {
+		_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
+		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
+		metrics.ObserveDeployBlocked(app.Name, se.Code)
+		return se
 	}
 
 	repoSecret, err := r.Registry.GetRepoSecret(app.ID)
@@ -407,8 +426,103 @@ func (r *Reconciler) syncApp(app *App) error {
 		r.Logger.Warn("Failed to update app status", "app_id", app.ID, "error", err)
 	}
 	r.recordAppliedEnvHash(app)
+	r.recordAppliedWatchHash(app)
 	metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
+	metrics.ObserveReconcileSuccess()
 	return nil
+}
+
+func (r *Reconciler) checkPipelineGate(app *App) *syncerr.Error {
+	if app == nil {
+		return nil
+	}
+	policy := app.Policy()
+	if !policy.RequirePipelineSuccess {
+		return nil
+	}
+	// Only gate when deploying a new commit (or first sync).
+	if app.LastSeenCommit != "" && app.LastSeenCommit == app.LastSyncedCommit {
+		return nil
+	}
+	token := cigate.TokenFromEnv()
+	checker := &cigate.Checker{Token: token}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res := checker.CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
+	if res.Allowed {
+		return nil
+	}
+	reason := res.Reason
+	if reason == "" {
+		reason = "blocked_by_ci"
+	}
+	msg := fmt.Sprintf("deploy blocked: pipeline status=%s reason=%s", res.Status, reason)
+	if r.Logger != nil {
+		r.Logger.Warn("Deploy blocked by CI gate", "app", app.Name, "commit", app.LastSeenCommit, "reason", reason, "pipeline_status", res.Status)
+	}
+	return syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate, msg)
+}
+
+func (r *Reconciler) handleWatchFileDrift(app *App) {
+	mgr, ok := r.Executor.(WatchFileManager)
+	if !ok || app == nil {
+		return
+	}
+	policy := app.Policy()
+	if len(policy.WatchFiles) == 0 {
+		return
+	}
+	hash, err := mgr.WatchFilesHashForApp(app.ID, policy.WatchFiles)
+	if err != nil {
+		if r.Logger != nil {
+			r.Logger.Warn("watch_files hash failed", "app_id", app.ID, "error", err)
+		}
+		return
+	}
+	if hash == "" {
+		return
+	}
+	if app.LastAppliedWatchHash == "" {
+		_ = r.Registry.UpdateWatchHash(app.ID, hash)
+		return
+	}
+	if hash == app.LastAppliedWatchHash {
+		return
+	}
+	if r.Logger != nil {
+		r.Logger.Info("watch_files changed", "app_id", app.ID, "app", app.Name)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for _, w := range policy.WatchFiles {
+		switch w.Action {
+		case "reload":
+			if w.ReloadURL != "" {
+				if err := mgr.HTTPReload(ctx, w.ReloadURL); err != nil && r.Logger != nil {
+					r.Logger.Error("watch_files reload failed", "app", app.Name, "path", w.Path, "error", err)
+				} else if r.Logger != nil {
+					r.Logger.Info("watch_files reload applied", "app", app.Name, "path", w.Path, "url", w.ReloadURL)
+				}
+			} else if w.Service != "" {
+				// Fallback: restart service if reload_url missing
+				if _, err := mgr.RestartService(ctx, app.ID, app.ComposePath, w.Service); err != nil && r.Logger != nil {
+					r.Logger.Error("watch_files restart failed", "app", app.Name, "service", w.Service, "error", err)
+				}
+			}
+		default: // restart
+			svc := w.Service
+			if svc == "" {
+				continue
+			}
+			if _, err := mgr.RestartService(ctx, app.ID, app.ComposePath, svc); err != nil && r.Logger != nil {
+				r.Logger.Error("watch_files restart failed", "app", app.Name, "service", svc, "error", err)
+			} else if r.Logger != nil {
+				r.Logger.Info("watch_files restart applied", "app", app.Name, "service", svc, "path", w.Path)
+			}
+		}
+	}
+	_ = r.Registry.UpdateWatchHash(app.ID, hash)
+	metrics.ObserveWatchAction(app.Name)
 }
 
 func (r *Reconciler) recordAppliedEnvHash(app *App) {
@@ -421,8 +535,24 @@ func (r *Reconciler) recordAppliedEnvHash(app *App) {
 		return
 	}
 	_ = r.Registry.UpdateEnvHash(app.ID, hash)
-	metrics.SetEnvDrift(app.ID, app.Name, false)
+	metrics.SetEnvDrift(app.Name, false)
 	metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())
+}
+
+func (r *Reconciler) recordAppliedWatchHash(app *App) {
+	mgr, ok := r.Executor.(WatchFileManager)
+	if !ok || app == nil {
+		return
+	}
+	policy := app.Policy()
+	if len(policy.WatchFiles) == 0 {
+		return
+	}
+	hash, err := mgr.WatchFilesHashForApp(app.ID, policy.WatchFiles)
+	if err != nil || hash == "" {
+		return
+	}
+	_ = r.Registry.UpdateWatchHash(app.ID, hash)
 }
 
 func truncateOutput(value string) string {

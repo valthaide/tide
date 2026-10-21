@@ -24,6 +24,8 @@ type Store interface {
 	ClearAppRepoSecret(ctx context.Context, appID string) error
 	UpdateAppCredentials(ctx context.Context, appID string, envCiphertext, envNonce []byte) error
 	UpdateAppEnvHash(ctx context.Context, id, envHash string) error
+	UpdateAppWatchHash(ctx context.Context, id, watchHash string) error
+	UpdateAppDeployPolicy(ctx context.Context, id, policyJSON string) error
 	UpdateAppCommit(ctx context.Context, id, commitHash, commitMessage string) error
 	UpdateAppStatus(ctx context.Context, id, status string, lastSyncAt *time.Time) error
 	UpdateAppSyncResult(

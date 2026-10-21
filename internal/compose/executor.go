@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/valthaide/conops-private/internal/fsperm"
 	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/repoauth"
 	"github.com/valthaide/conops-private/internal/secrets"
@@ -84,7 +86,7 @@ func (e *ComposeExecutor) Apply(
 		emitProgress()
 		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("resolve app dir failed: %w", err)
 	}
-	if err := os.MkdirAll(appDirAbs, 0700); err != nil {
+	if err := fsperm.EnsureSharedDir(appDirAbs); err != nil {
 		appendLogSection(&syncLog, "Sync setup")
 		appendLogLine(&syncLog, "failed to create runtime directory")
 		appendLogLine(&syncLog, err.Error())
@@ -140,6 +142,12 @@ func (e *ComposeExecutor) Apply(
 	if err != nil {
 		return redact.String(strings.TrimSpace(syncLog.String())), syncerr.Wrap(syncerr.CodeGitFetch, syncerr.StageFetch, fmt.Errorf("prepare repo failed: %w", err))
 	}
+	if permErr := fsperm.RelaxCheckoutTree(repoDir); permErr != nil && e.Logger != nil {
+		e.Logger.Warn("Failed to relax checkout permissions", "app_id", appID, "error", permErr)
+	}
+	for _, private := range []string{filepath.Join(appDirAbs, ".ssh"), filepath.Join(appDirAbs, ".envs")} {
+		_ = fsperm.HardenPrivateSubtree(private)
+	}
 
 	if e.Secrets != nil {
 		appendLogSection(&syncLog, "Secrets")
@@ -175,7 +183,7 @@ func (e *ComposeExecutor) Apply(
 
 	wroteCompose := false
 	if strings.TrimSpace(content) != "" {
-		if err := os.WriteFile(composeFullPath, []byte(content), 0600); err != nil {
+		if err := os.WriteFile(composeFullPath, []byte(content), 0644); err != nil {
 			appendLogSection(&syncLog, "Compose file")
 			appendLogLine(&syncLog, fmt.Sprintf("failed to write compose file: %s", composeFullPath))
 			appendLogLine(&syncLog, err.Error())
@@ -274,6 +282,56 @@ func (e *ComposeExecutor) Apply(
 	appendLogLine(&syncLog, "application reconciled successfully")
 	emitProgress()
 	return redact.String(strings.TrimSpace(syncLog.String())), nil
+}
+
+// RestartService restarts one compose service for an app (config bind-mount refresh).
+func (e *ComposeExecutor) RestartService(ctx context.Context, appID, composePath, service string) (string, error) {
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return "", fmt.Errorf("service name is required for restart")
+	}
+	projectName := composeProjectName(appID)
+	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(composePath) == "" {
+		composePath = "compose.yaml"
+	}
+	composeFullPath := filepath.Join(appDirAbs, "repo", composePath)
+	composeDir := filepath.Dir(composeFullPath)
+	composeFileName := filepath.Base(composeFullPath)
+	out, err := e.runCommand(
+		ctx,
+		"docker",
+		[]string{"compose", "-p", projectName, "-f", composeFileName, "restart", service},
+		composeDir,
+		nil,
+		nil,
+	)
+	return redact.String(out), err
+}
+
+// HTTPReload POSTs to a reload endpoint (e.g. Prometheus /-/reload).
+func (e *ComposeExecutor) HTTPReload(ctx context.Context, reloadURL string) error {
+	reloadURL = strings.TrimSpace(reloadURL)
+	if reloadURL == "" {
+		return fmt.Errorf("reload_url is empty")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reloadURL, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("reload %s returned %s", reloadURL, resp.Status)
+	}
+	return nil
 }
 
 // Destroy tears down app containers and networks without removing volumes.

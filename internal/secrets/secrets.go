@@ -12,9 +12,9 @@ import (
 )
 
 // Config controls optional Vault integration.
-// SOPS support was removed from this fork; CONOPS_SOPS=true is a startup error.
+// SOPS support was removed from this fork.
 type Config struct {
-	SOPSEnabled    bool // always false; retained so callers can detect misconfig
+	SOPSEnabled    bool // true only when leftover env is set (ignored at runtime)
 	VaultEnabled   bool
 	VaultAddr      string
 	VaultToken     string
@@ -38,6 +38,9 @@ func LoadConfigFromEnv() Config {
 	default:
 		cfg.SOPSEnabled = false
 	}
+	if strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY")) != "" || strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY_FILE")) != "" {
+		cfg.SOPSEnabled = true
+	}
 	switch vaultMode {
 	case "1", "true", "yes", "on":
 		cfg.VaultEnabled = true
@@ -49,18 +52,19 @@ func LoadConfigFromEnv() Config {
 	return cfg
 }
 
-// Validate returns an error when the process is configured to use removed features.
-func (c Config) Validate() error {
-	if c.SOPSEnabled {
-		return fmt.Errorf("CONOPS_SOPS is enabled but SOPS support was removed from this ConOps fork; unset CONOPS_SOPS (TENKO uses hiera-eyaml → secrets.env)")
+// Warnings returns human-readable warnings for leftover/removed config (non-fatal).
+func (c Config) Warnings() []string {
+	var out []string
+	if c.SOPSEnabled || strings.TrimSpace(os.Getenv("CONOPS_SOPS")) != "" {
+		out = append(out, "CONOPS_SOPS is set but SOPS support was removed; unset CONOPS_SOPS / AGE key env vars (use hiera-eyaml → secrets.env)")
 	}
-	if age := strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY")); age != "" {
-		return fmt.Errorf("CONOPS_SOPS_AGE_KEY is set but SOPS support was removed; unset it")
+	if strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY")) != "" {
+		out = append(out, "CONOPS_SOPS_AGE_KEY is set but ignored; unset it")
 	}
-	if ageFile := strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY_FILE")); ageFile != "" {
-		return fmt.Errorf("CONOPS_SOPS_AGE_KEY_FILE is set but SOPS support was removed; unset it")
+	if strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY_FILE")) != "" {
+		out = append(out, "CONOPS_SOPS_AGE_KEY_FILE is set but ignored; unset it")
 	}
-	return nil
+	return out
 }
 
 // Manager applies secret backends during sync.
@@ -76,9 +80,6 @@ func NewManager(cfg Config) *Manager {
 func (m *Manager) PrepareRepo(ctx context.Context, repoDir string) error {
 	_ = ctx
 	_ = repoDir
-	if m != nil && m.Config.SOPSEnabled {
-		return fmt.Errorf("SOPS is not supported in this ConOps build")
-	}
 	return nil
 }
 

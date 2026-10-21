@@ -380,6 +380,16 @@ func (r *Registry) UpdateEnvHash(id, hash string) error {
 	return r.store.UpdateAppEnvHash(context.Background(), id, hash)
 }
 
+// UpdateWatchHash stores the last applied watch_files content hash.
+func (r *Registry) UpdateWatchHash(id, hash string) error {
+	return r.store.UpdateAppWatchHash(context.Background(), id, hash)
+}
+
+// UpdateDeployPolicy stores fleet deploy policy JSON for an app.
+func (r *Registry) UpdateDeployPolicy(id, policyJSON string) error {
+	return r.store.UpdateAppDeployPolicy(context.Background(), id, policyJSON)
+}
+
 // ResetStuckSyncing marks apps left in "syncing" after a process crash as pending.
 func (r *Registry) ResetStuckSyncing() int {
 	n := 0
