@@ -17,6 +17,15 @@ import (
 	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
+// gateWait is returned when CI is still running; sync should stay pending and retry.
+type gateWait struct {
+	msg    string
+	reason string
+	status string
+}
+
+func (e *gateWait) Error() string { return e.msg }
+
 // ReconcilerConfig controls how the monolith applies desired state.
 type ReconcilerConfig struct {
 	Interval       time.Duration
@@ -102,9 +111,10 @@ type Reconciler struct {
 	Logger   *slog.Logger
 	Config   ReconcilerConfig
 
-	mu      sync.Mutex
-	running bool
-	sem     chan struct{}
+	mu               sync.Mutex
+	running          bool
+	sem              chan struct{}
+	watchHashErrSeen map[string]string // appID -> last error text (rate-limit logs)
 }
 
 // NewReconciler creates a new reconciler.
@@ -113,11 +123,12 @@ func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger,
 		cfg.MaxConcurrent = 2
 	}
 	return &Reconciler{
-		Registry: registry,
-		Executor: executor,
-		Logger:   logger,
-		Config:   cfg,
-		sem:      make(chan struct{}, cfg.MaxConcurrent),
+		Registry:         registry,
+		Executor:         executor,
+		Logger:           logger,
+		Config:           cfg,
+		sem:              make(chan struct{}, cfg.MaxConcurrent),
+		watchHashErrSeen: make(map[string]string),
 	}
 }
 
@@ -219,7 +230,12 @@ func (r *Reconciler) reconcileOnce() {
 		switch app.Status {
 		case "pending":
 		case "error":
-			if !r.Config.RetryErrors {
+			// Always re-check CI-blocked apps until the seen commit is deployed
+			// (pipeline may flip pending→success or failed→success after retry).
+			if app.LastSyncErrorCode == syncerr.CodeBlockedByCI &&
+				app.LastSeenCommit != "" && app.LastSeenCommit != app.LastSyncedCommit {
+				// fall through
+			} else if !r.Config.RetryErrors {
 				continue
 			}
 		default:
@@ -352,10 +368,31 @@ func (r *Reconciler) syncApp(app *App) error {
 		r.Logger.Warn("Failed to mark app syncing", "app_id", app.ID, "error", err)
 	}
 
-	if se := r.checkPipelineGate(app); se != nil {
+	if err := r.checkPipelineGate(app); err != nil {
+		var wait *gateWait
+		if asWait, ok := err.(*gateWait); ok {
+			wait = asWait
+		}
+		if wait != nil {
+			now := time.Now()
+			_ = r.Registry.UpdateStatus(app.ID, "pending", &now)
+			_ = r.Registry.UpdateSyncProgress(app.ID, now, fmt.Sprintf("waiting for CI: status=%s reason=%s commit=%s", wait.status, wait.reason, app.LastSeenCommit))
+			metrics.ObserveDeployBlocked(app.Name, wait.reason)
+			if r.Logger != nil {
+				r.Logger.Info("Deploy waiting for CI", "app", app.Name, "commit", app.LastSeenCommit, "pipeline_status", wait.status, "reason", wait.reason)
+			}
+			return nil
+		}
+		se := syncerr.Classify(err)
 		_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
-		metrics.ObserveDeployBlocked(app.Name, se.Code)
+		reason := se.Code
+		if strings.Contains(se.Message, cigate.ReasonCIFailed) {
+			reason = cigate.ReasonCIFailed
+		} else if strings.Contains(se.Message, cigate.ReasonCIError) {
+			reason = cigate.ReasonCIError
+		}
+		metrics.ObserveDeployBlocked(app.Name, reason)
 		return se
 	}
 
@@ -432,7 +469,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	return nil
 }
 
-func (r *Reconciler) checkPipelineGate(app *App) *syncerr.Error {
+func (r *Reconciler) checkPipelineGate(app *App) error {
 	if app == nil {
 		return nil
 	}
@@ -449,12 +486,18 @@ func (r *Reconciler) checkPipelineGate(app *App) *syncerr.Error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	res := checker.CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
-	if res.Allowed {
-		return nil
+	switch res.Outcome {
+	case cigate.OutcomeAllow, "":
+		if res.Allowed {
+			return nil
+		}
+	case cigate.OutcomeWait:
+		msg := fmt.Sprintf("deploy waiting: pipeline status=%s reason=%s", res.Status, res.Reason)
+		return &gateWait{msg: msg, reason: res.Reason, status: res.Status}
 	}
 	reason := res.Reason
 	if reason == "" {
-		reason = "blocked_by_ci"
+		reason = cigate.ReasonCIFailed
 	}
 	msg := fmt.Sprintf("deploy blocked: pipeline status=%s reason=%s", res.Status, reason)
 	if r.Logger != nil {
@@ -474,11 +517,21 @@ func (r *Reconciler) handleWatchFileDrift(app *App) {
 	}
 	hash, err := mgr.WatchFilesHashForApp(app.ID, policy.WatchFiles)
 	if err != nil {
-		if r.Logger != nil {
-			r.Logger.Warn("watch_files hash failed", "app_id", app.ID, "error", err)
+		metrics.SetWatchHashError(app.Name, true)
+		msg := err.Error()
+		r.mu.Lock()
+		prev := r.watchHashErrSeen[app.ID]
+		r.watchHashErrSeen[app.ID] = msg
+		r.mu.Unlock()
+		if prev != msg && r.Logger != nil {
+			r.Logger.Error("watch_files hash failed", "app", app.Name, "app_id", app.ID, "error", err)
 		}
 		return
 	}
+	metrics.SetWatchHashError(app.Name, false)
+	r.mu.Lock()
+	delete(r.watchHashErrSeen, app.ID)
+	r.mu.Unlock()
 	if hash == "" {
 		return
 	}

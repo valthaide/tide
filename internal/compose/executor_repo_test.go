@@ -101,6 +101,7 @@ func TestPrepareRepoRecoversFromCorruptCache(t *testing.T) {
 // A cache whose working tree was emptied but whose .git is intact must still
 // resolve, and must do so without throwing the cache away unnecessarily.
 func TestPrepareRepoRestoresDeletedWorkingTree(t *testing.T) {
+	t.Setenv("CONOPS_DIRTY_WORKTREE", "reset")
 	origin := newOriginRepo(t)
 	appDir := t.TempDir()
 	repoDir := filepath.Join(appDir, "repo")

@@ -18,6 +18,7 @@ const (
 	CodeTimeout        = "timeout"
 	CodeEnvFileMissing = "env_file_missing"
 	CodeBlockedByCI    = "blocked_by_ci"
+	CodeDirtyWorktree  = "dirty_worktree"
 	CodeUnknown        = "unknown"
 )
 
@@ -154,8 +155,11 @@ func Classify(err error) *Error {
 	case strings.Contains(lower, "authentication") || strings.Contains(lower, "permission denied") ||
 		strings.Contains(lower, "invalid deploy key") || strings.Contains(lower, "git token"):
 		return New(CodeGitAuth, StageFetch, msg)
-	case strings.Contains(lower, "blocked_by_ci") || strings.Contains(lower, "deploy blocked"):
+	case strings.Contains(lower, "blocked_by_ci") || strings.Contains(lower, "deploy blocked") ||
+		strings.Contains(lower, "ci_pending") || strings.Contains(lower, "ci_failed"):
 		return New(CodeBlockedByCI, StageCIGate, msg)
+	case strings.Contains(lower, "dirty worktree") || strings.Contains(lower, "dirty_worktree"):
+		return New(CodeDirtyWorktree, StageFetch, msg)
 	case strings.Contains(lower, "env_file missing") || strings.Contains(lower, "env_file_missing"):
 		return New(CodeEnvFileMissing, StageCompose, msg)
 	case strings.Contains(lower, "prepare repo") || strings.Contains(lower, "fetch") || strings.Contains(lower, "clone"):

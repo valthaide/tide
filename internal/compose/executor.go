@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/valthaide/conops-private/internal/fsperm"
+	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/repoauth"
 	"github.com/valthaide/conops-private/internal/secrets"
@@ -482,6 +483,10 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 
 	appendLogLine(&repoLog, "repository cache found; fetching latest refs")
 	if err := e.updateRepo(ctx, &repoLog, repoDir, branch, commitHash, gitEnv); err != nil {
+		if isDirtyWorktreeErr(err) {
+			appendLogLine(&repoLog, redact.String(err.Error()))
+			return redact.String(strings.TrimSpace(repoLog.String())), err
+		}
 		// The cache exists but is unusable: a partially deleted checkout, an
 		// interrupted clone from a previous timeout, or a corrupt object store.
 		// Discarding and re-cloning recovers from all of them, where returning
@@ -540,8 +545,12 @@ func (e *ComposeExecutor) cloneRepo(ctx context.Context, repoLog *strings.Builde
 }
 
 // updateRepo brings an existing checkout up to date. Any error here is treated
-// by the caller as "this cache is not salvageable" rather than a hard failure.
+// by the caller as "this cache is not salvageable" rather than a hard failure,
+// except dirty_worktree (refuse mode) which must not trigger re-clone.
 func (e *ComposeExecutor) updateRepo(ctx context.Context, repoLog *strings.Builder, repoDir, branch, commitHash string, gitEnv map[string]string) error {
+	if err := e.handleDirtyWorktree(ctx, repoLog, repoDir, gitEnv); err != nil {
+		return err
+	}
 	if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"fetch", "origin"}, repoDir, gitEnv, nil); err != nil {
 		return err
 	}
@@ -570,6 +579,49 @@ func (e *ComposeExecutor) updateRepo(ctx context.Context, repoLog *strings.Build
 	}
 
 	return nil
+}
+
+func dirtyWorktreeMode() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_DIRTY_WORKTREE"))) {
+	case "reset", "force", "discard":
+		return "reset"
+	default:
+		return "refuse"
+	}
+}
+
+func isDirtyWorktreeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "dirty worktree")
+}
+
+func (e *ComposeExecutor) handleDirtyWorktree(ctx context.Context, repoLog *strings.Builder, repoDir string, gitEnv map[string]string) error {
+	out, err := e.runCommand(ctx, "git", []string{"status", "--porcelain"}, repoDir, gitEnv, nil)
+	if err != nil {
+		return nil // if status fails, let fetch/reset surface the real problem
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	mode := dirtyWorktreeMode()
+	appHint := filepath.Base(filepath.Dir(repoDir))
+	if mode == "reset" {
+		appendLogLine(repoLog, "dirty worktree detected; CONOPS_DIRTY_WORKTREE=reset, hard reset will discard local changes")
+		metrics.ObserveDirtyWorktree(appHint, "reset")
+		if e.Logger != nil {
+			e.Logger.Warn("Dirty worktree; resetting", "app", appHint, "action", "reset")
+		}
+		return nil
+	}
+	msg := fmt.Sprintf("dirty worktree in %s (local changes present); refusing sync — set CONOPS_DIRTY_WORKTREE=reset to discard, or clean the checkout", repoDir)
+	appendLogLine(repoLog, msg)
+	metrics.ObserveDirtyWorktree(appHint, "refuse")
+	if e.Logger != nil {
+		e.Logger.Error("Dirty worktree; refusing sync", "app", appHint, "action", "refuse")
+	}
+	return syncerr.New(syncerr.CodeDirtyWorktree, syncerr.StageFetch, msg)
 }
 
 // prepareEnvOverrides creates a compose override file with environment variables.

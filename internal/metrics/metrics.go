@@ -88,14 +88,32 @@ var (
 	DeployBlockedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "deploy_blocked",
-		Help:      "Number of deploys blocked before apply (e.g. CI gate).",
+		Help:      "Number of deploys blocked before apply (ci_pending|ci_failed|ci_error).",
 	}, []string{"app", "reason"})
+
+	CICheckLastTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "ci_check_last_timestamp_seconds",
+		Help:      "Unix timestamp of the last CI pipeline gate check per app.",
+	}, []string{"app"})
 
 	WatchActionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "watch_file_actions_total",
 		Help:      "Number of watch_files restart/reload actions applied.",
 	}, []string{"app"})
+
+	WatchHashErrors = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "watch_files_hash_error",
+		Help:      "1 when the last watch_files hash for an app failed.",
+	}, []string{"app"})
+
+	DirtyWorktreeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "dirty_worktree_total",
+		Help:      "Number of sync attempts that found a dirty git worktree.",
+	}, []string{"app", "action"})
 
 	BuildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
@@ -137,7 +155,10 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		FleetErrorsTotal,
 		ReconcileLastSuccessTimestamp,
 		DeployBlockedTotal,
+		CICheckLastTimestamp,
 		WatchActionsTotal,
+		WatchHashErrors,
+		DirtyWorktreeTotal,
 		BuildInfo,
 		envDrift,
 		envHashApplied,
@@ -370,6 +391,33 @@ func ObserveDeployBlocked(app, reason string) {
 		reason = "unknown"
 	}
 	DeployBlockedTotal.WithLabelValues(app, reason).Inc()
+	CICheckLastTimestamp.WithLabelValues(app).Set(float64(time.Now().Unix()))
+}
+
+// SetWatchHashError sets whether the last watch_files hash failed.
+func SetWatchHashError(app string, failed bool) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	v := 0.0
+	if failed {
+		v = 1
+	}
+	WatchHashErrors.WithLabelValues(app).Set(v)
+}
+
+// ObserveDirtyWorktree increments dirty worktree counter.
+func ObserveDirtyWorktree(app, action string) {
+	app = strings.TrimSpace(app)
+	action = strings.TrimSpace(action)
+	if app == "" {
+		app = "unknown"
+	}
+	if action == "" {
+		action = "refuse"
+	}
+	DirtyWorktreeTotal.WithLabelValues(app, action).Inc()
 }
 
 // ObserveWatchAction increments watch_file action counter.

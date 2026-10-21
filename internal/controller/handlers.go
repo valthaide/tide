@@ -513,6 +513,13 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			res := checker.CheckCommit(ctx, app.RepoURL, commit)
 			cancel()
+			if res.Outcome == cigate.OutcomeWait {
+				now := time.Now()
+				_ = h.Registry.UpdateStatus(app.ID, "pending", &now)
+				metrics.ObserveDeployBlocked(app.Name, res.Reason)
+				return syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate,
+					"deploy waiting: pipeline status="+res.Status+" reason="+res.Reason)
+			}
 			if !res.Allowed {
 				se := syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate,
 					"deploy blocked: pipeline status="+res.Status+" reason="+res.Reason)

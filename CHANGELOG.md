@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.0.5
+
+### Fixes
+- **`watch_files` directories and globs**: recursive tree hash for dirs; `*`/`?`/`[]` globs; escaping symlinks not followed. Clear error with `app` + `path`; metric `conops_watch_files_hash_error{app}`; log only when the error text changes (no spam every poll).
+- **CI gate re-check**: `pending`/`running`/`created`/… → wait (status stays `pending`, recheck every reconcile loop); `failed`/`canceled` → block with `ci_failed` but **recheck** while `last_seen != last_synced` (pipeline retry → success deploys without a new commit); API/timeout → `ci_error`.
+- Metrics: `conops_deploy_blocked{app,reason="ci_pending|ci_failed|ci_error"}`, `conops_ci_check_last_timestamp_seconds{app}`.
+- **Dirty worktree**: refuse by default with `dirty_worktree` error + metric; `CONOPS_DIRTY_WORKTREE=reset` discards via hard reset. No silent re-clone on dirty tree.
+
+### Notes
+- Force/async reconcile after CI success still works (`POST .../reconcile` or `/sync`); CI jobs can call that when the pipeline finishes.
+- Fleet `watch_files` paths like `prometheus/rules` and `grafana/dashboards/*.json` work without config schema changes.
+
+### Upgrade from v1.0.4
+
+1. Deploy **v1.0.5** and restart ConOps.
+2. **Fleet YAML**: no required changes if paths were already directories — they start working. Prefer globs when you only care about a subset (`grafana/dashboards/*.json`).
+3. Apps stuck after CI `pending` in 1.0.4: after upgrade they re-enter pending and deploy once the pipeline is `success` (or call `cps reconcile app <name> --wait`).
+4. Optional: `CONOPS_DIRTY_WORKTREE=reset` if local edits in checkouts are expected; default `refuse` needs a clean tree.
+5. Alerts: use `reason=~"ci_pending|ci_failed|ci_error"` on `conops_deploy_blocked`.
+
 ## v1.0.4
 
 ### Fixes
