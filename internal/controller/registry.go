@@ -199,6 +199,8 @@ func (r *Registry) ListAppSnapshots() []metrics.AppSnapshot {
 			LastSyncedCommit:   app.LastSyncedCommit,
 			LastHealthyCommit:  app.LastHealthyCommit,
 			RejectedCommit:     app.RejectedCommit,
+			Branch:             app.Branch,
+			Revision:           app.Revision,
 		})
 	}
 	return out
@@ -531,6 +533,14 @@ func (r *Registry) SetOperatorSuspended(id string, suspended bool) error {
 	}
 	// Resume: apply git on the next reconcile even when the commit did not change.
 	return r.store.UpdateAppStatus(context.Background(), id, "pending", nil)
+}
+
+// SetRevision stores the fleet revision ref (branch, tag, or full SHA). Empty tracks Branch.
+func (r *Registry) SetRevision(id, revision string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	return r.store.SetAppRevision(context.Background(), id, strings.TrimSpace(revision))
 }
 
 // UpdateRollback stores the last healthy revision and a revision that must not be retried.

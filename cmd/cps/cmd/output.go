@@ -146,6 +146,7 @@ func printAppDetail(app api.App) {
 	fmt.Printf("Repo:           %s\n", app.RepoURL)
 	fmt.Printf("Auth:           %s\n", app.RepoAuthMethod)
 	fmt.Printf("Branch:         %s\n", app.Branch)
+	fmt.Printf("Revision:       %s\n", orDash(app.Revision))
 	fmt.Printf("Compose:        %s\n", app.ComposePath)
 	fmt.Printf("Poll Interval:  %s\n", app.PollInterval)
 	fmt.Printf("Seen Commit:    %s\n", orDash(app.LastSeenCommit))

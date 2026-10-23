@@ -10,11 +10,13 @@ import (
 // App represents a Git repository configuration to track.
 // Moved from controller/registry.go to avoid circular dependency with store package.
 type App struct {
-	ID                      string                   `json:"id"`
-	Name                    string                   `json:"name"`
-	RepoURL                 string                   `json:"repo_url"`
-	RepoAuthMethod          string                   `json:"repo_auth_method"`
-	Branch                  string                   `json:"branch"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	RepoURL        string `json:"repo_url"`
+	RepoAuthMethod string `json:"repo_auth_method"`
+	Branch         string `json:"branch"`
+	// Revision is an optional fleet ref: branch name, tag, or full SHA. Empty tracks Branch.
+	Revision                string                   `json:"revision,omitempty"`
 	ComposePath             string                   `json:"compose_path"`
 	PollInterval            string                   `json:"poll_interval"` // Duration string e.g. "30s"
 	LastSeenCommit          string                   `json:"last_seen_commit"`

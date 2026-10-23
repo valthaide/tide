@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/valthaide/conops-private/internal/pollinterval"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -21,6 +22,7 @@ type AppSpec struct {
 	Name                   string          `yaml:"name"`
 	RepoURL                string          `yaml:"repo_url"`
 	Branch                 string          `yaml:"branch"`
+	Revision               string          `yaml:"revision"`
 	ComposePath            string          `yaml:"compose_path"`
 	RepoAuthMethod         string          `yaml:"repo_auth_method"`
 	PollInterval           string          `yaml:"poll_interval"`
@@ -118,8 +120,9 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 		if doc.Apps[i].ComposePath == "" {
 			doc.Apps[i].ComposePath = "docker-compose.yml"
 		}
+		doc.Apps[i].Revision = strings.TrimSpace(doc.Apps[i].Revision)
 		if doc.Apps[i].PollInterval == "" {
-			doc.Apps[i].PollInterval = "30s"
+			doc.Apps[i].PollInterval = pollinterval.AppDefault().String()
 		}
 		if doc.Apps[i].RepoAuthMethod == "" {
 			doc.Apps[i].RepoAuthMethod = "public"

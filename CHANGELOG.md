@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.7
+
+### Features
+- **Auto image build on a tag.** GitLab `build-image` runs on `CI_COMMIT_TAG` without a manual play and prints `Built version <tag>`. `main` stays manual.
+- **`revision` in fleet `apps[]`.** Optional branch, tag, or full SHA. Empty keeps tracking `branch`. A moved tag is redeployed and logged. A SHA is deployed as-is and the branch is not polled. `conops_app_revision{app,ref,sha}` shows what is deployed. `suspend`/`resume` and health rollback apply to every kind.
+- **Faster git sync.** App and fleet polls default to 30s and 60s, plus `CONOPS_POLL_JITTER` (default 15s). Change detection is `ls-remote`; a full fetch runs only when the commit changed. `conops_last_sync_timestamp_seconds{app}`.
+- **Git access errors.** `conops_git_fetch_errors_total{repo,reason}` with `auth`, `network`, `not_found`, or `other`, and `conops_git_last_success_timestamp_seconds{repo}`. A failed check leaves the last successful revision running.
+
 ## v1.0.6
 
 ### Features

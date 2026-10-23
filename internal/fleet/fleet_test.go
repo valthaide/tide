@@ -49,6 +49,25 @@ func TestFindHostFile(t *testing.T) {
 	}
 }
 
+func TestParseRevision(t *testing.T) {
+	doc, err := ParseHostDocument([]byte(`
+host: club.example
+apps:
+  - name: hello
+    repo_url: https://git.example/org/hello.git
+    revision: v1.2.3
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Apps[0].Revision != "v1.2.3" || doc.Apps[0].Branch != "main" {
+		t.Fatalf("%+v", doc.Apps[0])
+	}
+	if doc.Apps[0].PollInterval != "30s" {
+		t.Fatalf("poll %s", doc.Apps[0].PollInterval)
+	}
+}
+
 func TestParsePruneAndHealthTimeout(t *testing.T) {
 	doc, err := ParseHostDocument([]byte(`
 host: club.example
@@ -115,6 +134,12 @@ func (f *fakeApps) UpdateDeployPolicy(id, policyJSON string) error {
 func (f *fakeApps) UpdateRepoSecret(string, string) error { return nil }
 func (f *fakeApps) ClearRepoSecret(string) error          { return nil }
 func (f *fakeApps) GetRepoSecret(string) ([]byte, error)  { return nil, nil }
+func (f *fakeApps) SetRevision(id, revision string) error {
+	if app := f.byID(id); app != nil {
+		app.Revision = revision
+	}
+	return nil
+}
 func (f *fakeApps) SetSuspended(id string, suspended bool) error {
 	f.suspendCalls = append(f.suspendCalls, suspended)
 	if app := f.byID(id); app != nil {

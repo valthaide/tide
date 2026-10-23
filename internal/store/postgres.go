@@ -99,6 +99,9 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS rejected_commit TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS revision TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
@@ -193,7 +196,8 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		COALESCE(last_applied_watch_hash, ''),
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
-		COALESCE(rejected_commit, '')
+		COALESCE(rejected_commit, ''),
+		COALESCE(revision, '')
 	FROM apps
 	WHERE id = $1
 	`
@@ -224,6 +228,7 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		&app.DeployPolicyJSON,
 		&app.LastHealthyCommit,
 		&app.RejectedCommit,
+		&app.Revision,
 	)
 	if err != nil {
 		return nil, err
@@ -256,7 +261,8 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(last_applied_watch_hash, ''),
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
-		COALESCE(rejected_commit, '')
+		COALESCE(rejected_commit, ''),
+		COALESCE(revision, '')
 	FROM apps
 	`
 	rows, err := s.pool.Query(ctx, query)
@@ -292,6 +298,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.DeployPolicyJSON,
 			&app.LastHealthyCommit,
 			&app.RejectedCommit,
+			&app.Revision,
 		); err != nil {
 			continue
 		}
@@ -326,6 +333,17 @@ func (s *PostgresStore) SetOperatorSuspended(ctx context.Context, id string, sus
 
 func (s *PostgresStore) setBoolColumn(ctx context.Context, column, id string, value bool) error {
 	ct, err := s.pool.Exec(ctx, `UPDATE apps SET `+column+` = $1 WHERE id = $2`, value, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetAppRevision(ctx context.Context, id, revision string) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE apps SET revision = $1 WHERE id = $2`, revision, id)
 	if err != nil {
 		return err
 	}

@@ -4,16 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
+	"github.com/valthaide/conops-private/internal/gitremote"
+	"github.com/valthaide/conops-private/internal/gitrev"
+	"github.com/valthaide/conops-private/internal/metrics"
+	"github.com/valthaide/conops-private/internal/pollinterval"
 	"github.com/valthaide/conops-private/internal/repoauth"
 )
 
@@ -38,8 +37,13 @@ func (w *GitWatcher) Start(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second) // Check registry for new apps every 10s
 	defer ticker.Stop()
 
-	// Track running pollers to avoid duplicates
-	pollers := make(map[string]context.CancelFunc)
+	// Track running pollers. A revision, branch, or interval change restarts the poller
+	// so the next check happens immediately instead of waiting out the old timer.
+	type runningPoller struct {
+		cancel context.CancelFunc
+		spec   string
+	}
+	pollers := make(map[string]runningPoller)
 	syncPollers := func() {
 		apps := w.Registry.List()
 		w.Logger.Debug("Registry poll tick", "app_count", len(apps))
@@ -47,27 +51,30 @@ func (w *GitWatcher) Start(ctx context.Context) {
 
 		for _, app := range apps {
 			if app.Suspended {
-				if cancel, running := pollers[app.ID]; running {
-					cancel()
+				if running, ok := pollers[app.ID]; ok {
+					running.cancel()
 					delete(pollers, app.ID)
 					w.Logger.Info("Stopped app poller (suspended)", "id", app.ID)
 				}
 				continue
 			}
 			activeIDs[app.ID] = true
-			if _, running := pollers[app.ID]; !running {
-				// Start a new poller for this app
-				pollCtx, cancel := context.WithCancel(ctx)
-				pollers[app.ID] = cancel
-				w.Logger.Info("Starting app poller", "id", app.ID, "interval", app.PollInterval)
-				go w.pollApp(pollCtx, app)
+			spec := appPollSpec(app)
+			if running, ok := pollers[app.ID]; ok && running.spec == spec {
+				continue
 			}
+			if running, ok := pollers[app.ID]; ok {
+				running.cancel()
+			}
+			pollCtx, cancel := context.WithCancel(ctx)
+			pollers[app.ID] = runningPoller{cancel: cancel, spec: spec}
+			w.Logger.Info("Starting app poller", "id", app.ID, "interval", app.PollInterval, "revision", app.Revision, "branch", app.Branch)
+			go w.pollApp(pollCtx, app)
 		}
 
-		// Cleanup stopped apps
-		for id, cancel := range pollers {
+		for id, running := range pollers {
 			if !activeIDs[id] {
-				cancel()
+				running.cancel()
 				delete(pollers, id)
 				w.Logger.Info("Stopped app poller", "id", id)
 			}
@@ -88,140 +95,88 @@ func (w *GitWatcher) Start(ctx context.Context) {
 	}
 }
 
+func appPollSpec(app *App) string {
+	if app == nil {
+		return ""
+	}
+	return strings.Join([]string{app.RepoURL, app.Branch, app.Revision, app.PollInterval}, "\x00")
+}
+
 func (w *GitWatcher) pollApp(ctx context.Context, app *App) {
 	interval, err := time.ParseDuration(app.PollInterval)
-	if err != nil {
+	if err != nil || interval <= 0 {
 		w.Logger.Warn("Invalid poll interval, using default", "id", app.ID, "interval", app.PollInterval)
-		interval = 30 * time.Second
+		interval = pollinterval.AppDefault()
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	w.Logger.Info("Started polling app", "id", app.ID, "repo", app.RepoURL)
-
-	// Run the first check immediately for new apps.
-	if err := w.checkRepo(app); err != nil {
-		w.Logger.Error("Failed initial repo check", "id", app.ID, "error", err)
-	}
+	w.Logger.Info("Started polling app", "id", app.ID, "repo", app.RepoURL, "revision", app.Revision)
 
 	for {
+		if err := w.checkRepo(app); err != nil {
+			w.Logger.Error("Failed to check repo", "id", app.ID, "error", err)
+		}
+		timer := time.NewTimer(pollinterval.WithJitter(interval))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
-			w.Logger.Debug("Polling repo", "id", app.ID, "repo", app.RepoURL, "branch", app.Branch)
-			if err := w.checkRepo(app); err != nil {
-				w.Logger.Error("Failed to check repo", "id", app.ID, "error", err)
-			}
+		case <-timer.C:
 		}
 	}
 }
 
+// checkRepo learns the desired commit cheaply. A full fetch happens later, on apply,
+// and only when this commit differs from the one already seen.
+// A git error leaves the last successful revision in place.
 func (w *GitWatcher) checkRepo(app *App) error {
-	repoPath := filepath.Join(w.CacheDir, app.ID)
-	w.Logger.Debug("Checking repo state", "id", app.ID, "path", repoPath)
-
-	auth, err := w.authForApp(app)
-	if err != nil {
-		return err
+	if fresh, err := w.Registry.Get(app.ID); err == nil && fresh != nil {
+		*app = *fresh
 	}
-
-	var repo *git.Repository
-
-	// Clone if not exists, otherwise open
-	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
-		w.Logger.Info("Cloning repo", "id", app.ID, "repo", app.RepoURL)
-		repo, err = git.PlainClone(repoPath, false, &git.CloneOptions{
-			URL:      app.RepoURL,
-			Progress: nil,
-			Auth:     auth,
-		})
-	} else {
-		w.Logger.Debug("Opening repo", "id", app.ID, "path", repoPath)
-		repo, err = git.PlainOpen(repoPath)
-	}
-
-	if err != nil {
-		return fmt.Errorf("git error: %w", err)
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return fmt.Errorf("worktree error: %w", err)
-	}
-
-	// Pull latest changes
-	w.Logger.Debug("Fetching latest", "id", app.ID, "remote", "origin")
-
-	// First fetch all changes
-	err = repo.Fetch(&git.FetchOptions{
-		RemoteName: "origin",
-		Progress:   nil,
-		RefSpecs:   []config.RefSpec{"+refs/heads/*:refs/remotes/origin/*"},
-		Auth:       auth,
-	})
-	if err != nil && err != git.NoErrAlreadyUpToDate {
-		return fmt.Errorf("fetch error: %w", err)
-	}
-	if err == git.NoErrAlreadyUpToDate {
-		w.Logger.Debug("Fetch up to date", "id", app.ID)
-	}
-
-	// Resolve remote branch and checkout its latest commit
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", app.Branch)
-	remoteRef, refErr := repo.Reference(remoteRefName, true)
-	if refErr != nil {
-		return fmt.Errorf("remote branch not found: %w", refErr)
-	}
-	w.Logger.Debug("Checking out remote commit", "id", app.ID, "branch", app.Branch, "remote_hash", remoteRef.Hash().String())
-	err = worktree.Checkout(&git.CheckoutOptions{
-		Hash:  remoteRef.Hash(),
-		Force: true,
-	})
-	if err != nil {
-		return fmt.Errorf("checkout error: %w", err)
-	}
-
-	// Get HEAD commit
-	ref, err := repo.Head()
-	if err != nil {
-		return fmt.Errorf("head error: %w", err)
-	}
-	commitHash := ref.Hash().String()
-	commitMessage := ""
-	if commitObj, commitErr := repo.CommitObject(ref.Hash()); commitErr == nil {
-		commitMessage = commitSubject(commitObj.Message)
-	}
-	w.Logger.Debug("HEAD resolved", "id", app.ID, "commit", commitHash)
-
-	// Check if changed
-	if commitHash == app.LastSeenCommit {
-		w.Logger.Debug("No new commit detected", "id", app.ID, "commit", commitHash)
+	if gitrev.IsFullSHA(app.Revision) {
+		sha := strings.ToLower(strings.TrimSpace(app.Revision))
+		if strings.EqualFold(app.LastSeenCommit, sha) {
+			metrics.SetLastSyncTimestamp(app.Name)
+			return nil
+		}
+		w.Logger.Info("Pinned revision", "id", app.ID, "sha", sha)
+		if err := w.Registry.UpdateCommitWithMessage(app.ID, sha, ""); err != nil {
+			return err
+		}
+		app.LastSeenCommit = sha
+		metrics.SetLastSyncTimestamp(app.Name)
 		return nil
 	}
 
-	w.Logger.Info("New commit detected", "id", app.ID, "commit", commitHash)
-
-	// Update registry
-	if err := w.Registry.UpdateCommitWithMessage(app.ID, commitHash, commitMessage); err != nil {
+	auth, err := w.authForApp(app)
+	if err != nil {
+		metrics.ObserveGitFetch(app.RepoURL, err)
 		return err
 	}
-	app.LastSeenCommit = commitHash
-	app.LastSeenCommitMessage = commitMessage
-	w.Logger.Debug("Registry updated", "id", app.ID, "commit", commitHash)
-
-	return nil
-}
-
-func commitSubject(message string) string {
-	for _, line := range strings.Split(strings.ReplaceAll(message, "\r\n", "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			return trimmed
-		}
+	refs, err := gitremote.List(app.RepoURL, auth)
+	if err != nil {
+		metrics.ObserveGitFetch(app.RepoURL, err)
+		return fmt.Errorf("ls-remote: %w", err)
 	}
-	return ""
+	target, err := gitrev.Resolve(app.Revision, app.Branch, refs)
+	if err != nil {
+		metrics.ObserveGitFetch(app.RepoURL, err)
+		return err
+	}
+	metrics.ObserveGitFetch(app.RepoURL, nil)
+	metrics.SetLastSyncTimestamp(app.Name)
+	if strings.EqualFold(target.SHA, app.LastSeenCommit) {
+		return nil
+	}
+	if target.Kind == gitrev.KindTag && app.LastSeenCommit != "" {
+		w.Logger.Info("tag moved", "app", app.Name, "tag", target.Name, "from", app.LastSeenCommit, "to", target.SHA)
+	} else {
+		w.Logger.Info("New commit detected", "id", app.ID, "kind", target.Kind, "ref", target.Name, "commit", target.SHA)
+	}
+	if err := w.Registry.UpdateCommitWithMessage(app.ID, target.SHA, ""); err != nil {
+		return err
+	}
+	app.LastSeenCommit = target.SHA
+	return nil
 }
 
 func (w *GitWatcher) authForApp(app *App) (transport.AuthMethod, error) {

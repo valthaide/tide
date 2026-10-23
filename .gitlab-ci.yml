@@ -35,9 +35,10 @@ build-image:
         --build-arg "VERSION=${VERSION}" \
         --snapshot-mode=redo \
         --use-new-run
+      echo "Built version ${VERSION}"
   rules:
     - if: '$CI_COMMIT_TAG'
-      when: manual
+      when: on_success
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: manual
     - when: never

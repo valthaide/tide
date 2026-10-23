@@ -487,6 +487,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	if syncErr == "" {
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
 		metrics.ObserveReconcileSuccess()
+		metrics.SetLastSyncTimestamp(app.Name)
 	}
 	return nil
 }

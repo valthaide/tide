@@ -7,6 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/valthaide/conops-private/internal/giterr"
 )
 
 const namespace = "conops"
@@ -25,6 +26,8 @@ type AppSnapshot struct {
 	LastSyncedCommit   string
 	LastHealthyCommit  string
 	RejectedCommit     string
+	Branch             string
+	Revision           string
 }
 
 // AppLister provides app snapshots for gauge metrics on each scrape.
@@ -129,6 +132,24 @@ var (
 		Name:      "fleet_host_file_missing",
 		Help:      "1 while hosts/<CONOPS_FLEET_HOST>.yaml is absent from the fleet git checkout.",
 	})
+
+	GitFetchErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "git_fetch_errors_total",
+		Help:      "Git fetch or ls-remote failures by repository and reason (auth, network, not_found, other).",
+	}, []string{"repo", "reason"})
+
+	GitLastSuccessTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "git_last_success_timestamp_seconds",
+		Help:      "Unix timestamp of the last successful git ls-remote or fetch for a repository.",
+	}, []string{"repo"})
+
+	LastSyncTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "last_sync_timestamp_seconds",
+		Help:      "Unix timestamp of the last successful git check or apply for an app.",
+	}, []string{"app"})
 )
 
 var (
@@ -170,6 +191,9 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		DirtyWorktreeTotal,
 		BuildInfo,
 		FleetHostFileMissing,
+		GitFetchErrorsTotal,
+		GitLastSuccessTimestamp,
+		LastSyncTimestamp,
 		envDrift,
 		envHashApplied,
 		syncErrorInfo,
@@ -201,6 +225,7 @@ type appsCollector struct {
 	syncSuccessAgeSecondsDesc       *prometheus.Desc
 	suspendedDesc                   *prometheus.Desc
 	rolledBackDesc                  *prometheus.Desc
+	revisionDesc                    *prometheus.Desc
 }
 
 func newAppsCollector(lister AppLister) *appsCollector {
@@ -266,6 +291,12 @@ func newAppsCollector(lister AppLister) *appsCollector {
 			[]string{"app", "failed_revision", "running_revision"},
 			nil,
 		),
+		revisionDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "app_revision"),
+			"Requested revision and the commit currently deployed (value always 1).",
+			[]string{"app", "ref", "sha"},
+			nil,
+		),
 	}
 }
 
@@ -280,6 +311,7 @@ func (c *appsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.syncSuccessAgeSecondsDesc
 	ch <- c.suspendedDesc
 	ch <- c.rolledBackDesc
+	ch <- c.revisionDesc
 }
 
 func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -333,6 +365,19 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 			appLabel = id
 		}
 		ch <- prometheus.MustNewConstMetric(c.suspendedDesc, prometheus.GaugeValue, suspended, appLabel)
+
+		ref := strings.TrimSpace(app.Revision)
+		if ref == "" {
+			ref = strings.TrimSpace(app.Branch)
+		}
+		if ref == "" {
+			ref = "main"
+		}
+		sha := strings.TrimSpace(app.LastSyncedCommit)
+		if sha == "" {
+			sha = strings.TrimSpace(app.LastSeenCommit)
+		}
+		ch <- prometheus.MustNewConstMetric(c.revisionDesc, prometheus.GaugeValue, 1, appLabel, ref, sha)
 
 		rejected := strings.TrimSpace(app.RejectedCommit)
 		healthy := strings.TrimSpace(app.LastHealthyCommit)
@@ -479,6 +524,47 @@ func metricErrorText(msg string) string {
 		msg = msg[:180]
 	}
 	return msg
+}
+
+// ObserveGitFetch records a git ls-remote or fetch. A nil error is a success.
+// On failure the caller keeps the last deployed revision; this only counts the error.
+func ObserveGitFetch(repo string, err error) {
+	repo = repoLabel(repo)
+	if err == nil {
+		GitLastSuccessTimestamp.WithLabelValues(repo).Set(float64(time.Now().Unix()))
+		return
+	}
+	reason := giterr.Reason(err)
+	if reason == "" {
+		reason = giterr.ReasonOther
+	}
+	GitFetchErrorsTotal.WithLabelValues(repo, reason).Inc()
+	if reason == giterr.ReasonAuth {
+		GitAuthFailuresTotal.WithLabelValues("repo", repo).Inc()
+	}
+}
+
+// SetLastSyncTimestamp sets conops_last_sync_timestamp_seconds{app}.
+func SetLastSyncTimestamp(app string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	LastSyncTimestamp.WithLabelValues(app).Set(float64(time.Now().Unix()))
+}
+
+func repoLabel(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if i := strings.Index(raw, "://"); i >= 0 {
+		rest := raw[i+3:]
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			raw = raw[:i+3] + rest[at+1:]
+		}
+	}
+	if raw == "" {
+		return "unknown"
+	}
+	return raw
 }
 
 // SetFleetHostFileMissing sets conops_fleet_host_file_missing.

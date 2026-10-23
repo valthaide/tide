@@ -555,6 +555,7 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 	if err != nil {
 		appendLogLine(&repoLog, "failed to configure git auth environment")
 		appendLogLine(&repoLog, redact.String(err.Error()))
+		noteGitFetch(repoURL, err)
 		return redact.String(strings.TrimSpace(repoLog.String())), err
 	}
 	defer cleanup()
@@ -563,6 +564,7 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		appendLogLine(&repoLog, "repository cache missing; cloning fresh copy")
 		err := e.cloneRepo(ctx, &repoLog, appDir, repoDir, cloneURL, branch, commitHash, gitEnv)
+		noteGitFetch(repoURL, err)
 		return redact.String(strings.TrimSpace(repoLog.String())), err
 	}
 
@@ -586,13 +588,23 @@ func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repo
 		appendLogLine(&repoLog, err.Error())
 		if rmErr := os.RemoveAll(repoDir); rmErr != nil {
 			appendLogLine(&repoLog, "failed to discard repository cache")
+			noteGitFetch(repoURL, err)
 			return redact.String(strings.TrimSpace(repoLog.String())), fmt.Errorf("discard repo cache %s: %w", repoDir, rmErr)
 		}
 		cloneErr := e.cloneRepo(ctx, &repoLog, appDir, repoDir, cloneURL, branch, commitHash, gitEnv)
+		noteGitFetch(repoURL, cloneErr)
 		return redact.String(strings.TrimSpace(repoLog.String())), cloneErr
 	}
 
+	noteGitFetch(repoURL, nil)
 	return redact.String(strings.TrimSpace(repoLog.String())), nil
+}
+
+func noteGitFetch(repoURL string, err error) {
+	if isDirtyWorktreeErr(err) {
+		return
+	}
+	metrics.ObserveGitFetch(repoURL, err)
 }
 
 // ensureCleanOriginURL rewrites remote.origin.url if a previous clone embedded userinfo.

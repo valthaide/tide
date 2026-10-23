@@ -96,6 +96,9 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "rejected_commit TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "revision TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
@@ -195,7 +198,8 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		COALESCE(last_applied_watch_hash, ''),
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
-		COALESCE(rejected_commit, '')
+		COALESCE(rejected_commit, ''),
+		COALESCE(revision, '')
 	FROM apps
 	WHERE id = ?
 	`
@@ -226,6 +230,7 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		&app.DeployPolicyJSON,
 		&app.LastHealthyCommit,
 		&app.RejectedCommit,
+		&app.Revision,
 	)
 	if err != nil {
 		return nil, err
@@ -258,7 +263,8 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(last_applied_watch_hash, ''),
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
-		COALESCE(rejected_commit, '')
+		COALESCE(rejected_commit, ''),
+		COALESCE(revision, '')
 	FROM apps
 	`
 	rows, err := s.db.QueryContext(ctx, query)
@@ -294,6 +300,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.DeployPolicyJSON,
 			&app.LastHealthyCommit,
 			&app.RejectedCommit,
+			&app.Revision,
 		); err != nil {
 			continue
 		}
@@ -344,6 +351,21 @@ func (s *SQLiteStore) setBoolColumn(ctx context.Context, column, id string, valu
 		n = 1
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE apps SET `+column+` = ? WHERE id = ?`, n, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *SQLiteStore) SetAppRevision(ctx context.Context, id, revision string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE apps SET revision = ? WHERE id = ?`, revision, id)
 	if err != nil {
 		return err
 	}

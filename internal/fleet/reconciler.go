@@ -15,7 +15,10 @@ import (
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/conops-private/internal/gitremote"
+	"github.com/valthaide/conops-private/internal/gitrev"
 	"github.com/valthaide/conops-private/internal/metrics"
+	"github.com/valthaide/conops-private/internal/pollinterval"
 	"github.com/valthaide/conops-private/internal/repoauth"
 	"github.com/valthaide/conops-private/internal/syncerr"
 )
@@ -31,6 +34,7 @@ type AppManager interface {
 	ClearRepoSecret(id string) error
 	GetRepoSecret(id string) ([]byte, error)
 	SetSuspended(id string, suspended bool) error
+	SetRevision(id, revision string) error
 	Delete(id string) error
 }
 
@@ -60,16 +64,17 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 	r.syncOnce(ctx)
 
-	ticker := time.NewTicker(r.Config.Interval)
-	defer ticker.Stop()
 	for {
+		delay := pollinterval.WithJitter(r.Config.Interval)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			if r.Logger != nil {
 				r.Logger.Info("Fleet reconciler stopped")
 			}
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			r.syncOnce(ctx)
 		}
 	}
@@ -124,6 +129,12 @@ func (r *Reconciler) loadDesired(ctx context.Context) (*HostDocument, error) {
 }
 
 func (r *Reconciler) ensureFleetCheckout(ctx context.Context) (string, error) {
+	dir, err := r.checkoutFleet(ctx)
+	metrics.ObserveGitFetch(r.Config.RepoURL, err)
+	return dir, err
+}
+
+func (r *Reconciler) checkoutFleet(ctx context.Context) (string, error) {
 	_ = ctx
 	if err := os.MkdirAll(r.Config.CacheDir, 0700); err != nil {
 		return "", err
@@ -135,6 +146,18 @@ func (r *Reconciler) ensureFleetCheckout(ctx context.Context) (string, error) {
 	}
 
 	cloneURL := repoauth.CleanHTTPSURL(r.Config.RepoURL)
+
+	refs, listErr := gitremote.List(cloneURL, auth)
+	if listErr != nil {
+		return "", fmt.Errorf("fleet ls-remote: %w", listErr)
+	}
+	tip, tipErr := gitrev.Resolve("", r.Config.Branch, refs)
+	if tipErr != nil {
+		return "", tipErr
+	}
+	if head, headErr := localGitHEAD(repoDir); headErr == nil && strings.EqualFold(head, tip.SHA) {
+		return repoDir, nil
+	}
 
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); os.IsNotExist(err) {
 		_, err = git.PlainClone(repoDir, false, &git.CloneOptions{
@@ -178,6 +201,18 @@ func (r *Reconciler) ensureFleetCheckout(ctx context.Context) (string, error) {
 		}
 	}
 	return repoDir, nil
+}
+
+func localGitHEAD(repoDir string) (string, error) {
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		return "", err
+	}
+	ref, err := repo.Head()
+	if err != nil {
+		return "", err
+	}
+	return ref.Hash().String(), nil
 }
 
 func (r *Reconciler) gitAuth() (transport.AuthMethod, error) {
@@ -269,11 +304,15 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 			RepoURL:        spec.RepoURL,
 			RepoAuthMethod: method,
 			Branch:         spec.Branch,
+			Revision:       spec.Revision,
 			ComposePath:    spec.ComposePath,
 			PollInterval:   spec.PollInterval,
 			Suspended:      spec.Suspended,
 		}
 		if err := r.Apps.AddWithDeployKeyAndEnvs(app, secret, nil); err != nil {
+			return err
+		}
+		if err := r.Apps.SetRevision(app.ID, spec.Revision); err != nil {
 			return err
 		}
 		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec)); err != nil {
@@ -302,11 +341,15 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 			RepoURL:        spec.RepoURL,
 			RepoAuthMethod: method,
 			Branch:         spec.Branch,
+			Revision:       spec.Revision,
 			ComposePath:    spec.ComposePath,
 			PollInterval:   spec.PollInterval,
 			Suspended:      spec.Suspended,
 		}
 		if err := r.Apps.AddWithDeployKeyAndEnvs(app, secret, nil); err != nil {
+			return err
+		}
+		if err := r.Apps.SetRevision(app.ID, spec.Revision); err != nil {
 			return err
 		}
 		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec)); err != nil {
@@ -329,6 +372,14 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 	}
 	if err := r.syncFleetSecret(existing.ID, method, secret, spec); err != nil {
 		return err
+	}
+	if existing.Revision != spec.Revision {
+		if err := r.Apps.SetRevision(existing.ID, spec.Revision); err != nil {
+			return err
+		}
+		if r.Logger != nil {
+			r.Logger.Info("Fleet revision updated", "name", spec.Name, "revision", spec.Revision, "branch", spec.Branch)
+		}
 	}
 	// Fleet owns only the git suspend flag. An operator pause (cps suspend) is a
 	// separate column and must survive this reconcile.
