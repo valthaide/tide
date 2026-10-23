@@ -94,7 +94,7 @@ func TestSuspendedAndRollbackGauges(t *testing.T) {
 	expected := `
 # HELP conops_app_rolled_back 1 while a failed revision was rolled back and the last healthy revision is running.
 # TYPE conops_app_rolled_back gauge
-conops_app_rolled_back{app="web",failed_revision="bbbbbbb",running_revision="aaaaaaa"} 1
+conops_app_rolled_back{app="web",failed_revision="bbbbbbb",reason="health_timeout",running_revision="aaaaaaa"} 1
 # HELP conops_app_suspended Whether automatic reconciliation is paused for the app (1=yes, 0=no).
 # TYPE conops_app_suspended gauge
 conops_app_suspended{app="web"} 1

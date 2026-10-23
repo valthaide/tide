@@ -22,6 +22,29 @@ type APIClient struct {
 	Client  *http.Client
 }
 
+// discoverCAFile finds the controller CA when cps is not given one.
+// Puppet should install the self-signed server cert at /etc/conops/ca.crt (mode 0644).
+// That file is /opt/conops/data/tls/cert.pem inside the ConOps data dir; the cert is its own CA
+// and already includes 127.0.0.1. CONOPS_CA_FILE or CPS_CA_FILE overrides the search.
+func discoverCAFile() string {
+	candidates := []string{
+		strings.TrimSpace(os.Getenv("CONOPS_CA_FILE")),
+		strings.TrimSpace(os.Getenv("CPS_CA_FILE")),
+		"/etc/conops/ca.crt",
+		"/opt/conops/data/tls/cert.pem",
+	}
+	for _, path := range candidates {
+		if path == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	return ""
+}
+
 func NewClient() *APIClient {
 	url := strings.TrimRight(strings.TrimSpace(viper.GetString("url")), "/")
 	token := strings.TrimSpace(viper.GetString("token"))
@@ -48,6 +71,9 @@ func NewClient() *APIClient {
 				caPath = strings.TrimSpace(ctx.CertificateAuthority)
 			}
 		}
+	}
+	if caPath == "" && !insecure {
+		caPath = discoverCAFile()
 	}
 
 	if url == "" {

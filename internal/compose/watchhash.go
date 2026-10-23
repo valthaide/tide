@@ -209,6 +209,19 @@ func isUnder(root, path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
+// WatchEntryHashesForApp hashes each watch_files entry separately.
+func (e *ComposeExecutor) WatchEntryHashesForApp(appID string, files []deploypolicy.WatchFile) (map[string]string, error) {
+	out := make(map[string]string, len(files))
+	for _, f := range files {
+		sum, err := e.WatchFilesHashForApp(appID, []deploypolicy.WatchFile{f})
+		if err != nil {
+			return nil, err
+		}
+		out[f.Path] = sum
+	}
+	return out, nil
+}
+
 // WatchFilesHashForApp hashes watch files for an app under the runtime workdir.
 func (e *ComposeExecutor) WatchFilesHashForApp(appID string, files []deploypolicy.WatchFile) (string, error) {
 	if e == nil {

@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.9
+
+### Fixes
+- **`watch_files` per path.** Each entry keeps its own hash. Changing `prometheus.yml` reloads only Prometheus; alertmanager and grafana stay up. `conops_app_reloads_total` increments by one.
+- **Metrics of a removed app disappear** on delete, including `conops_env_drift`, `conops_last_sync_timestamp_seconds`, `conops_watch_files_hash_error`, and git series for a repo no other app uses.
+- **Rollback reason.** The stored error and `conops_app_rolled_back{reason}` say `unhealthy` or `health_timeout`, with the container name and how long ConOps waited. A killed `docker ps` is no longer the message.
+- **`conops_app_reloads_total{app,result}` is 0 at startup** for `success` and `error`.
+- **`cps` trusts the local controller** via `CONOPS_CA_FILE`, `/etc/conops/ca.crt`, or `/opt/conops/data/tls/cert.pem`.
+- **`docker ps` output is DEBUG**, not INFO.
+- **Docs:** `reload_url` examples use `http://prometheus:9090/-/reload`, the compose service name, not `127.0.0.1` inside the ConOps container.
+
+### Host CA for cps
+
+Puppet should publish the self-signed server certificate (it is its own CA) as `/etc/conops/ca.crt` mode `0644`. Source file: `/opt/conops/data/tls/cert.pem`.
+
 ## v1.0.8
 
 ### Fixes

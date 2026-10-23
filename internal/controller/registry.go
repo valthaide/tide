@@ -100,6 +100,7 @@ func (r *Registry) AddWithDeployKeyAndEnvs(app *api.App, secret string, serviceE
 	if err := r.store.CreateApp(context.Background(), app); err != nil {
 		return err
 	}
+	noteNewAppMetrics(app)
 
 	// If no credentials to store, return early
 	if !hasSecret && !hasEnvVars {
@@ -219,12 +220,34 @@ func enrichAppSyncError(app *api.App) {
 	app.LastSyncOutput = redact.String(app.LastSyncOutput)
 }
 
-// Delete removes an application by ID.
+// Delete removes an application by ID and drops its metric series.
 func (r *Registry) Delete(id string) error {
+	app, _ := r.Get(id)
 	if err := r.store.DeleteAppCredential(context.Background(), id); err != nil {
 		return err
 	}
-	return r.store.DeleteApp(context.Background(), id)
+	if err := r.store.DeleteApp(context.Background(), id); err != nil {
+		return err
+	}
+	if app != nil {
+		still := false
+		for _, other := range r.List() {
+			if other != nil && other.RepoURL == app.RepoURL {
+				still = true
+				break
+			}
+		}
+		metrics.ForgetApp(app.Name, app.ID, app.RepoURL, still)
+	}
+	return nil
+}
+
+func noteNewAppMetrics(app *api.App) {
+	if app == nil {
+		return
+	}
+	metrics.EnsureAppReloads(app.Name)
+	metrics.EnsureGitFetchErrors(app.RepoURL)
 }
 
 // UpdateApp updates an application's editable fields and optionally its environment variables.

@@ -295,7 +295,7 @@ func newAppsCollector(lister AppLister) *appsCollector {
 		rolledBackDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "app_rolled_back"),
 			"1 while a failed revision was rolled back and the last healthy revision is running.",
-			[]string{"app", "failed_revision", "running_revision"},
+			[]string{"app", "failed_revision", "running_revision", "reason"},
 			nil,
 		),
 		revisionDesc: prometheus.NewDesc(
@@ -390,7 +390,7 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 		healthy := strings.TrimSpace(app.LastHealthyCommit)
 		seen := strings.TrimSpace(app.LastSeenCommit)
 		if rejected != "" && healthy != "" && seen == rejected && strings.TrimSpace(app.LastSyncedCommit) == healthy {
-			ch <- prometheus.MustNewConstMetric(c.rolledBackDesc, prometheus.GaugeValue, 1, appLabel, rejected, healthy)
+			ch <- prometheus.MustNewConstMetric(c.rolledBackDesc, prometheus.GaugeValue, 1, appLabel, rejected, healthy, rollbackReasonLabel(app.LastSyncError))
 		}
 
 		var drift float64
@@ -525,6 +525,13 @@ func ObserveWatchAction(app string) {
 	WatchActionsTotal.WithLabelValues(app).Inc()
 }
 
+func rollbackReasonLabel(msg string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(msg)), "unhealthy") {
+		return "unhealthy"
+	}
+	return "health_timeout"
+}
+
 func metricErrorText(msg string) string {
 	msg = strings.Join(strings.Fields(msg), " ")
 	if len(msg) > 180 {
@@ -546,6 +553,67 @@ func EnsureGitFetchErrors(repos ...string) {
 			GitFetchErrorsTotal.WithLabelValues(repo, reason).Add(0)
 		}
 	}
+}
+
+// EnsureAppReloads creates zero series for success and error before the first reload.
+func EnsureAppReloads(apps ...string) {
+	for _, app := range apps {
+		app = strings.TrimSpace(app)
+		if app == "" {
+			continue
+		}
+		AppReloadsTotal.WithLabelValues(app, "success").Add(0)
+		AppReloadsTotal.WithLabelValues(app, "error").Add(0)
+	}
+}
+
+// ForgetApp drops metric series for an app removed from fleet.
+// repoStillUsed keeps git series when another app still uses the same repository.
+func ForgetApp(name, id, repo string, repoStillUsed bool) {
+	name = strings.TrimSpace(name)
+	id = strings.TrimSpace(id)
+	if name != "" {
+		for _, labels := range []prometheus.Labels{
+			{"app": name},
+			{"app_name": name},
+		} {
+			envDrift.DeletePartialMatch(labels)
+			WatchHashErrors.DeletePartialMatch(labels)
+			LastSyncTimestamp.DeletePartialMatch(labels)
+			AppReloadsTotal.DeletePartialMatch(labels)
+			DeployBlockedTotal.DeletePartialMatch(labels)
+			CICheckLastTimestamp.DeletePartialMatch(labels)
+			WatchActionsTotal.DeletePartialMatch(labels)
+			syncErrorInfo.DeletePartialMatch(labels)
+			DirtyWorktreeTotal.DeletePartialMatch(labels)
+			SyncTotal.DeletePartialMatch(labels)
+			SyncDurationSeconds.DeletePartialMatch(labels)
+			RequeueTotal.DeletePartialMatch(labels)
+			SyncErrorsTotal.DeletePartialMatch(labels)
+			envHashApplied.DeletePartialMatch(labels)
+			GitAuthFailuresTotal.DeletePartialMatch(prometheus.Labels{"name": name})
+		}
+	}
+	if id != "" {
+		for _, labels := range []prometheus.Labels{
+			{"app_id": id},
+		} {
+			SyncTotal.DeletePartialMatch(labels)
+			SyncDurationSeconds.DeletePartialMatch(labels)
+			RequeueTotal.DeletePartialMatch(labels)
+			SyncErrorsTotal.DeletePartialMatch(labels)
+			envHashApplied.DeletePartialMatch(labels)
+		}
+	}
+	if repoStillUsed {
+		return
+	}
+	repo = repoLabel(repo)
+	if repo == "unknown" {
+		return
+	}
+	GitFetchErrorsTotal.DeletePartialMatch(prometheus.Labels{"repo": repo})
+	GitLastSuccessTimestamp.DeletePartialMatch(prometheus.Labels{"repo": repo})
 }
 
 // ObserveAppReload counts a watch_files reload or restart.

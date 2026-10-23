@@ -43,6 +43,8 @@ type ProjectRuntimeState struct {
 	ExitedCount    int
 	UnhealthyCount int
 	StartingCount  int
+	// NotReady lists container names that are not ready (unhealthy, starting, or exited).
+	NotReady []string
 }
 
 // Ready reports whether every service container is running and past healthcheck start.
@@ -497,7 +499,7 @@ func (e *ComposeExecutor) SnapshotProjects(ctx context.Context) (map[string]Proj
 			"ps",
 			"-a",
 			"--format",
-			`{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.oneoff"}}|{{.Status}}`,
+			`{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.oneoff"}}|{{.Status}}|{{.Names}}`,
 		},
 		e.runtimeWorkDir(),
 		nil,
@@ -515,31 +517,41 @@ func (e *ComposeExecutor) SnapshotProjects(ctx context.Context) (map[string]Proj
 			continue
 		}
 
-		parts := strings.SplitN(line, "|", 3)
-		if len(parts) != 3 {
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) < 3 {
 			continue
 		}
 
 		projectName := strings.TrimSpace(parts[0])
 		oneOff := strings.TrimSpace(parts[1])
 		status := strings.TrimSpace(parts[2])
+		name := ""
+		if len(parts) == 4 {
+			name = strings.TrimSpace(parts[3])
+		}
 		if projectName == "" || strings.EqualFold(oneOff, "true") || oneOff == "1" {
 			continue
 		}
 
 		state := snapshot[projectName]
 		state.ContainerCount++
-		if dockerStatusIsRunning(status) {
+		running := dockerStatusIsRunning(status)
+		if running {
 			state.RunningCount++
 		} else {
 			state.ExitedCount++
 		}
 		lowerStatus := strings.ToLower(status)
-		if strings.Contains(lowerStatus, "(unhealthy)") {
+		unhealthy := strings.Contains(lowerStatus, "(unhealthy)")
+		starting := strings.Contains(lowerStatus, "(health: starting)") || strings.Contains(lowerStatus, "(starting)")
+		if unhealthy {
 			state.UnhealthyCount++
 		}
-		if strings.Contains(lowerStatus, "(health: starting)") || strings.Contains(lowerStatus, "(starting)") {
+		if starting {
 			state.StartingCount++
+		}
+		if name != "" && (unhealthy || starting || !running) {
+			state.NotReady = append(state.NotReady, name)
 		}
 		snapshot[projectName] = state
 	}
@@ -1090,8 +1102,13 @@ func (e *ComposeExecutor) execProcess(
 	output := outputBuilder.String()
 	outputMu.Unlock()
 	trimmed := strings.TrimSpace(output)
-	if trimmed != "" {
-		e.Logger.Info("Command output", "cmd", cmdDisplay, "output", redact.String(truncateOutput(trimmed)))
+	if trimmed != "" && e.Logger != nil {
+		msg := redact.String(truncateOutput(trimmed))
+		if quietCommandOutput(cmd, args) {
+			e.Logger.Debug("Command output", "cmd", cmdDisplay, "output", msg)
+		} else {
+			e.Logger.Info("Command output", "cmd", cmdDisplay, "output", msg)
+		}
 	}
 
 	if waitErr != nil {
@@ -1312,6 +1329,13 @@ func ProjectNameForApp(appID string) string {
 
 func dockerStatusIsRunning(status string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(status)), "up ")
+}
+
+func quietCommandOutput(cmd string, args []string) bool {
+	if filepath.Base(cmd) != "docker" || len(args) == 0 {
+		return false
+	}
+	return args[0] == "ps"
 }
 
 func startsWithAlphaNum(value string) bool {

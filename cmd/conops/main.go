@@ -173,15 +173,18 @@ func main() {
 	}
 	metrics.SetBuildInfo(Version)
 	var gitRepos []string
+	var appNames []string
 	for _, app := range registry.List() {
 		if app != nil {
 			gitRepos = append(gitRepos, app.RepoURL)
+			appNames = append(appNames, app.Name)
 		}
 	}
 	if fleetRepo := strings.TrimSpace(os.Getenv("CONOPS_FLEET_REPO_URL")); fleetRepo != "" {
 		gitRepos = append(gitRepos, fleetRepo)
 	}
 	metrics.EnsureGitFetchErrors(gitRepos...)
+	metrics.EnsureAppReloads(appNames...)
 
 	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
 	appHandler.SyncTimeout = reconcilerCfg.SyncTimeout

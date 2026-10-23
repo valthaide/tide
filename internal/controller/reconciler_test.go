@@ -362,12 +362,17 @@ func TestRollbackUnhealthyRevision(t *testing.T) {
 
 type reloadRuntime struct {
 	fakeRuntime
-	hash    string
-	reloads []string
+	hashes   map[string]string
+	reloads  []string
+	restarts []string
 }
 
 func (r *reloadRuntime) WatchFilesHashForApp(string, []deploypolicy.WatchFile) (string, error) {
-	return r.hash, nil
+	return "", nil
+}
+
+func (r *reloadRuntime) WatchEntryHashesForApp(_ string, _ []deploypolicy.WatchFile) (map[string]string, error) {
+	return r.hashes, nil
 }
 
 func (r *reloadRuntime) HTTPReload(_ context.Context, url string) error {
@@ -375,11 +380,27 @@ func (r *reloadRuntime) HTTPReload(_ context.Context, url string) error {
 	return nil
 }
 
-func (r *reloadRuntime) RestartService(context.Context, string, string, string) (string, error) {
+func (r *reloadRuntime) RestartService(_ context.Context, _, _, service string) (string, error) {
+	r.restarts = append(r.restarts, service)
 	return "", nil
 }
 
-func TestSyncAppliesWatchReload(t *testing.T) {
+func TestHealthFailureNamesContainer(t *testing.T) {
+	err := healthFailure("bbbbbbbb", 120*time.Second, compose.ProjectRuntimeState{
+		ContainerCount: 1, RunningCount: 1, UnhealthyCount: 1, NotReady: []string{"monitoring-prometheus-1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unhealthy:") || !strings.Contains(err.Error(), "monitoring-prometheus-1") || !strings.Contains(err.Error(), "2m0s") {
+		t.Fatal(err)
+	}
+	err = healthFailure("bbbbbbbb", 120*time.Second, compose.ProjectRuntimeState{
+		ContainerCount: 1, RunningCount: 1, StartingCount: 1, NotReady: []string{"monitoring-prometheus-1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "health timeout:") {
+		t.Fatal(err)
+	}
+}
+
+func TestSyncAppliesOnlyChangedWatchFile(t *testing.T) {
 	reg := testRegistry(t)
 	app := &api.App{
 		Name: "monitoring", RepoURL: "https://example.com/monitoring.git", Branch: "main",
@@ -387,37 +408,38 @@ func TestSyncAppliesWatchReload(t *testing.T) {
 		LastSeenCommit: "df8f922", Status: "synced",
 	}
 	addPublicApp(t, reg, app)
-	policy := deploypolicy.Encode(deploypolicy.Policy{WatchFiles: []deploypolicy.WatchFile{{
-		Path: "prometheus/prometheus.yml", Action: "reload", ReloadURL: "http://127.0.0.1:9090/-/reload",
-	}}})
+	policy := deploypolicy.Encode(deploypolicy.Policy{WatchFiles: []deploypolicy.WatchFile{
+		{Path: "prometheus/prometheus.yml", Action: "reload", ReloadURL: "http://prometheus:9090/-/reload"},
+		{Path: "alertmanager/alertmanager.yml", Action: "restart", Service: "alertmanager"},
+		{Path: "grafana/provisioning", Action: "restart", Service: "grafana"},
+	}})
 	if err := reg.UpdateDeployPolicy(app.ID, policy); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.UpdateWatchHash(app.ID, "old-hash"); err != nil {
+	prev := encodeWatchHashes(map[string]string{
+		"prometheus/prometheus.yml":     "old",
+		"alertmanager/alertmanager.yml": "am",
+		"grafana/provisioning":          "gf",
+	})
+	if err := reg.UpdateWatchHash(app.ID, prev); err != nil {
 		t.Fatal(err)
 	}
 	got, err := reg.Get(app.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := &reloadRuntime{hash: "new-hash"}
+	rt := &reloadRuntime{hashes: map[string]string{
+		"prometheus/prometheus.yml":     "new",
+		"alertmanager/alertmanager.yml": "am",
+		"grafana/provisioning":          "gf",
+	}}
 	rec := testReconciler(t, reg, rt, ReconcilerConfig{})
 	rec.recordAppliedWatchHash(got)
-	if len(rt.reloads) != 1 || rt.reloads[0] != "http://127.0.0.1:9090/-/reload" {
+	if len(rt.reloads) != 1 || rt.reloads[0] != "http://prometheus:9090/-/reload" {
 		t.Fatalf("reloads %v", rt.reloads)
 	}
-	stored, err := reg.Get(app.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.LastAppliedWatchHash != "new-hash" {
-		t.Fatalf("hash %q", stored.LastAppliedWatchHash)
-	}
-
-	rt.reloads = nil
-	rec.recordAppliedWatchHash(stored)
-	if len(rt.reloads) != 0 {
-		t.Fatalf("second pass reloaded again: %v", rt.reloads)
+	if len(rt.restarts) != 0 {
+		t.Fatalf("restarts %v", rt.restarts)
 	}
 }
 

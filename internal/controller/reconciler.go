@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,6 +102,7 @@ type EnvFileHasher interface {
 // WatchFileManager hashes watch_files and applies restart/reload actions.
 type WatchFileManager interface {
 	WatchFilesHashForApp(appID string, files []deploypolicy.WatchFile) (string, error)
+	WatchEntryHashesForApp(appID string, files []deploypolicy.WatchFile) (map[string]string, error)
 	RestartService(ctx context.Context, appID, composePath, service string) (string, error)
 	HTTPReload(ctx context.Context, reloadURL string) error
 }
@@ -534,26 +537,45 @@ func (r *Reconciler) confirmHealthy(ctx context.Context, app *App, revision stri
 	ticker := time.NewTicker(healthPollInterval(timeout))
 	defer ticker.Stop()
 
-	var lastErr error
+	var lastState compose.ProjectRuntimeState
+	var sawState bool
+	var lastProbeErr error
 	for {
 		state, err := probe.ProjectHealth(hctx, app.ID)
 		if err != nil {
-			lastErr = err
-		} else if state.Ready() {
-			return nil
+			if hctx.Err() == nil {
+				lastProbeErr = err
+			}
 		} else {
-			lastErr = fmt.Errorf("running=%d/%d exited=%d unhealthy=%d starting=%d",
-				state.RunningCount, state.ContainerCount, state.ExitedCount, state.UnhealthyCount, state.StartingCount)
+			sawState = true
+			lastState = state
+			if state.Ready() {
+				return nil
+			}
 		}
 		select {
 		case <-hctx.Done():
-			if lastErr == nil {
-				lastErr = hctx.Err()
+			if sawState {
+				return healthFailure(revision, timeout, lastState)
 			}
-			return fmt.Errorf("revision %s not healthy within %s: %v", revision, timeout, lastErr)
+			if lastProbeErr != nil {
+				return fmt.Errorf("health timeout after %s: %v", timeout, lastProbeErr)
+			}
+			return fmt.Errorf("health timeout after %s: no container status", timeout)
 		case <-ticker.C:
 		}
 	}
+}
+
+func healthFailure(revision string, timeout time.Duration, state compose.ProjectRuntimeState) error {
+	names := strings.Join(state.NotReady, ", ")
+	if names == "" {
+		names = "unknown"
+	}
+	if state.UnhealthyCount > 0 {
+		return fmt.Errorf("unhealthy: container %s after %s (revision %s)", names, timeout, revision)
+	}
+	return fmt.Errorf("health timeout: container %s after %s (revision %s)", names, timeout, revision)
 }
 
 func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevision, output string, healthErr error, syncStartedAt time.Time) error {
@@ -654,6 +676,10 @@ func (r *Reconciler) checkPipelineGate(app *App) error {
 }
 
 func (r *Reconciler) handleWatchFileDrift(app *App) {
+	r.reconcileWatchFiles(app)
+}
+
+func (r *Reconciler) reconcileWatchFiles(app *App) {
 	mgr, ok := r.Executor.(WatchFileManager)
 	if !ok || app == nil {
 		return
@@ -662,7 +688,7 @@ func (r *Reconciler) handleWatchFileDrift(app *App) {
 	if len(policy.WatchFiles) == 0 {
 		return
 	}
-	hash, err := mgr.WatchFilesHashForApp(app.ID, policy.WatchFiles)
+	hashes, err := mgr.WatchEntryHashesForApp(app.ID, policy.WatchFiles)
 	if err != nil {
 		metrics.SetWatchHashError(app.Name, true)
 		msg := err.Error()
@@ -679,32 +705,60 @@ func (r *Reconciler) handleWatchFileDrift(app *App) {
 	r.mu.Lock()
 	delete(r.watchHashErrSeen, app.ID)
 	r.mu.Unlock()
-	if hash == "" {
+	if len(hashes) == 0 {
 		return
 	}
-	if app.LastAppliedWatchHash == "" {
-		_ = r.Registry.UpdateWatchHash(app.ID, hash)
+
+	encoded := encodeWatchHashes(hashes)
+	prev, legacy := decodeWatchHashes(app.LastAppliedWatchHash)
+	if strings.TrimSpace(app.LastAppliedWatchHash) == "" {
+		_ = r.Registry.UpdateWatchHash(app.ID, encoded)
+		app.LastAppliedWatchHash = encoded
 		return
 	}
-	if hash == app.LastAppliedWatchHash {
+
+	var changed []deploypolicy.WatchFile
+	if len(prev) > 0 {
+		for _, w := range policy.WatchFiles {
+			if prev[w.Path] != hashes[w.Path] {
+				changed = append(changed, w)
+			}
+		}
+	} else if legacy != "" {
+		combined, combErr := mgr.WatchFilesHashForApp(app.ID, policy.WatchFiles)
+		if combErr == nil && combined == legacy {
+			_ = r.Registry.UpdateWatchHash(app.ID, encoded)
+			app.LastAppliedWatchHash = encoded
+			return
+		}
+		changed = append(changed, policy.WatchFiles...)
+	}
+	if len(changed) == 0 {
+		if encoded != app.LastAppliedWatchHash {
+			_ = r.Registry.UpdateWatchHash(app.ID, encoded)
+			app.LastAppliedWatchHash = encoded
+		}
 		return
 	}
 	if r.Logger != nil {
-		r.Logger.Info("watch_files changed", "app_id", app.ID, "app", app.Name)
+		paths := make([]string, 0, len(changed))
+		for _, w := range changed {
+			paths = append(paths, w.Path)
+		}
+		r.Logger.Info("watch_files changed", "app", app.Name, "app_id", app.ID, "paths", strings.Join(paths, ","))
 	}
-	r.applyWatchActions(app, mgr)
-	_ = r.Registry.UpdateWatchHash(app.ID, hash)
-	app.LastAppliedWatchHash = hash
+	r.applyWatchActions(app, mgr, changed)
+	_ = r.Registry.UpdateWatchHash(app.ID, encoded)
+	app.LastAppliedWatchHash = encoded
 }
 
-func (r *Reconciler) applyWatchActions(app *App, mgr WatchFileManager) {
+func (r *Reconciler) applyWatchActions(app *App, mgr WatchFileManager, files []deploypolicy.WatchFile) {
 	if app == nil || mgr == nil {
 		return
 	}
-	policy := app.Policy()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	for _, w := range policy.WatchFiles {
+	for _, w := range files {
 		switch w.Action {
 		case "reload":
 			if w.ReloadURL != "" {
@@ -757,29 +811,41 @@ func (r *Reconciler) recordAppliedEnvHash(app *App) {
 }
 
 func (r *Reconciler) recordAppliedWatchHash(app *App) {
-	mgr, ok := r.Executor.(WatchFileManager)
-	if !ok || app == nil {
-		return
+	r.reconcileWatchFiles(app)
+}
+
+func encodeWatchHashes(hashes map[string]string) string {
+	if len(hashes) == 0 {
+		return ""
 	}
-	policy := app.Policy()
-	if len(policy.WatchFiles) == 0 {
-		return
+	keys := make([]string, 0, len(hashes))
+	for k := range hashes {
+		keys = append(keys, k)
 	}
-	hash, err := mgr.WatchFilesHashForApp(app.ID, policy.WatchFiles)
-	if err != nil || hash == "" {
-		return
+	sort.Strings(keys)
+	ordered := make(map[string]string, len(hashes))
+	for _, k := range keys {
+		ordered[k] = hashes[k]
 	}
-	// A sync that changes a watched file must reload in the same pass.
-	// Recording the hash alone used to swallow the action until the next drift check,
-	// which then saw no difference.
-	if app.LastAppliedWatchHash != "" && hash != app.LastAppliedWatchHash {
-		if r.Logger != nil {
-			r.Logger.Info("watch_files changed during sync", "app", app.Name, "app_id", app.ID)
+	data, err := json.Marshal(ordered)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func decodeWatchHashes(raw string) (map[string]string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, ""
+	}
+	if strings.HasPrefix(raw, "{") {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(raw), &m); err == nil {
+			return m, ""
 		}
-		r.applyWatchActions(app, mgr)
 	}
-	_ = r.Registry.UpdateWatchHash(app.ID, hash)
-	app.LastAppliedWatchHash = hash
+	return nil, raw
 }
 
 func truncateOutput(value string) string {

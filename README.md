@@ -32,7 +32,7 @@ Changelog: [CHANGELOG.md](CHANGELOG.md). Пути vs Puppet: [docs/PATH_OWNERSHI
 cps config set-context --name local \
   --url https://127.0.0.1:8443 \
   --token "$(cat bootstrap_token)" \
-  --insecure-skip-tls-verify
+  --certificate-authority /etc/conops/ca.crt
 cps get apps
 ```
 
@@ -63,10 +63,10 @@ apps:
     watch_files:
       - path: prometheus.yml
         action: reload
-        reload_url: http://127.0.0.1:9090/-/reload
+        reload_url: http://prometheus:9090/-/reload
       - path: prometheus/rules
         action: reload
-        reload_url: http://127.0.0.1:9090/-/reload
+        reload_url: http://prometheus:9090/-/reload
       - path: grafana/dashboards/*.json
         action: restart
         service: grafana
