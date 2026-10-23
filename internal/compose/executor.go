@@ -368,6 +368,10 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 	var outputs []string
 	downAttempted := false
 	imageRefs := e.projectImageRefs(ctx, projectName)
+	var keptVolumes []string
+	if !pruneVolumes {
+		keptVolumes = e.projectVolumeNames(ctx, projectName)
+	}
 
 	if fileInfo, statErr := os.Stat(composeFullPath); statErr == nil && !fileInfo.IsDir() {
 		downAttempted = true
@@ -386,6 +390,9 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 		if downErr != nil && e.Logger != nil {
 			e.Logger.Warn("Compose down failed; proceeding to force cleanup", "app_id", appID, "error", downErr)
 		}
+	}
+	if !pruneVolumes && len(keptVolumes) > 0 && e.Logger != nil {
+		e.Logger.Info("Named volumes kept", "app_id", appID, "volumes", strings.Join(keptVolumes, ","))
 	}
 
 	// Fallback cleanup for any lingering containers (including legacy runs before project naming).
@@ -418,6 +425,21 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 	}
 
 	return strings.Join(outputs, "\n"), nil
+}
+
+func (e *ComposeExecutor) projectVolumeNames(ctx context.Context, projectName string) []string {
+	out, err := e.runCommand(
+		ctx,
+		"docker",
+		[]string{"volume", "ls", "-q", "--filter", "label=com.docker.compose.project=" + projectName},
+		e.runtimeWorkDir(),
+		nil,
+		nil,
+	)
+	if err != nil {
+		return nil
+	}
+	return uniqueImageRefs(out)
 }
 
 func (e *ComposeExecutor) projectImageRefs(ctx context.Context, projectName string) []string {
@@ -1093,7 +1115,10 @@ func (e *ComposeExecutor) execProcess(
 	_ = pipeReader.Close()
 
 	cmdDisplay := redact.String(formatCommand(cmd, args))
-	if streamErr != nil && e.Logger != nil {
+	// Health checks cancel docker ps on their own deadline. That is not a docker failure;
+	// the rollback WARN already states the reason.
+	stoppedByCaller := quietCommandOutput(cmd, args) && contextStopped(ctx)
+	if streamErr != nil && e.Logger != nil && !stoppedByCaller {
 		e.Logger.Warn("Command output stream failed", "cmd", cmdDisplay, "error", streamErr)
 	}
 
@@ -1111,21 +1136,23 @@ func (e *ComposeExecutor) execProcess(
 	}
 
 	if waitErr != nil {
-		exitCode := -1
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
-			exitCode = exitErr.ExitCode()
+		if !stoppedByCaller && e.Logger != nil {
+			exitCode := -1
+			var exitErr *exec.ExitError
+			if errors.As(waitErr, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			}
+			if contextStopped(ctx) {
+				e.Logger.Error("Command context ended", "cmd", cmdDisplay, "context_err", ctx.Err())
+			}
+			e.Logger.Error(
+				"Command failed",
+				"cmd", cmdDisplay,
+				"dir", workDir,
+				"exit_code", exitCode,
+				"elapsed_ms", time.Since(start).Milliseconds(),
+			)
 		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
-			e.Logger.Error("Command context ended", "cmd", cmdDisplay, "context_err", ctx.Err())
-		}
-		e.Logger.Error(
-			"Command failed",
-			"cmd", cmdDisplay,
-			"dir", workDir,
-			"exit_code", exitCode,
-			"elapsed_ms", time.Since(start).Milliseconds(),
-		)
 		return redact.String(output), fmt.Errorf("command failed: %w", waitErr)
 	}
 
@@ -1335,6 +1362,13 @@ func quietCommandOutput(cmd string, args []string) bool {
 		return false
 	}
 	return args[0] == "ps"
+}
+
+func contextStopped(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	return errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled)
 }
 
 func (e *ComposeExecutor) logCommand(cmd string, args []string, msg string, keysAndValues ...any) {

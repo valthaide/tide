@@ -46,10 +46,11 @@ type RuntimeCleaner interface {
 
 // Reconciler syncs the local registry from a fleet git repository.
 type Reconciler struct {
-	Config  Config
-	Apps    AppManager
-	Cleaner RuntimeCleaner
-	Logger  *slog.Logger
+	Config        Config
+	Apps          AppManager
+	Cleaner       RuntimeCleaner
+	Logger        *slog.Logger
+	missingStreak int
 }
 
 // NewReconciler creates a fleet reconciler.
@@ -85,7 +86,10 @@ func (r *Reconciler) syncOnce(ctx context.Context) {
 	if err != nil {
 		if IsHostFileMissing(err) {
 			metrics.SetFleetHostFileMissing(true)
+			r.logMissingHostFile(err)
+			return
 		}
+		r.missingStreak = 0
 		se := syncerr.Classify(err)
 		metrics.ObserveFleetError(se.GetCode())
 		if r.Logger != nil {
@@ -93,6 +97,7 @@ func (r *Reconciler) syncOnce(ctx context.Context) {
 		}
 		return
 	}
+	r.missingStreak = 0
 	metrics.SetFleetHostFileMissing(false)
 	if err := r.applyDesired(ctx, doc); err != nil {
 		se := syncerr.Classify(err)
@@ -103,6 +108,31 @@ func (r *Reconciler) syncOnce(ctx context.Context) {
 		return
 	}
 	metrics.ObserveFleetSuccess()
+}
+
+// logMissingHostFile counts consecutive misses. Cycle N logs one WARN and
+// later misses stay at DEBUG. N is CONOPS_FLEET_MISSING_CYCLES (default 3).
+func (r *Reconciler) logMissingHostFile(err error) {
+	r.missingStreak++
+	level, announce := missingHostLog(r.missingStreak, r.Config.MissingCycles)
+	if r.Logger == nil {
+		return
+	}
+	if announce {
+		r.Logger.Log(context.Background(), level, "fleet host file missing, waiting", "cycles", r.missingStreak, "error", err)
+		return
+	}
+	r.Logger.Log(context.Background(), level, "fleet host file not found", "cycle", r.missingStreak, "error", err)
+}
+
+func missingHostLog(streak, threshold int) (slog.Level, bool) {
+	if threshold < 1 {
+		threshold = 3
+	}
+	if streak == threshold {
+		return slog.LevelWarn, true
+	}
+	return slog.LevelDebug, false
 }
 
 func (r *Reconciler) loadDesired(ctx context.Context) (*HostDocument, error) {

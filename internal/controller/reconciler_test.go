@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -427,10 +428,13 @@ func TestCISuccessOnNextCycleAfterWait(t *testing.T) {
 
 	gate := &scriptGate{results: []cigate.Result{
 		{Allowed: false, Outcome: cigate.OutcomeWait, Reason: cigate.ReasonCIPending, Status: "running"},
+		{Allowed: false, Outcome: cigate.OutcomeWait, Reason: cigate.ReasonCIPending, Status: "running"},
 		{Allowed: true, Outcome: cigate.OutcomeAllow, Reason: cigate.ReasonOK, Status: "success"},
 	}}
 	rt := &fakeRuntime{}
+	var logs bytes.Buffer
 	rec := testReconciler(t, reg, rt, ReconcilerConfig{SyncTimeout: 5 * time.Minute})
+	rec.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	rec.Gate = gate
 
 	started := time.Now()
@@ -450,6 +454,7 @@ func TestCISuccessOnNextCycleAfterWait(t *testing.T) {
 	}
 
 	rec.reconcileOnce()
+	rec.reconcileOnce()
 	if time.Since(started) > 30*time.Second {
 		t.Fatalf("deploy waited %s, want the next cycle not the sync timeout", time.Since(started))
 	}
@@ -466,8 +471,22 @@ func TestCISuccessOnNextCycleAfterWait(t *testing.T) {
 	if got := testutil.ToFloat64(metrics.DeployBlockedTotal.WithLabelValues(app.Name, cigate.ReasonCIPending)); got != 0 {
 		t.Fatalf("deploy_blocked ci_pending=%v after deploy, want 0", got)
 	}
-	if gate.calls != 2 {
-		t.Fatalf("CI checks=%d, want 2", gate.calls)
+	if gate.calls != 3 {
+		t.Fatalf("CI checks=%d, want 3", gate.calls)
+	}
+	infoWaits, debugWaits, left := 0, 0, 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		switch {
+		case strings.Contains(line, "Deploy waiting for CI") && strings.Contains(line, "level=INFO"):
+			infoWaits++
+		case strings.Contains(line, "Deploy waiting for CI") && strings.Contains(line, "level=DEBUG"):
+			debugWaits++
+		case strings.Contains(line, "Deploy left CI wait") && strings.Contains(line, "level=INFO") && strings.Contains(line, "result=success"):
+			left++
+		}
+	}
+	if infoWaits != 1 || debugWaits != 1 || left != 1 {
+		t.Fatalf("CI log info=%d debug=%d left=%d\n%s", infoWaits, debugWaits, left, logs.String())
 	}
 }
 

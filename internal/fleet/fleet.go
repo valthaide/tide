@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,27 +46,29 @@ type WatchFileSpec struct {
 
 // Config controls fleet reconciliation.
 type Config struct {
-	RepoURL    string
-	Branch     string
-	Host       string
-	AuthMethod string
-	Token      string
-	KeyFile    string
-	CacheDir   string
-	Interval   time.Duration
+	RepoURL       string
+	Branch        string
+	Host          string
+	AuthMethod    string
+	Token         string
+	KeyFile       string
+	CacheDir      string
+	Interval      time.Duration
+	MissingCycles int
 }
 
 // LoadConfigFromEnv reads fleet settings. Empty RepoURL means fleet disabled.
 func LoadConfigFromEnv(dataDir string) (Config, error) {
 	cfg := Config{
-		RepoURL:    strings.TrimSpace(os.Getenv("CONOPS_FLEET_REPO_URL")),
-		Branch:     strings.TrimSpace(os.Getenv("CONOPS_FLEET_BRANCH")),
-		Host:       strings.TrimSpace(os.Getenv("CONOPS_FLEET_HOST")),
-		AuthMethod: strings.TrimSpace(os.Getenv("CONOPS_FLEET_AUTH_METHOD")),
-		Token:      strings.TrimSpace(os.Getenv("CONOPS_FLEET_TOKEN")),
-		KeyFile:    strings.TrimSpace(os.Getenv("CONOPS_FLEET_DEPLOY_KEY_FILE")),
-		CacheDir:   filepath.Join(dataDir, "fleet-cache"),
-		Interval:   60 * time.Second,
+		RepoURL:       strings.TrimSpace(os.Getenv("CONOPS_FLEET_REPO_URL")),
+		Branch:        strings.TrimSpace(os.Getenv("CONOPS_FLEET_BRANCH")),
+		Host:          strings.TrimSpace(os.Getenv("CONOPS_FLEET_HOST")),
+		AuthMethod:    strings.TrimSpace(os.Getenv("CONOPS_FLEET_AUTH_METHOD")),
+		Token:         strings.TrimSpace(os.Getenv("CONOPS_FLEET_TOKEN")),
+		KeyFile:       strings.TrimSpace(os.Getenv("CONOPS_FLEET_DEPLOY_KEY_FILE")),
+		CacheDir:      filepath.Join(dataDir, "fleet-cache"),
+		Interval:      60 * time.Second,
+		MissingCycles: 3,
 	}
 	if cfg.Branch == "" {
 		cfg.Branch = "main"
@@ -82,6 +85,13 @@ func LoadConfigFromEnv(dataDir string) (Config, error) {
 		} else {
 			cfg.AuthMethod = "public"
 		}
+	}
+	if v := strings.TrimSpace(os.Getenv("CONOPS_FLEET_MISSING_CYCLES")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return cfg, fmt.Errorf("invalid CONOPS_FLEET_MISSING_CYCLES: %s", v)
+		}
+		cfg.MissingCycles = n
 	}
 	if v := strings.TrimSpace(os.Getenv("CONOPS_FLEET_INTERVAL")); v != "" {
 		d, err := time.ParseDuration(v)

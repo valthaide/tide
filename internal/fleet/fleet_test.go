@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,6 +90,21 @@ apps:
 	}
 	if (&api.App{}).HealthTimeoutDuration() != api.DefaultHealthTimeout {
 		t.Fatal("default health timeout")
+	}
+}
+
+func TestMissingHostLogQuietsAfterThreshold(t *testing.T) {
+	for streak := 1; streak <= 5; streak++ {
+		level, announce := missingHostLog(streak, 3)
+		if streak == 3 {
+			if level != slog.LevelWarn || !announce {
+				t.Fatalf("cycle 3: level=%v announce=%v", level, announce)
+			}
+			continue
+		}
+		if level != slog.LevelDebug || announce {
+			t.Fatalf("cycle %d: level=%v announce=%v", streak, level, announce)
+		}
 	}
 }
 

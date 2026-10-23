@@ -124,7 +124,8 @@ type Reconciler struct {
 	mu               sync.Mutex
 	running          bool
 	sem              chan struct{}
-	watchHashErrSeen map[string]string // appID -> last error text (rate-limit logs)
+	watchHashErrSeen map[string]string    // appID -> last error text (rate-limit logs)
+	ciWaitSince      map[string]time.Time // appID -> when CI wait started
 }
 
 // NewReconciler creates a new reconciler.
@@ -139,6 +140,7 @@ func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger,
 		Config:           cfg,
 		sem:              make(chan struct{}, cfg.MaxConcurrent),
 		watchHashErrSeen: make(map[string]string),
+		ciWaitSince:      make(map[string]time.Time),
 	}
 }
 
@@ -390,9 +392,7 @@ func (r *Reconciler) syncApp(app *App) error {
 				_ = r.Registry.UpdateStatus(app.ID, "pending", &now)
 				_ = r.Registry.UpdateSyncProgress(app.ID, now, fmt.Sprintf("waiting for CI: status=%s reason=%s commit=%s", wait.status, wait.reason, app.LastSeenCommit))
 				metrics.ObserveDeployBlocked(app.Name, wait.reason)
-				if r.Logger != nil {
-					r.Logger.Info("Deploy waiting for CI", "app", app.Name, "commit", app.LastSeenCommit, "pipeline_status", wait.status, "reason", wait.reason)
-				}
+				r.noteCIWait(app, wait.status, wait.reason)
 				return nil
 			}
 			se := syncerr.Classify(err)
@@ -405,9 +405,11 @@ func (r *Reconciler) syncApp(app *App) error {
 				reason = cigate.ReasonCIError
 			}
 			metrics.ObserveDeployBlocked(app.Name, reason)
+			r.noteCIFinished(app, "failed")
 			return se
 		}
 	}
+	r.noteCIFinished(app, "success")
 	metrics.ClearDeployBlocked(app.Name)
 
 	repoSecret, err := r.Registry.GetRepoSecret(app.ID)
@@ -491,6 +493,9 @@ func (r *Reconciler) syncApp(app *App) error {
 		syncErr,
 	); err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to update app status", "app_id", app.ID, "error", err)
+	}
+	if r.Logger != nil && syncErr == "" {
+		r.Logger.Info("Applied", "app", app.Name, "revision", target, "duration", time.Since(syncStartedAt).Round(time.Millisecond).String())
 	}
 	_ = r.Registry.UpdateRollback(app.ID, target, rejected)
 	r.recordAppliedEnvHash(app)
@@ -684,6 +689,40 @@ func (r *Reconciler) checkPipelineGate(app *App) error {
 		r.Logger.Warn("Deploy blocked by CI gate", "app", app.Name, "commit", app.LastSeenCommit, "reason", reason, "pipeline_status", res.Status)
 	}
 	return syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate, msg)
+}
+
+func (r *Reconciler) noteCIWait(app *App, status, reason string) {
+	if app == nil {
+		return
+	}
+	r.mu.Lock()
+	_, waiting := r.ciWaitSince[app.ID]
+	if !waiting {
+		r.ciWaitSince[app.ID] = time.Now()
+	}
+	r.mu.Unlock()
+	if r.Logger == nil {
+		return
+	}
+	if waiting {
+		r.Logger.Debug("Deploy waiting for CI", "app", app.Name, "commit", app.LastSeenCommit, "pipeline_status", status, "reason", reason)
+		return
+	}
+	r.Logger.Info("Deploy waiting for CI", "app", app.Name, "commit", app.LastSeenCommit, "pipeline_status", status, "reason", reason)
+}
+
+func (r *Reconciler) noteCIFinished(app *App, result string) {
+	if app == nil {
+		return
+	}
+	r.mu.Lock()
+	since, waiting := r.ciWaitSince[app.ID]
+	delete(r.ciWaitSince, app.ID)
+	r.mu.Unlock()
+	if !waiting || r.Logger == nil {
+		return
+	}
+	r.Logger.Info("Deploy left CI wait", "app", app.Name, "result", result, "waited", time.Since(since).Round(time.Millisecond).String())
 }
 
 func (r *Reconciler) handleWatchFileDrift(app *App) {

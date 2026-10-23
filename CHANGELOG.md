@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.11
+
+### Fixes
+- **Health-check timeout logs.** Cancelling `docker ps` on the health deadline is not logged. A rollback keeps one WARN with the reason and one ERROR `App sync failed` that says the revision was rolled back.
+- **CI wait log.** One INFO when waiting starts, repeats at DEBUG, one INFO when CI reaches `success` or `failed` with how long the wait was.
+- **`Applied` log** after a healthy deploy: `app`, `revision`, `duration`. Status becomes `synced` with the new revision as soon as the health check passes.
+- **Kept volumes.** Without `prune_volumes: true`, named volumes stay and are listed once in `Named volumes kept`.
+- **Missing fleet host file.** After `CONOPS_FLEET_MISSING_CYCLES` (default 3) consecutive misses, one WARN, then DEBUG. `conops_fleet_host_file_missing` stays 1 until the file returns.
+
 ## v1.0.10
 
 ### Fixes
