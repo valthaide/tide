@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.8
+
+### Fixes
+- **`watch_files` reload after sync.** A commit that changes a watched file now runs reload or restart in that same sync, writes it to the log, and increments `conops_app_reloads_total{app,result}`. Single-file bind mounts keep their inode across `git checkout`, so Prometheus sees `prometheus.yml` without a new container.
+- **Metrics bearer token.** `CONOPS_METRICS_TOKEN` or `CONOPS_METRICS_TOKEN_FILE`. When set, `/metrics` without that bearer returns 401. Unset keeps the endpoint open. `/healthz` stays open.
+- **Git error series from zero.** `conops_git_fetch_errors_total{repo,reason}` is created at 0 for `auth`, `network`, `not_found`, and `other` at startup for every known repo.
+- **GitLab mirror.** A branch push fast-forwards only `refs/heads/main`. A tag push sends only `refs/tags/<tag>` and does not use `--force`. Both jobs share the `mirror-gitlab` concurrency group, so a tag cannot roll `main` back or rewrite an old tag.
+
 ## v1.0.7
 
 ### Features

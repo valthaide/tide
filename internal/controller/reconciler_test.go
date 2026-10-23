@@ -360,6 +360,67 @@ func TestRollbackUnhealthyRevision(t *testing.T) {
 	}
 }
 
+type reloadRuntime struct {
+	fakeRuntime
+	hash    string
+	reloads []string
+}
+
+func (r *reloadRuntime) WatchFilesHashForApp(string, []deploypolicy.WatchFile) (string, error) {
+	return r.hash, nil
+}
+
+func (r *reloadRuntime) HTTPReload(_ context.Context, url string) error {
+	r.reloads = append(r.reloads, url)
+	return nil
+}
+
+func (r *reloadRuntime) RestartService(context.Context, string, string, string) (string, error) {
+	return "", nil
+}
+
+func TestSyncAppliesWatchReload(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "monitoring", RepoURL: "https://example.com/monitoring.git", Branch: "main",
+		ComposePath: "docker-compose.yml", PollInterval: "30s",
+		LastSeenCommit: "df8f922", Status: "synced",
+	}
+	addPublicApp(t, reg, app)
+	policy := deploypolicy.Encode(deploypolicy.Policy{WatchFiles: []deploypolicy.WatchFile{{
+		Path: "prometheus/prometheus.yml", Action: "reload", ReloadURL: "http://127.0.0.1:9090/-/reload",
+	}}})
+	if err := reg.UpdateDeployPolicy(app.ID, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateWatchHash(app.ID, "old-hash"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &reloadRuntime{hash: "new-hash"}
+	rec := testReconciler(t, reg, rt, ReconcilerConfig{})
+	rec.recordAppliedWatchHash(got)
+	if len(rt.reloads) != 1 || rt.reloads[0] != "http://127.0.0.1:9090/-/reload" {
+		t.Fatalf("reloads %v", rt.reloads)
+	}
+	stored, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastAppliedWatchHash != "new-hash" {
+		t.Fatalf("hash %q", stored.LastAppliedWatchHash)
+	}
+
+	rt.reloads = nil
+	rec.recordAppliedWatchHash(stored)
+	if len(rt.reloads) != 0 {
+		t.Fatalf("second pass reloaded again: %v", rt.reloads)
+	}
+}
+
 func TestOperatorSuspendSurvivesFleetAndRestart(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

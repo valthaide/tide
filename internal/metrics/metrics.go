@@ -133,6 +133,12 @@ var (
 		Help:      "1 while hosts/<CONOPS_FLEET_HOST>.yaml is absent from the fleet git checkout.",
 	})
 
+	AppReloadsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "app_reloads_total",
+		Help:      "watch_files reload or restart attempts by result (success or error).",
+	}, []string{"app", "result"})
+
 	GitFetchErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "git_fetch_errors_total",
@@ -191,6 +197,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		DirtyWorktreeTotal,
 		BuildInfo,
 		FleetHostFileMissing,
+		AppReloadsTotal,
 		GitFetchErrorsTotal,
 		GitLastSuccessTimestamp,
 		LastSyncTimestamp,
@@ -526,10 +533,38 @@ func metricErrorText(msg string) string {
 	return msg
 }
 
+// EnsureGitFetchErrors creates a 0 series for every reason so alerts can use
+// increase() before the first real failure.
+func EnsureGitFetchErrors(repos ...string) {
+	reasons := []string{giterr.ReasonAuth, giterr.ReasonNetwork, giterr.ReasonNotFound, giterr.ReasonOther}
+	for _, repo := range repos {
+		repo = repoLabel(repo)
+		if repo == "unknown" {
+			continue
+		}
+		for _, reason := range reasons {
+			GitFetchErrorsTotal.WithLabelValues(repo, reason).Add(0)
+		}
+	}
+}
+
+// ObserveAppReload counts a watch_files reload or restart.
+func ObserveAppReload(app, result string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	if result != "success" {
+		result = "error"
+	}
+	AppReloadsTotal.WithLabelValues(app, result).Inc()
+}
+
 // ObserveGitFetch records a git ls-remote or fetch. A nil error is a success.
 // On failure the caller keeps the last deployed revision; this only counts the error.
 func ObserveGitFetch(repo string, err error) {
 	repo = repoLabel(repo)
+	EnsureGitFetchErrors(repo)
 	if err == nil {
 		GitLastSuccessTimestamp.WithLabelValues(repo).Set(float64(time.Now().Unix()))
 		return

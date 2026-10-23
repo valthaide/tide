@@ -658,23 +658,19 @@ func (e *ComposeExecutor) updateRepo(ctx context.Context, repoLog *strings.Build
 		return err
 	}
 
+	rev := "origin/" + branch
 	if commitHash != "" {
 		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"fetch", "origin", commitHash}, repoDir, gitEnv, nil); err != nil {
 			return err
 		}
-		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"checkout", commitHash}, repoDir, gitEnv, nil); err != nil {
-			return err
-		}
-		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"reset", "--hard", commitHash}, repoDir, gitEnv, nil); err != nil {
-			return err
-		}
-	} else {
-		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"checkout", branch}, repoDir, gitEnv, nil); err != nil {
-			return err
-		}
-		if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"reset", "--hard", "origin/" + branch}, repoDir, gitEnv, nil); err != nil {
-			return err
-		}
+		rev = commitHash
+	}
+	// Update tracked files in place so a single-file bind mount keeps its inode.
+	if err := e.materializeInPlace(ctx, repoLog, repoDir, rev, gitEnv); err != nil {
+		return err
+	}
+	if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"reset", "--mixed", rev}, repoDir, gitEnv, nil); err != nil {
+		return err
 	}
 
 	if _, err := e.runCommandWithTranscript(ctx, repoLog, "git", []string{"clean", "-fd"}, repoDir, gitEnv, nil); err != nil {

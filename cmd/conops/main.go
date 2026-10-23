@@ -172,6 +172,16 @@ func main() {
 		os.Exit(1)
 	}
 	metrics.SetBuildInfo(Version)
+	var gitRepos []string
+	for _, app := range registry.List() {
+		if app != nil {
+			gitRepos = append(gitRepos, app.RepoURL)
+		}
+	}
+	if fleetRepo := strings.TrimSpace(os.Getenv("CONOPS_FLEET_REPO_URL")); fleetRepo != "" {
+		gitRepos = append(gitRepos, fleetRepo)
+	}
+	metrics.EnsureGitFetchErrors(gitRepos...)
 
 	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
 	appHandler.SyncTimeout = reconcilerCfg.SyncTimeout
@@ -227,7 +237,7 @@ func main() {
 
 	metricsRouter := chi.NewRouter()
 	metricsRouter.Use(middleware.Recoverer)
-	metricsRouter.Handle("/metrics", metrics.Handler(promRegistry))
+	metricsRouter.Handle("/metrics", metrics.Protect(metrics.MetricsToken(), metrics.Handler(promRegistry)))
 	metricsRouter.Get("/healthz", appHandler.Healthz)
 
 	apiAddr := strings.TrimSpace(os.Getenv("CONOPS_API_ADDR"))

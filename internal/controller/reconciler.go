@@ -692,37 +692,54 @@ func (r *Reconciler) handleWatchFileDrift(app *App) {
 	if r.Logger != nil {
 		r.Logger.Info("watch_files changed", "app_id", app.ID, "app", app.Name)
 	}
+	r.applyWatchActions(app, mgr)
+	_ = r.Registry.UpdateWatchHash(app.ID, hash)
+	app.LastAppliedWatchHash = hash
+}
+
+func (r *Reconciler) applyWatchActions(app *App, mgr WatchFileManager) {
+	if app == nil || mgr == nil {
+		return
+	}
+	policy := app.Policy()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	for _, w := range policy.WatchFiles {
 		switch w.Action {
 		case "reload":
 			if w.ReloadURL != "" {
-				if err := mgr.HTTPReload(ctx, w.ReloadURL); err != nil && r.Logger != nil {
-					r.Logger.Error("watch_files reload failed", "app", app.Name, "path", w.Path, "error", err)
-				} else if r.Logger != nil {
-					r.Logger.Info("watch_files reload applied", "app", app.Name, "path", w.Path, "url", w.ReloadURL)
-				}
+				err := mgr.HTTPReload(ctx, w.ReloadURL)
+				r.logWatchResult(app.Name, "reload", w.Path, w.ReloadURL, "", err)
 			} else if w.Service != "" {
-				// Fallback: restart service if reload_url missing
-				if _, err := mgr.RestartService(ctx, app.ID, app.ComposePath, w.Service); err != nil && r.Logger != nil {
-					r.Logger.Error("watch_files restart failed", "app", app.Name, "service", w.Service, "error", err)
-				}
+				_, err := mgr.RestartService(ctx, app.ID, app.ComposePath, w.Service)
+				r.logWatchResult(app.Name, "restart", w.Path, "", w.Service, err)
 			}
-		default: // restart
+		default:
 			svc := w.Service
 			if svc == "" {
 				continue
 			}
-			if _, err := mgr.RestartService(ctx, app.ID, app.ComposePath, svc); err != nil && r.Logger != nil {
-				r.Logger.Error("watch_files restart failed", "app", app.Name, "service", svc, "error", err)
-			} else if r.Logger != nil {
-				r.Logger.Info("watch_files restart applied", "app", app.Name, "service", svc, "path", w.Path)
-			}
+			_, err := mgr.RestartService(ctx, app.ID, app.ComposePath, svc)
+			r.logWatchResult(app.Name, "restart", w.Path, "", svc, err)
 		}
 	}
-	_ = r.Registry.UpdateWatchHash(app.ID, hash)
 	metrics.ObserveWatchAction(app.Name)
+}
+
+func (r *Reconciler) logWatchResult(app, action, path, reloadURL, service string, err error) {
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	metrics.ObserveAppReload(app, result)
+	if r.Logger == nil {
+		return
+	}
+	if err != nil {
+		r.Logger.Error("watch_files action failed", "app", app, "action", action, "path", path, "url", reloadURL, "service", service, "result", result, "error", err)
+		return
+	}
+	r.Logger.Info("watch_files action applied", "app", app, "action", action, "path", path, "url", reloadURL, "service", service, "result", result)
 }
 
 func (r *Reconciler) recordAppliedEnvHash(app *App) {
@@ -752,7 +769,17 @@ func (r *Reconciler) recordAppliedWatchHash(app *App) {
 	if err != nil || hash == "" {
 		return
 	}
+	// A sync that changes a watched file must reload in the same pass.
+	// Recording the hash alone used to swallow the action until the next drift check,
+	// which then saw no difference.
+	if app.LastAppliedWatchHash != "" && hash != app.LastAppliedWatchHash {
+		if r.Logger != nil {
+			r.Logger.Info("watch_files changed during sync", "app", app.Name, "app_id", app.ID)
+		}
+		r.applyWatchActions(app, mgr)
+	}
 	_ = r.Registry.UpdateWatchHash(app.ID, hash)
+	app.LastAppliedWatchHash = hash
 }
 
 func truncateOutput(value string) string {

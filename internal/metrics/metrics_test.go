@@ -107,6 +107,16 @@ conops_app_suspended{app="web"} 1
 	}
 }
 
+func TestGitFetchErrorsStartAtZero(t *testing.T) {
+	EnsureGitFetchErrors("https://git.example/org/monitoring.git")
+	for _, reason := range []string{"auth", "network", "not_found", "other"} {
+		got := testutil.ToFloat64(GitFetchErrorsTotal.WithLabelValues("https://git.example/org/monitoring.git", reason))
+		if got != 0 {
+			t.Fatalf("%s = %v", reason, got)
+		}
+	}
+}
+
 type assertErr struct{}
 
 func (assertErr) Error() string { return "boom" }
