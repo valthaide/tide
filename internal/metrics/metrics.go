@@ -91,10 +91,10 @@ var (
 		Help:      "Unix timestamp of the last successful app reconcile/apply.",
 	})
 
-	DeployBlockedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	DeployBlockedTotal = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "deploy_blocked",
-		Help:      "Number of deploys blocked before apply (ci_pending|ci_failed|ci_error).",
+		Help:      "1 while a deploy is blocked for this app and reason (ci_pending, ci_failed, ci_error); 0 after the block clears.",
 	}, []string{"app", "reason"})
 
 	CICheckLastTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -476,7 +476,9 @@ func ObserveReconcileSuccess() {
 	ReconcileLastSuccessTimestamp.Set(float64(time.Now().Unix()))
 }
 
-// ObserveDeployBlocked increments deploy_blocked for an app/reason.
+var deployBlockReasons = []string{"ci_pending", "ci_failed", "ci_error"}
+
+// ObserveDeployBlocked marks deploy_blocked{app,reason}=1 and clears other reasons for the app.
 func ObserveDeployBlocked(app, reason string) {
 	app = strings.TrimSpace(app)
 	reason = strings.TrimSpace(reason)
@@ -486,8 +488,30 @@ func ObserveDeployBlocked(app, reason string) {
 	if reason == "" {
 		reason = "unknown"
 	}
-	DeployBlockedTotal.WithLabelValues(app, reason).Inc()
+	known := false
+	for _, item := range deployBlockReasons {
+		v := 0.0
+		if item == reason {
+			v = 1
+			known = true
+		}
+		DeployBlockedTotal.WithLabelValues(app, item).Set(v)
+	}
+	if !known {
+		DeployBlockedTotal.WithLabelValues(app, reason).Set(1)
+	}
 	CICheckLastTimestamp.WithLabelValues(app).Set(float64(time.Now().Unix()))
+}
+
+// ClearDeployBlocked sets every deploy_blocked reason for the app to 0.
+func ClearDeployBlocked(app string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	for _, reason := range deployBlockReasons {
+		DeployBlockedTotal.WithLabelValues(app, reason).Set(0)
+	}
 }
 
 // SetWatchHashError sets whether the last watch_files hash failed.

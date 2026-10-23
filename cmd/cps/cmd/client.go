@@ -31,6 +31,7 @@ func discoverCAFile() string {
 		strings.TrimSpace(os.Getenv("CONOPS_CA_FILE")),
 		strings.TrimSpace(os.Getenv("CPS_CA_FILE")),
 		"/etc/conops/ca.crt",
+		"/data/tls/cert.pem",
 		"/opt/conops/data/tls/cert.pem",
 	}
 	for _, path := range candidates {

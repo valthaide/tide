@@ -600,13 +600,12 @@ func (s *SQLiteStore) UpdateAppSyncProgress(ctx context.Context, id string, last
 	query := `
 	UPDATE apps
 	SET
-		status = ?,
 		last_sync_at = ?,
 		last_sync_output = ?,
 		last_sync_error = ''
 	WHERE id = ?
 	`
-	result, err := s.db.ExecContext(ctx, query, "syncing", lastSyncAt, syncOutput, id)
+	result, err := s.db.ExecContext(ctx, query, lastSyncAt, syncOutput, id)
 	if err != nil {
 		return err
 	}

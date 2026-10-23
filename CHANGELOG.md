@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.10
+
+### Fixes
+- **CI gate recheck.** A progress update after "pipeline still running" was putting the app back into `syncing`, so the next loop skipped it until the 5-minute stale recovery. The app stays `pending` and the gate is checked again on the next reconcile. If CI is already green by then, the deploy happens on that cycle. `conops_deploy_blocked{app,reason}` is a gauge: 1 while blocked, 0 after the block clears.
+- **`cps config init` keeps TLS verification on** and records the discovered CA. It no longer sets `insecure-skip-tls-verify` for localhost.
+- **`cps` inside the controller container** also trusts `/data/tls/cert.pem`.
+- **`docker ps` logs.** `Executing command`, `Command output`, and `Command succeeded` for `docker ps` are DEBUG.
+
 ## v1.0.9
 
 ### Fixes

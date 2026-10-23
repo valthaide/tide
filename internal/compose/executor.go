@@ -1042,8 +1042,7 @@ func (e *ComposeExecutor) execProcess(
 		command.Env = mergedEnv
 	}
 
-	e.Logger.Info(
-		"Executing command",
+	e.logCommand(cmd, args, "Executing command",
 		"cmd", redact.String(formatCommand(cmd, args)),
 		"dir", workDir,
 		"env_keys", sortedKeys(env),
@@ -1130,7 +1129,7 @@ func (e *ComposeExecutor) execProcess(
 		return redact.String(output), fmt.Errorf("command failed: %w", waitErr)
 	}
 
-	e.Logger.Info(
+	e.logCommand(cmd, args,
 		"Command succeeded",
 		"cmd", cmdDisplay,
 		"elapsed_ms", time.Since(start).Milliseconds(),
@@ -1336,6 +1335,17 @@ func quietCommandOutput(cmd string, args []string) bool {
 		return false
 	}
 	return args[0] == "ps"
+}
+
+func (e *ComposeExecutor) logCommand(cmd string, args []string, msg string, keysAndValues ...any) {
+	if e == nil || e.Logger == nil {
+		return
+	}
+	if quietCommandOutput(cmd, args) {
+		e.Logger.Debug(msg, keysAndValues...)
+		return
+	}
+	e.Logger.Info(msg, keysAndValues...)
 }
 
 func startsWithAlphaNum(value string) bool {

@@ -107,12 +107,19 @@ type WatchFileManager interface {
 	HTTPReload(ctx context.Context, reloadURL string) error
 }
 
+// pipelineGate is the CI check. Tests substitute it; production leaves it nil
+// and queries GitLab.
+type pipelineGate interface {
+	CheckCommit(ctx context.Context, repoURL, commitSHA string) cigate.Result
+}
+
 // Reconciler applies desired state directly on the host (monolith mode).
 type Reconciler struct {
 	Registry *Registry
 	Executor AppRuntime
 	Logger   *slog.Logger
 	Config   ReconcilerConfig
+	Gate     pipelineGate
 
 	mu               sync.Mutex
 	running          bool
@@ -401,6 +408,7 @@ func (r *Reconciler) syncApp(app *App) error {
 			return se
 		}
 	}
+	metrics.ClearDeployBlocked(app.Name)
 
 	repoSecret, err := r.Registry.GetRepoSecret(app.ID)
 	if err != nil {
@@ -650,11 +658,14 @@ func (r *Reconciler) checkPipelineGate(app *App) error {
 	if app.LastSeenCommit != "" && app.LastSeenCommit == app.LastSyncedCommit {
 		return nil
 	}
-	token := cigate.TokenFromEnv()
-	checker := &cigate.Checker{Token: token}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	res := checker.CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
+	var res cigate.Result
+	if r.Gate != nil {
+		res = r.Gate.CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
+	} else {
+		res = (&cigate.Checker{Token: cigate.TokenFromEnv()}).CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
+	}
 	switch res.Outcome {
 	case cigate.OutcomeAllow, "":
 		if res.Allowed {

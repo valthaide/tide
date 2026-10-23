@@ -541,13 +541,12 @@ func (s *PostgresStore) UpdateAppSyncProgress(ctx context.Context, id string, la
 	query := `
 	UPDATE apps
 	SET
-		status = $1,
-		last_sync_at = $2,
-		last_sync_output = $3,
+		last_sync_at = $1,
+		last_sync_output = $2,
 		last_sync_error = ''
-	WHERE id = $4
+	WHERE id = $3
 	`
-	ct, err := s.pool.Exec(ctx, query, "syncing", lastSyncAt, syncOutput, id)
+	ct, err := s.pool.Exec(ctx, query, lastSyncAt, syncOutput, id)
 	if err != nil {
 		return err
 	}

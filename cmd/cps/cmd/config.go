@@ -10,17 +10,17 @@ import (
 )
 
 var (
-	configPathFlag         string
-	setContextName         string
-	setContextURL          string
-	setContextToken        string
-	setContextInsecure     bool
-	setContextCA           string
-	initFromSecrets        string
-	initContextName        string
-	initContextURL         string
-	initInsecure           bool
-	initSetCurrent         bool
+	configPathFlag     string
+	setContextName     string
+	setContextURL      string
+	setContextToken    string
+	setContextInsecure bool
+	setContextCA       string
+	initFromSecrets    string
+	initContextName    string
+	initContextURL     string
+	initInsecure       bool
+	initSetCurrent     bool
 )
 
 var configCmd = &cobra.Command{
@@ -209,10 +209,10 @@ Examples:
 		ctx := cfg.Contexts[name]
 		ctx.URL = url
 		ctx.Token = token
+		ctx.CertificateAuthority = discoverCAFile()
+		ctx.InsecureSkipTLSVerify = false
 		if cmd.Flags().Changed("insecure") {
 			ctx.InsecureSkipTLSVerify = initInsecure
-		} else if strings.Contains(url, "127.0.0.1") || strings.Contains(url, "localhost") {
-			ctx.InsecureSkipTLSVerify = true
 		}
 		cfg.Contexts[name] = ctx
 		if initSetCurrent || cfg.CurrentContext == "" {

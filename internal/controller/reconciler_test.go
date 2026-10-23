@@ -10,10 +10,13 @@ import (
 
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/conops-private/internal/cigate"
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/credentials"
 	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/store"
 )
 
@@ -383,6 +386,112 @@ func (r *reloadRuntime) HTTPReload(_ context.Context, url string) error {
 func (r *reloadRuntime) RestartService(_ context.Context, _, _, service string) (string, error) {
 	r.restarts = append(r.restarts, service)
 	return "", nil
+}
+
+type scriptGate struct {
+	results []cigate.Result
+	calls   int
+}
+
+func (s *scriptGate) CheckCommit(context.Context, string, string) cigate.Result {
+	s.calls++
+	if len(s.results) == 0 {
+		return cigate.Result{Allowed: true, Outcome: cigate.OutcomeAllow, Reason: cigate.ReasonOK, Status: "success"}
+	}
+	i := s.calls - 1
+	if i >= len(s.results) {
+		i = len(s.results) - 1
+	}
+	return s.results[i]
+}
+
+// CI finishes in the moment ConOps starts waiting. The next reconcile deploys.
+// It must not sit in syncing until the sync-timeout recovery.
+func TestCISuccessOnNextCycleAfterWait(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "web", RepoURL: "https://git.example/org/web.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "bbbbbbbb", LastSyncedCommit: "aaaaaaaa", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{RequirePipelineSuccess: true})); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateSyncResult(app.ID, "synced", time.Now().Add(-time.Hour), "aaaaaaaa", "old", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateCommitWithMessage(app.ID, "bbbbbbbb", "new"); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := &scriptGate{results: []cigate.Result{
+		{Allowed: false, Outcome: cigate.OutcomeWait, Reason: cigate.ReasonCIPending, Status: "running"},
+		{Allowed: true, Outcome: cigate.OutcomeAllow, Reason: cigate.ReasonOK, Status: "success"},
+	}}
+	rt := &fakeRuntime{}
+	rec := testReconciler(t, reg, rt, ReconcilerConfig{SyncTimeout: 5 * time.Minute})
+	rec.Gate = gate
+
+	started := time.Now()
+	rec.reconcileOnce()
+	if len(rt.applyCalls) != 0 {
+		t.Fatalf("deployed while CI was running: %v", rt.applyCalls)
+	}
+	waiting, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waiting.Status != "pending" {
+		t.Fatalf("after CI wait status=%q, want pending", waiting.Status)
+	}
+	if got := testutil.ToFloat64(metrics.DeployBlockedTotal.WithLabelValues(app.Name, cigate.ReasonCIPending)); got != 1 {
+		t.Fatalf("deploy_blocked ci_pending=%v, want 1", got)
+	}
+
+	rec.reconcileOnce()
+	if time.Since(started) > 30*time.Second {
+		t.Fatalf("deploy waited %s, want the next cycle not the sync timeout", time.Since(started))
+	}
+	if len(rt.applyCalls) != 1 || len(rt.applyCommits) != 1 || rt.applyCommits[0] != "bbbbbbbb" {
+		t.Fatalf("next cycle apply commits=%v calls=%v", rt.applyCommits, rt.applyCalls)
+	}
+	deployed, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deployed.Status != "synced" || deployed.LastSyncedCommit != "bbbbbbbb" {
+		t.Fatalf("after next cycle status=%q synced=%q", deployed.Status, deployed.LastSyncedCommit)
+	}
+	if got := testutil.ToFloat64(metrics.DeployBlockedTotal.WithLabelValues(app.Name, cigate.ReasonCIPending)); got != 0 {
+		t.Fatalf("deploy_blocked ci_pending=%v after deploy, want 0", got)
+	}
+	if gate.calls != 2 {
+		t.Fatalf("CI checks=%d, want 2", gate.calls)
+	}
+}
+
+func TestSyncProgressDoesNotForceSyncing(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "web", RepoURL: "https://example.com/a.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "abc", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	if err := reg.UpdateStatus(app.ID, "pending", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateSyncProgress(app.ID, time.Now(), "waiting for CI: status=running reason=ci_pending"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "pending" {
+		t.Fatalf("CI wait was forced back to %q", got.Status)
+	}
 }
 
 func TestHealthFailureNamesContainer(t *testing.T) {
