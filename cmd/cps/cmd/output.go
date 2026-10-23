@@ -152,6 +152,8 @@ func printAppDetail(app api.App) {
 	fmt.Printf("Seen Message:   %s\n", orDash(app.LastSeenCommitMessage))
 	fmt.Printf("Synced Commit:  %s\n", orDash(app.LastSyncedCommit))
 	fmt.Printf("Synced Message: %s\n", orDash(app.LastSyncedCommitMessage))
+	fmt.Printf("Healthy Rev:   %s\n", orDash(app.LastHealthyCommit))
+	fmt.Printf("Rejected Rev:  %s\n", orDash(app.RejectedCommit))
 	fmt.Printf("Last Sync At:   %s\n", formatTime(app.LastSyncAt))
 	errDisp := app.LastSyncError
 	if app.LastSyncErrorCode != "" && app.LastSyncErrorCode != "unknown" {

@@ -9,16 +9,17 @@ import (
 
 // Common error codes for alerts and cps.
 const (
-	CodeGitAuth      = "git_auth"
-	CodeGitFetch     = "git_fetch"
-	CodeComposeApply = "compose_apply"
-	CodeSecretsSOPS  = "secrets_sops"
-	CodeSecretsVault = "secrets_vault"
-	CodeCredentials  = "credentials"
+	CodeGitAuth        = "git_auth"
+	CodeGitFetch       = "git_fetch"
+	CodeComposeApply   = "compose_apply"
+	CodeSecretsSOPS    = "secrets_sops"
+	CodeSecretsVault   = "secrets_vault"
+	CodeCredentials    = "credentials"
 	CodeTimeout        = "timeout"
 	CodeEnvFileMissing = "env_file_missing"
 	CodeBlockedByCI    = "blocked_by_ci"
 	CodeDirtyWorktree  = "dirty_worktree"
+	CodeUnhealthy      = "unhealthy"
 	CodeUnknown        = "unknown"
 )
 
@@ -29,6 +30,7 @@ const (
 	StageSecrets     = "secrets"
 	StageCompose     = "compose"
 	StageCIGate      = "ci_gate"
+	StageHealth      = "health"
 	StageUnknown     = "unknown"
 )
 

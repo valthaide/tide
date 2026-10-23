@@ -8,29 +8,34 @@ import (
 	"testing"
 	"time"
 
+	"strings"
+
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/credentials"
+	"github.com/valthaide/conops-private/internal/deploypolicy"
 	"github.com/valthaide/conops-private/internal/store"
 )
 
 type fakeRuntime struct {
-	snapshot   map[string]compose.ProjectRuntimeState
-	snapshotErr error
-	applyCalls []string
-	applyErr   error
+	snapshot     map[string]compose.ProjectRuntimeState
+	snapshotErr  error
+	applyCalls   []string
+	applyCommits []string
+	applyErr     error
 }
 
 func (f *fakeRuntime) Apply(
 	_ context.Context,
 	appID, _ string,
 	_ map[string]string,
-	_, _, _, _ string,
+	_, _, _, commit string,
 	_ string,
 	_ []byte,
 	_ func(string),
 ) (string, error) {
 	f.applyCalls = append(f.applyCalls, appID)
+	f.applyCommits = append(f.applyCommits, commit)
 	if f.applyErr != nil {
 		return "failed", f.applyErr
 	}
@@ -58,7 +63,7 @@ func testRegistry(t *testing.T) *Registry {
 	return NewRegistry(db, creds)
 }
 
-func testReconciler(t *testing.T, reg *Registry, rt *fakeRuntime, cfg ReconcilerConfig) *Reconciler {
+func testReconciler(t *testing.T, reg *Registry, rt AppRuntime, cfg ReconcilerConfig) *Reconciler {
 	t.Helper()
 	if cfg.Interval == 0 {
 		cfg.Interval = time.Hour
@@ -269,5 +274,144 @@ func TestLoadReconcilerConfigFromEnv(t *testing.T) {
 	}
 	if cfg.Interval != 15*time.Second || cfg.SyncTimeout != 2*time.Minute || !cfg.RetryErrors {
 		t.Fatalf("unexpected cfg: %+v", cfg)
+	}
+}
+
+type scriptedRuntime struct {
+	fakeRuntime
+	badCommit string
+}
+
+func (s *scriptedRuntime) ProjectHealth(context.Context, string) (compose.ProjectRuntimeState, error) {
+	rev := ""
+	if n := len(s.applyCommits); n > 0 {
+		rev = s.applyCommits[n-1]
+	}
+	if rev == s.badCommit {
+		return compose.ProjectRuntimeState{ContainerCount: 1, RunningCount: 1, UnhealthyCount: 1}, nil
+	}
+	return compose.ProjectRuntimeState{ContainerCount: 1, RunningCount: 1}, nil
+}
+
+func TestRevisionToApplySkipsRejected(t *testing.T) {
+	if got := revisionToApply(&App{LastSeenCommit: "b", RejectedCommit: "b", LastHealthyCommit: "a"}); got != "a" {
+		t.Fatalf("got %q", got)
+	}
+	if got := revisionToApply(&App{LastSeenCommit: "c", RejectedCommit: "b", LastHealthyCommit: "a"}); got != "c" {
+		t.Fatalf("new commit: got %q", got)
+	}
+}
+
+func TestRollbackUnhealthyRevision(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "web", RepoURL: "https://example.com/a.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "aaaaaaaa", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	if err := reg.UpdateSyncResult(app.ID, "synced", time.Now(), "aaaaaaaa", "good", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateRollback(app.ID, "aaaaaaaa", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{HealthTimeout: "40ms"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateCommitWithMessage(app.ID, "bbbbbbbb", "bad"); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &scriptedRuntime{badCommit: "bbbbbbbb"}
+	testReconciler(t, reg, rt, ReconcilerConfig{}).reconcileOnce()
+	if len(rt.applyCommits) != 2 || rt.applyCommits[0] != "bbbbbbbb" || rt.applyCommits[1] != "aaaaaaaa" {
+		t.Fatalf("apply commits: %v", rt.applyCommits)
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "synced" || got.LastSyncedCommit != "aaaaaaaa" || got.RejectedCommit != "bbbbbbbb" {
+		t.Fatalf("after rollback: status=%s synced=%s rejected=%s err=%s", got.Status, got.LastSyncedCommit, got.RejectedCommit, got.LastSyncError)
+	}
+	if !strings.Contains(got.LastSyncError, "bbbbbbbb") {
+		t.Fatalf("error %q does not mention failed revision", got.LastSyncError)
+	}
+
+	testReconciler(t, reg, rt, ReconcilerConfig{}).reconcileOnce()
+	if len(rt.applyCommits) != 2 {
+		t.Fatalf("rejected revision reapplied: %v", rt.applyCommits)
+	}
+
+	if err := reg.UpdateCommitWithMessage(app.ID, "cccccccc", "fix"); err != nil {
+		t.Fatal(err)
+	}
+	testReconciler(t, reg, rt, ReconcilerConfig{}).reconcileOnce()
+	if len(rt.applyCommits) != 3 || rt.applyCommits[2] != "cccccccc" {
+		t.Fatalf("commit C: %v", rt.applyCommits)
+	}
+	got, err = reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastSyncedCommit != "cccccccc" || got.RejectedCommit != "" || got.LastSyncError != "" {
+		t.Fatalf("after C: synced=%s rejected=%s err=%s", got.LastSyncedCommit, got.RejectedCommit, got.LastSyncError)
+	}
+}
+
+func TestOperatorSuspendSurvivesFleetAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := store.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, err := credentials.NewServiceFromEnv(filepath.Join(dir, "key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry(db, creds)
+	app := &api.App{
+		Name: "web", RepoURL: "https://example.com/a.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "abc", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	if err := reg.SetOperatorSuspended(app.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SetSuspended(app.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	db, err = store.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	reg = NewRegistry(db, creds)
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.OperatorSuspended || !got.Suspended || got.FleetSuspended {
+		t.Fatalf("pause lost across reopen: %+v", got)
+	}
+	rt := &fakeRuntime{}
+	testReconciler(t, reg, rt, ReconcilerConfig{}).reconcileOnce()
+	if len(rt.applyCalls) != 0 {
+		t.Fatalf("suspended app was reconciled: %v", rt.applyCalls)
+	}
+	if err := reg.SetOperatorSuspended(app.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Suspended || got.Status != "pending" {
+		t.Fatalf("resume: suspended=%v status=%s", got.Suspended, got.Status)
 	}
 }

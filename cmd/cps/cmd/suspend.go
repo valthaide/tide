@@ -10,14 +10,21 @@ import (
 )
 
 var suspendCmd = &cobra.Command{
-	Use:   "suspend",
-	Short: "Suspend automatic reconciliation",
+	Use:   "suspend [APP]",
+	Short: "Pause automatic reconciliation for one application",
+	Long:  "While suspended, ConOps does not poll git or reconcile this app. Other apps on the host keep syncing. The pause is stored locally and survives a controller restart; fleet git does not clear it. Resume with `cps resume`.",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 1 {
+			return cmd.Help()
+		}
+		return setSuspended(args[0], true)
+	},
 }
 
 var suspendAppCmd = &cobra.Command{
 	Use:   "app NAME|ID",
-	Short: "Suspend git polling and auto-sync for an application",
-	Long:  "While suspended, ConOps stops polling git and automatic reconcile. Manual `cps reconcile app` still works.",
+	Short: "Pause git polling and auto-sync for an application",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return setSuspended(args[0], true)
@@ -25,8 +32,16 @@ var suspendAppCmd = &cobra.Command{
 }
 
 var resumeCmd = &cobra.Command{
-	Use:   "resume",
-	Short: "Resume automatic reconciliation",
+	Use:   "resume [APP]",
+	Short: "Resume automatic reconciliation for one application",
+	Long:  "Clears an operator pause. The next reconcile applies the revision from git.",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 1 {
+			return cmd.Help()
+		}
+		return setSuspended(args[0], false)
+	},
 }
 
 var resumeAppCmd = &cobra.Command{

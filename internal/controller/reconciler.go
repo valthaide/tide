@@ -28,10 +28,10 @@ func (e *gateWait) Error() string { return e.msg }
 
 // ReconcilerConfig controls how the monolith applies desired state.
 type ReconcilerConfig struct {
-	Interval       time.Duration
-	SyncTimeout    time.Duration
-	RetryErrors    bool
-	MaxConcurrent  int
+	Interval      time.Duration
+	SyncTimeout   time.Duration
+	RetryErrors   bool
+	MaxConcurrent int
 }
 
 // LoadReconcilerConfigFromEnv loads reconciler config from environment variables.
@@ -367,33 +367,36 @@ func (r *Reconciler) syncApp(app *App) error {
 	if err := r.Registry.UpdateStatus(app.ID, "syncing", &syncStartedAt); err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to mark app syncing", "app_id", app.ID, "error", err)
 	}
+	target := revisionToApply(app)
 
-	if err := r.checkPipelineGate(app); err != nil {
-		var wait *gateWait
-		if asWait, ok := err.(*gateWait); ok {
-			wait = asWait
-		}
-		if wait != nil {
-			now := time.Now()
-			_ = r.Registry.UpdateStatus(app.ID, "pending", &now)
-			_ = r.Registry.UpdateSyncProgress(app.ID, now, fmt.Sprintf("waiting for CI: status=%s reason=%s commit=%s", wait.status, wait.reason, app.LastSeenCommit))
-			metrics.ObserveDeployBlocked(app.Name, wait.reason)
-			if r.Logger != nil {
-				r.Logger.Info("Deploy waiting for CI", "app", app.Name, "commit", app.LastSeenCommit, "pipeline_status", wait.status, "reason", wait.reason)
+	if target == strings.TrimSpace(app.LastSeenCommit) {
+		if err := r.checkPipelineGate(app); err != nil {
+			var wait *gateWait
+			if asWait, ok := err.(*gateWait); ok {
+				wait = asWait
 			}
-			return nil
+			if wait != nil {
+				now := time.Now()
+				_ = r.Registry.UpdateStatus(app.ID, "pending", &now)
+				_ = r.Registry.UpdateSyncProgress(app.ID, now, fmt.Sprintf("waiting for CI: status=%s reason=%s commit=%s", wait.status, wait.reason, app.LastSeenCommit))
+				metrics.ObserveDeployBlocked(app.Name, wait.reason)
+				if r.Logger != nil {
+					r.Logger.Info("Deploy waiting for CI", "app", app.Name, "commit", app.LastSeenCommit, "pipeline_status", wait.status, "reason", wait.reason)
+				}
+				return nil
+			}
+			se := syncerr.Classify(err)
+			_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
+			metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
+			reason := se.Code
+			if strings.Contains(se.Message, cigate.ReasonCIFailed) {
+				reason = cigate.ReasonCIFailed
+			} else if strings.Contains(se.Message, cigate.ReasonCIError) {
+				reason = cigate.ReasonCIError
+			}
+			metrics.ObserveDeployBlocked(app.Name, reason)
+			return se
 		}
-		se := syncerr.Classify(err)
-		_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
-		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
-		reason := se.Code
-		if strings.Contains(se.Message, cigate.ReasonCIFailed) {
-			reason = cigate.ReasonCIFailed
-		} else if strings.Contains(se.Message, cigate.ReasonCIError) {
-			reason = cigate.ReasonCIError
-		}
-		metrics.ObserveDeployBlocked(app.Name, reason)
-		return se
 	}
 
 	repoSecret, err := r.Registry.GetRepoSecret(app.ID)
@@ -425,7 +428,7 @@ func (r *Reconciler) syncApp(app *App) error {
 		app.RepoURL,
 		app.Branch,
 		app.ComposePath,
-		app.LastSeenCommit,
+		target,
 		app.RepoAuthMethod,
 		repoSecret,
 		progress.Update,
@@ -434,7 +437,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	if err != nil {
 		se := syncerr.Classify(err)
 		if r.Logger != nil {
-			r.Logger.Error("Sync apply failed", "app_id", app.ID, "commit", app.LastSeenCommit, "code", se.Code, "stage", se.Stage, "output", truncateOutput(output))
+			r.Logger.Error("Sync apply failed", "app_id", app.ID, "commit", target, "code", se.Code, "stage", se.Stage, "output", truncateOutput(output))
 		}
 		now := time.Now()
 		_ = r.Registry.UpdateSyncResultErr(
@@ -450,23 +453,166 @@ func (r *Reconciler) syncApp(app *App) error {
 		return se
 	}
 
+	if err := r.confirmHealthy(ctx, app, target); err != nil {
+		return r.rollbackUnhealthy(ctx, app, target, output, err, syncStartedAt)
+	}
+
 	now := time.Now()
+	syncErr := ""
+	syncedMessage := app.LastSeenCommitMessage
+	rejected := ""
+	if target != strings.TrimSpace(app.LastSeenCommit) {
+		// Re-applied the last healthy revision while git still points at a rejected commit.
+		syncErr = syncerr.Encode(syncerr.New(app.LastSyncErrorCode, app.LastSyncErrorStage, app.LastSyncError))
+		syncedMessage = app.LastSyncedCommitMessage
+		rejected = app.RejectedCommit
+		if rejected == "" {
+			rejected = app.LastSeenCommit
+		}
+	}
 	if err := r.Registry.UpdateSyncResult(
 		app.ID,
 		"synced",
 		now,
-		app.LastSeenCommit,
-		app.LastSeenCommitMessage,
+		target,
+		syncedMessage,
 		output,
-		"",
+		syncErr,
 	); err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to update app status", "app_id", app.ID, "error", err)
 	}
+	_ = r.Registry.UpdateRollback(app.ID, target, rejected)
 	r.recordAppliedEnvHash(app)
 	r.recordAppliedWatchHash(app)
-	metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
-	metrics.ObserveReconcileSuccess()
+	if syncErr == "" {
+		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
+		metrics.ObserveReconcileSuccess()
+	}
 	return nil
+}
+
+// revisionToApply returns the git commit to deploy.
+// A revision that failed its health timeout is not applied again until git moves on.
+func revisionToApply(app *App) string {
+	if app == nil {
+		return ""
+	}
+	seen := strings.TrimSpace(app.LastSeenCommit)
+	rejected := strings.TrimSpace(app.RejectedCommit)
+	healthy := strings.TrimSpace(app.LastHealthyCommit)
+	if rejected != "" && seen == rejected && healthy != "" {
+		return healthy
+	}
+	return seen
+}
+
+type projectHealthProbe interface {
+	ProjectHealth(ctx context.Context, appID string) (compose.ProjectRuntimeState, error)
+}
+
+func healthPollInterval(timeout time.Duration) time.Duration {
+	poll := 2 * time.Second
+	if timeout < poll {
+		poll = timeout / 4
+	}
+	if poll < 5*time.Millisecond {
+		poll = 5 * time.Millisecond
+	}
+	return poll
+}
+
+// confirmHealthy waits until compose healthchecks pass, or returns when the app has no probe.
+func (r *Reconciler) confirmHealthy(ctx context.Context, app *App, revision string) error {
+	probe, ok := r.Executor.(projectHealthProbe)
+	if !ok || app == nil {
+		return nil
+	}
+	timeout := app.HealthTimeoutDuration()
+	hctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(healthPollInterval(timeout))
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		state, err := probe.ProjectHealth(hctx, app.ID)
+		if err != nil {
+			lastErr = err
+		} else if state.Ready() {
+			return nil
+		} else {
+			lastErr = fmt.Errorf("running=%d/%d exited=%d unhealthy=%d starting=%d",
+				state.RunningCount, state.ContainerCount, state.ExitedCount, state.UnhealthyCount, state.StartingCount)
+		}
+		select {
+		case <-hctx.Done():
+			if lastErr == nil {
+				lastErr = hctx.Err()
+			}
+			return fmt.Errorf("revision %s not healthy within %s: %v", revision, timeout, lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevision, output string, healthErr error, syncStartedAt time.Time) error {
+	msg := healthErr.Error()
+	prev := strings.TrimSpace(app.LastHealthyCommit)
+	if prev != "" && prev != failedRevision {
+		if r.Logger != nil {
+			r.Logger.Warn("Revision failed health timeout; rolling back", "app_id", app.ID, "failed", failedRevision, "rollback", prev, "error", healthErr)
+		}
+		repoSecret, err := r.Registry.GetRepoSecret(app.ID)
+		if err != nil {
+			msg = fmt.Sprintf("%s; rollback to %s failed: %v", msg, prev, err)
+		} else {
+			defer zeroBytes(repoSecret)
+			envVars, envErr := r.Registry.GetAppEnvs(app.ID)
+			if envErr != nil {
+				msg = fmt.Sprintf("%s; rollback to %s failed: %v", msg, prev, envErr)
+			} else {
+				rbCtx, cancel := context.WithTimeout(context.Background(), r.Config.SyncTimeout)
+				rbOut, rbErr := r.Executor.Apply(
+					rbCtx,
+					app.ID,
+					"",
+					envVars,
+					app.RepoURL,
+					app.Branch,
+					app.ComposePath,
+					prev,
+					app.RepoAuthMethod,
+					repoSecret,
+					nil,
+				)
+				cancel()
+				if strings.TrimSpace(rbOut) != "" {
+					output = output + "\n" + rbOut
+				}
+				if rbErr != nil {
+					msg = fmt.Sprintf("%s; rollback to %s failed: %v", msg, prev, rbErr)
+				} else if err := r.confirmHealthy(ctx, app, prev); err != nil {
+					msg = fmt.Sprintf("%s; rollback to %s is not healthy: %v", msg, prev, err)
+				} else {
+					msg = fmt.Sprintf("%s; rolled back to %s", healthErr.Error(), prev)
+					se := syncerr.New(syncerr.CodeUnhealthy, syncerr.StageHealth, msg)
+					now := time.Now()
+					_ = r.Registry.UpdateSyncResult(app.ID, "synced", now, prev, app.LastSyncedCommitMessage, output, syncerr.Encode(se))
+					_ = r.Registry.UpdateRollback(app.ID, prev, failedRevision)
+					r.recordAppliedEnvHash(app)
+					r.recordAppliedWatchHash(app)
+					metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
+					return se
+				}
+			}
+		}
+	}
+	se := syncerr.New(syncerr.CodeUnhealthy, syncerr.StageHealth, msg)
+	now := time.Now()
+	_ = r.Registry.UpdateSyncResultErr(app.ID, "error", now, failedRevision, app.LastSeenCommitMessage, output, se)
+	_ = r.Registry.UpdateRollback(app.ID, prev, failedRevision)
+	metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
+	return se
 }
 
 func (r *Reconciler) checkPipelineGate(app *App) error {

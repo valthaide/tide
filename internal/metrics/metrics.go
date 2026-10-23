@@ -16,12 +16,15 @@ type AppSnapshot struct {
 	ID                 string
 	Name               string
 	Status             string
+	Suspended          bool
 	LastSyncAt         time.Time
 	LastSyncError      string
 	LastSyncErrorCode  string
 	LastSyncErrorStage string
 	LastSeenCommit     string
 	LastSyncedCommit   string
+	LastHealthyCommit  string
+	RejectedCommit     string
 }
 
 // AppLister provides app snapshots for gauge metrics on each scrape.
@@ -120,6 +123,12 @@ var (
 		Name:      "build_info",
 		Help:      "Build version information (value always 1).",
 	}, []string{"version"})
+
+	FleetHostFileMissing = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "fleet_host_file_missing",
+		Help:      "1 while hosts/<CONOPS_FLEET_HOST>.yaml is absent from the fleet git checkout.",
+	})
 )
 
 var (
@@ -160,6 +169,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		WatchHashErrors,
 		DirtyWorktreeTotal,
 		BuildInfo,
+		FleetHostFileMissing,
 		envDrift,
 		envHashApplied,
 		syncErrorInfo,
@@ -181,14 +191,16 @@ func Handler(registry prometheus.Gatherer) http.Handler {
 type appsCollector struct {
 	lister AppLister
 
-	appsDesc                      *prometheus.Desc
-	syncStatusDesc                *prometheus.Desc
-	lastSyncTimestampDesc         *prometheus.Desc
-	lastSyncErrorDesc             *prometheus.Desc
-	commitDriftDesc               *prometheus.Desc
-	syncInProgressDesc            *prometheus.Desc
+	appsDesc                        *prometheus.Desc
+	syncStatusDesc                  *prometheus.Desc
+	lastSyncTimestampDesc           *prometheus.Desc
+	lastSyncErrorDesc               *prometheus.Desc
+	commitDriftDesc                 *prometheus.Desc
+	syncInProgressDesc              *prometheus.Desc
 	lastSuccessfulSyncTimestampDesc *prometheus.Desc
-	syncSuccessAgeSecondsDesc     *prometheus.Desc
+	syncSuccessAgeSecondsDesc       *prometheus.Desc
+	suspendedDesc                   *prometheus.Desc
+	rolledBackDesc                  *prometheus.Desc
 }
 
 func newAppsCollector(lister AppLister) *appsCollector {
@@ -215,7 +227,7 @@ func newAppsCollector(lister AppLister) *appsCollector {
 		lastSyncErrorDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "app_last_sync_error"),
 			"Whether the app currently has a last sync error (1=yes, 0=no).",
-			[]string{"app_id", "app_name", "code", "stage"},
+			[]string{"app_id", "app_name", "code", "stage", "error"},
 			nil,
 		),
 		commitDriftDesc: prometheus.NewDesc(
@@ -242,6 +254,18 @@ func newAppsCollector(lister AppLister) *appsCollector {
 			[]string{"app_id", "app_name"},
 			nil,
 		),
+		suspendedDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "app_suspended"),
+			"Whether automatic reconciliation is paused for the app (1=yes, 0=no).",
+			[]string{"app"},
+			nil,
+		),
+		rolledBackDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "app_rolled_back"),
+			"1 while a failed revision was rolled back and the last healthy revision is running.",
+			[]string{"app", "failed_revision", "running_revision"},
+			nil,
+		),
 	}
 }
 
@@ -254,6 +278,8 @@ func (c *appsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.syncInProgressDesc
 	ch <- c.lastSuccessfulSyncTimestampDesc
 	ch <- c.syncSuccessAgeSecondsDesc
+	ch <- c.suspendedDesc
+	ch <- c.rolledBackDesc
 }
 
 func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -291,13 +317,31 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 		if stage == "" {
 			stage = "none"
 		}
+		errText := ""
 		if strings.TrimSpace(app.LastSyncError) != "" {
 			hasError = 1
+			errText = metricErrorText(app.LastSyncError)
 		}
-		ch <- prometheus.MustNewConstMetric(c.lastSyncErrorDesc, prometheus.GaugeValue, hasError, id, name, code, stage)
+		ch <- prometheus.MustNewConstMetric(c.lastSyncErrorDesc, prometheus.GaugeValue, hasError, id, name, code, stage, errText)
+
+		var suspended float64
+		if app.Suspended {
+			suspended = 1
+		}
+		appLabel := name
+		if appLabel == "" {
+			appLabel = id
+		}
+		ch <- prometheus.MustNewConstMetric(c.suspendedDesc, prometheus.GaugeValue, suspended, appLabel)
+
+		rejected := strings.TrimSpace(app.RejectedCommit)
+		healthy := strings.TrimSpace(app.LastHealthyCommit)
+		seen := strings.TrimSpace(app.LastSeenCommit)
+		if rejected != "" && healthy != "" && seen == rejected && strings.TrimSpace(app.LastSyncedCommit) == healthy {
+			ch <- prometheus.MustNewConstMetric(c.rolledBackDesc, prometheus.GaugeValue, 1, appLabel, rejected, healthy)
+		}
 
 		var drift float64
-		seen := strings.TrimSpace(app.LastSeenCommit)
 		synced := strings.TrimSpace(app.LastSyncedCommit)
 		if seen != "" && seen != synced {
 			drift = 1
@@ -427,6 +471,23 @@ func ObserveWatchAction(app string) {
 		app = "unknown"
 	}
 	WatchActionsTotal.WithLabelValues(app).Inc()
+}
+
+func metricErrorText(msg string) string {
+	msg = strings.Join(strings.Fields(msg), " ")
+	if len(msg) > 180 {
+		msg = msg[:180]
+	}
+	return msg
+}
+
+// SetFleetHostFileMissing sets conops_fleet_host_file_missing.
+func SetFleetHostFileMissing(missing bool) {
+	if missing {
+		FleetHostFileMissing.Set(1)
+		return
+	}
+	FleetHostFileMissing.Set(0)
 }
 
 // SetBuildInfo sets conops_build_info{version=...} 1.

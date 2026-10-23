@@ -18,6 +18,12 @@ type WatchFile struct {
 type Policy struct {
 	RequirePipelineSuccess bool        `json:"require_pipeline_success" yaml:"require_pipeline_success"`
 	WatchFiles             []WatchFile `json:"watch_files,omitempty" yaml:"watch_files"`
+	// PruneVolumes removes this app's named compose volumes when the app is deleted.
+	// Images used only by this app are always removed; volumes stay unless this is set.
+	PruneVolumes bool `json:"prune_volumes" yaml:"prune_volumes"`
+	// HealthTimeout is how long a new revision may take to become healthy before rollback.
+	// Empty means the controller default (120s).
+	HealthTimeout string `json:"health_timeout,omitempty" yaml:"health_timeout"`
 }
 
 // Normalize trims fields and defaults.
@@ -25,6 +31,7 @@ func (p *Policy) Normalize() {
 	if p == nil {
 		return
 	}
+	p.HealthTimeout = strings.TrimSpace(p.HealthTimeout)
 	out := p.WatchFiles[:0]
 	for _, w := range p.WatchFiles {
 		w.Path = strings.TrimSpace(w.Path)

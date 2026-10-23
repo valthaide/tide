@@ -190,12 +190,15 @@ func (r *Registry) ListAppSnapshots() []metrics.AppSnapshot {
 			ID:                 app.ID,
 			Name:               app.Name,
 			Status:             app.Status,
+			Suspended:          app.Suspended,
 			LastSyncAt:         app.LastSyncAt,
 			LastSyncError:      app.LastSyncError,
 			LastSyncErrorCode:  app.LastSyncErrorCode,
 			LastSyncErrorStage: app.LastSyncErrorStage,
 			LastSeenCommit:     app.LastSeenCommit,
 			LastSyncedCommit:   app.LastSyncedCommit,
+			LastHealthyCommit:  app.LastHealthyCommit,
+			RejectedCommit:     app.RejectedCommit,
 		})
 	}
 	return out
@@ -500,7 +503,7 @@ func (r *Registry) UpdateStatus(id, status string, lastSyncAt *time.Time) error 
 	return r.store.UpdateAppStatus(context.Background(), id, status, lastSyncAt)
 }
 
-// SetSuspended pauses or resumes automatic git polling and reconciliation.
+// SetSuspended stores the fleet git suspend flag. It does not clear an operator pause.
 func (r *Registry) SetSuspended(id string, suspended bool) error {
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("app id is required")
@@ -509,6 +512,33 @@ func (r *Registry) SetSuspended(id string, suspended bool) error {
 		return err
 	}
 	return r.store.SetAppSuspended(context.Background(), id, suspended)
+}
+
+// SetOperatorSuspended pauses or resumes automatic git polling and reconciliation.
+// The flag is stored separately from fleet YAML and survives controller restarts.
+func (r *Registry) SetOperatorSuspended(id string, suspended bool) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	if _, err := r.Get(id); err != nil {
+		return err
+	}
+	if err := r.store.SetOperatorSuspended(context.Background(), id, suspended); err != nil {
+		return err
+	}
+	if suspended {
+		return nil
+	}
+	// Resume: apply git on the next reconcile even when the commit did not change.
+	return r.store.UpdateAppStatus(context.Background(), id, "pending", nil)
+}
+
+// UpdateRollback stores the last healthy revision and a revision that must not be retried.
+func (r *Registry) UpdateRollback(id, lastHealthyCommit, rejectedCommit string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	return r.store.UpdateAppRollback(context.Background(), id, lastHealthyCommit, rejectedCommit)
 }
 
 // UpdateSyncResult stores sync execution metadata.

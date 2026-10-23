@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.6
+
+### Features
+- **Remove app images on delete.** Dropping an app from fleet `apps[]` runs `docker compose down` and deletes images that no other container still uses. Named volumes stay unless the app has `prune_volumes: true` (the last value stored from fleet). Other apps' containers, images, and volumes are left alone.
+- **`cps suspend <app>` / `cps resume <app>`** (and `POST /api/v1/apps/{id}/suspend|resume`). Automatic reconcile and git polling skip that app; the rest of the host keeps syncing. The pause is `operator_suspended` in the database, so a controller restart and a fleet reconcile do not clear it. `cps get apps` shows `SUSPENDED`, and `conops_app_suspended{app}` is 1. `resume` marks the app pending so the next reconcile matches git.
+- **Rollback when a revision stays unhealthy.** After apply, ConOps waits `health_timeout` (fleet field, default 120s) for compose healthchecks. If the new revision does not become healthy and an older healthy revision exists, that revision is applied again. The failed revision is not retried until git moves to a different commit. Status shows the running (healthy) revision; `conops_app_last_sync_error` carries the failed revision's error; `conops_app_rolled_back{app,failed_revision,running_revision}` is 1. Git remains the desired state.
+- **`conops_fleet_host_file_missing`** is 1 while `hosts/<CONOPS_FLEET_HOST>.yaml` is absent. The next successful reconcile sets it to 0. ConOps does not create the file.
+- **Image version.** `build-image` (kaniko) and the controller Dockerfile pass the git tag into `main.Version` and `cps`. `GET /metrics` exposes `conops_build_info{version="v1.0.6"} 1`. `cps version` prints the same tag.
+
+### Upgrade from v1.0.5
+
+1. Build and deploy the `v1.0.6` image (GitLab job `build-image` on the tag) and restart ConOps.
+2. Optional fleet fields: `prune_volumes: true` before removing an app whose named volumes should go; `health_timeout: 120s` per app.
+3. `cps suspend <name>` pauses one app. `cps resume <name>` returns it to git.
+
 ## v1.0.5
 
 ### Fixes

@@ -18,6 +18,8 @@ type Store interface {
 	DeleteApp(ctx context.Context, id string) error
 	UpdateApp(ctx context.Context, id, name, branch, composePath, pollInterval string) error
 	SetAppSuspended(ctx context.Context, id string, suspended bool) error
+	SetOperatorSuspended(ctx context.Context, id string, suspended bool) error
+	UpdateAppRollback(ctx context.Context, id, lastHealthyCommit, rejectedCommit string) error
 	UpsertAppCredential(ctx context.Context, credential *AppCredential) error
 	GetAppCredential(ctx context.Context, id string) (*AppCredential, error)
 	DeleteAppCredential(ctx context.Context, id string) error

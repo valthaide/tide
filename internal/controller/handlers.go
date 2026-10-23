@@ -39,8 +39,9 @@ type updateAppRequest struct {
 }
 
 // RuntimeCleaner performs best-effort runtime cleanup for an app.
+// pruneVolumes removes named compose volumes; images used only by this app are always removed.
 type RuntimeCleaner interface {
-	Destroy(ctx context.Context, appID, composePath string, envVars map[string]string) (string, error)
+	Destroy(ctx context.Context, appID, composePath string, envVars map[string]string, pruneVolumes bool) (string, error)
 }
 
 // RuntimeApplier applies desired app state to the runtime.
@@ -228,7 +229,7 @@ func (h *Handler) DeleteApp(w http.ResponseWriter, r *http.Request) {
 		cleanupCtx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 
-		if _, err := h.Cleaner.Destroy(cleanupCtx, app.ID, app.ComposePath, nil); err != nil {
+		if _, err := h.Cleaner.Destroy(cleanupCtx, app.ID, app.ComposePath, nil, app.Policy().PruneVolumes); err != nil {
 			if h.Logger != nil {
 				h.Logger.Error("Failed to cleanup app runtime", "id", app.ID, "error", err)
 			}
@@ -348,7 +349,7 @@ func (h *Handler) ResumeApp(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) setSuspended(w http.ResponseWriter, r *http.Request, suspended bool) {
 	id := chi.URLParam(r, "id")
-	if err := h.Registry.SetSuspended(id, suspended); err != nil {
+	if err := h.Registry.SetOperatorSuspended(id, suspended); err != nil {
 		status := http.StatusInternalServerError
 		if strings.Contains(strings.ToLower(err.Error()), "not found") {
 			status = http.StatusNotFound

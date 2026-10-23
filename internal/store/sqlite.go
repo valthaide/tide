@@ -87,6 +87,15 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "deploy_policy_json TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "operator_suspended INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "last_healthy_commit TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "rejected_commit TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
@@ -181,16 +190,19 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		last_sync_at,
 		status,
 		COALESCE(suspended, 0),
+		COALESCE(operator_suspended, 0),
 		COALESCE(last_applied_env_hash, ''),
 		COALESCE(last_applied_watch_hash, ''),
-		COALESCE(deploy_policy_json, '')
+		COALESCE(deploy_policy_json, ''),
+		COALESCE(last_healthy_commit, ''),
+		COALESCE(rejected_commit, '')
 	FROM apps
 	WHERE id = ?
 	`
 	row := s.db.QueryRowContext(ctx, query, id)
 
 	var app api.App
-	var suspended int
+	var suspended, operatorSuspended int
 	err := row.Scan(
 		&app.ID,
 		&app.Name,
@@ -208,15 +220,17 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		&app.LastSyncAt,
 		&app.Status,
 		&suspended,
+		&operatorSuspended,
 		&app.LastAppliedEnvHash,
 		&app.LastAppliedWatchHash,
 		&app.DeployPolicyJSON,
+		&app.LastHealthyCommit,
+		&app.RejectedCommit,
 	)
 	if err != nil {
 		return nil, err
 	}
-	app.Suspended = suspended != 0
-	app.ApplyPolicy()
+	applyRuntimeFlags(&app, suspended != 0, operatorSuspended != 0)
 	return &app, nil
 }
 
@@ -239,9 +253,12 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		last_sync_at,
 		status,
 		COALESCE(suspended, 0),
+		COALESCE(operator_suspended, 0),
 		COALESCE(last_applied_env_hash, ''),
 		COALESCE(last_applied_watch_hash, ''),
-		COALESCE(deploy_policy_json, '')
+		COALESCE(deploy_policy_json, ''),
+		COALESCE(last_healthy_commit, ''),
+		COALESCE(rejected_commit, '')
 	FROM apps
 	`
 	rows, err := s.db.QueryContext(ctx, query)
@@ -253,7 +270,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 	var apps []*api.App
 	for rows.Next() {
 		var app api.App
-		var suspended int
+		var suspended, operatorSuspended int
 		if err := rows.Scan(
 			&app.ID,
 			&app.Name,
@@ -271,14 +288,16 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.LastSyncAt,
 			&app.Status,
 			&suspended,
+			&operatorSuspended,
 			&app.LastAppliedEnvHash,
 			&app.LastAppliedWatchHash,
 			&app.DeployPolicyJSON,
+			&app.LastHealthyCommit,
+			&app.RejectedCommit,
 		); err != nil {
 			continue
 		}
-		app.Suspended = suspended != 0
-		app.ApplyPolicy()
+		applyRuntimeFlags(&app, suspended != 0, operatorSuspended != 0)
 		apps = append(apps, &app)
 	}
 	return apps, nil
@@ -312,11 +331,34 @@ func (s *SQLiteStore) DeleteApp(ctx context.Context, id string) error {
 }
 
 func (s *SQLiteStore) SetAppSuspended(ctx context.Context, id string, suspended bool) error {
-	value := 0
-	if suspended {
-		value = 1
+	return s.setBoolColumn(ctx, "suspended", id, suspended)
+}
+
+func (s *SQLiteStore) SetOperatorSuspended(ctx context.Context, id string, suspended bool) error {
+	return s.setBoolColumn(ctx, "operator_suspended", id, suspended)
+}
+
+func (s *SQLiteStore) setBoolColumn(ctx context.Context, column, id string, value bool) error {
+	n := 0
+	if value {
+		n = 1
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE apps SET suspended = ? WHERE id = ?`, value, id)
+	result, err := s.db.ExecContext(ctx, `UPDATE apps SET `+column+` = ? WHERE id = ?`, n, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateAppRollback(ctx context.Context, id, lastHealthyCommit, rejectedCommit string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE apps SET last_healthy_commit = ?, rejected_commit = ? WHERE id = ?`, lastHealthyCommit, rejectedCommit, id)
 	if err != nil {
 		return err
 	}
@@ -418,7 +460,6 @@ func (s *SQLiteStore) UpdateAppEnvHash(ctx context.Context, id, envHash string) 
 	}
 	return nil
 }
-
 
 func (s *SQLiteStore) UpdateAppWatchHash(ctx context.Context, id, watchHash string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE apps SET last_applied_watch_hash = ? WHERE id = ?`, watchHash, id)

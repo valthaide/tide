@@ -1,0 +1,43 @@
+stages:
+  - build
+
+default:
+  tags:
+    - platform
+
+variables:
+  DOCKERFILE: Dockerfile.controller
+
+build-image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker
+    - |
+      cat > /kaniko/.docker/config.json <<EOF
+      {"auths":{"${CI_REGISTRY}":{"username":"${CI_REGISTRY_USER}","password":"${CI_REGISTRY_PASSWORD}"}}}
+      EOF
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        VERSION="${CI_COMMIT_TAG}"
+        DEST="${CI_REGISTRY_IMAGE}:${CI_COMMIT_TAG}"
+      else
+        VERSION="${CI_COMMIT_SHORT_SHA:-dev}"
+        DEST="${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+      fi
+      echo "Building ${DEST} version ${VERSION}"
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}" \
+        --dockerfile "${CI_PROJECT_DIR}/${DOCKERFILE}" \
+        --destination "${DEST}" \
+        --build-arg "VERSION=${VERSION}" \
+        --snapshot-mode=redo \
+        --use-new-run
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+    - when: never

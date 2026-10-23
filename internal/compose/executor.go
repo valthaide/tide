@@ -42,6 +42,16 @@ type ProjectRuntimeState struct {
 	RunningCount   int
 	ExitedCount    int
 	UnhealthyCount int
+	StartingCount  int
+}
+
+// Ready reports whether every service container is running and past healthcheck start.
+// Containers without a healthcheck are ready once they are up.
+func (s ProjectRuntimeState) Ready() bool {
+	if s.ContainerCount == 0 {
+		return false
+	}
+	return s.RunningCount == s.ContainerCount && s.ExitedCount == 0 && s.UnhealthyCount == 0 && s.StartingCount == 0
 }
 
 // IsHealthy reports whether all tracked service containers are running and healthy.
@@ -335,8 +345,10 @@ func (e *ComposeExecutor) HTTPReload(ctx context.Context, reloadURL string) erro
 	return nil
 }
 
-// Destroy tears down app containers and networks without removing volumes.
-func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string, envVars map[string]string) (string, error) {
+// Destroy tears down app containers and networks.
+// Images that no remaining container references are removed.
+// Named volumes are removed only when pruneVolumes is true.
+func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string, envVars map[string]string, pruneVolumes bool) (string, error) {
 	projectName := composeProjectName(appID)
 	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
 	if err != nil {
@@ -353,14 +365,15 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 
 	var outputs []string
 	downAttempted := false
+	imageRefs := e.projectImageRefs(ctx, projectName)
 
 	if fileInfo, statErr := os.Stat(composeFullPath); statErr == nil && !fileInfo.IsDir() {
 		downAttempted = true
-		e.Logger.Info("Stopping app stack", "app_id", appID, "project", projectName, "compose_file", composeFullPath)
+		e.Logger.Info("Stopping app stack", "app_id", appID, "project", projectName, "compose_file", composeFullPath, "prune_volumes", pruneVolumes)
 		downOut, downErr := e.runCommand(
 			ctx,
 			"docker",
-			[]string{"compose", "-p", projectName, "-f", composeFileName, "down", "--remove-orphans"},
+			composeDownArgs(projectName, composeFileName, pruneVolumes),
 			composeDir,
 			envVars,
 			nil,
@@ -391,6 +404,10 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 		}
 	}
 
+	if rmOut := e.removeUnusedImages(ctx, appID, imageRefs); strings.TrimSpace(rmOut) != "" {
+		outputs = append(outputs, rmOut)
+	}
+
 	if !downAttempted && len(containerIDs) == 0 && e.Logger != nil {
 		e.Logger.Info("No running resources found for app", "app_id", appID, "project", projectName)
 	}
@@ -399,6 +416,76 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 	}
 
 	return strings.Join(outputs, "\n"), nil
+}
+
+func (e *ComposeExecutor) projectImageRefs(ctx context.Context, projectName string) []string {
+	out, err := e.runCommand(
+		ctx,
+		"docker",
+		[]string{
+			"ps", "-a",
+			"--filter", "label=com.docker.compose.project=" + projectName,
+			"--format", "{{.Image}}",
+		},
+		e.runtimeWorkDir(),
+		nil,
+		nil,
+	)
+	if err != nil {
+		if e.Logger != nil {
+			e.Logger.Warn("Failed to list project images before cleanup", "project", projectName, "error", err)
+		}
+		return nil
+	}
+	return uniqueImageRefs(out)
+}
+
+// removeUnusedImages deletes refs that no remaining container uses.
+// A docker error while checking a ref keeps that image.
+func (e *ComposeExecutor) removeUnusedImages(ctx context.Context, appID string, refs []string) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	var still []string
+	for _, ref := range refs {
+		out, err := e.runCommand(
+			ctx,
+			"docker",
+			[]string{"ps", "-a", "--filter", "ancestor=" + ref, "-q"},
+			e.runtimeWorkDir(),
+			nil,
+			nil,
+		)
+		if err != nil || strings.TrimSpace(out) != "" {
+			still = append(still, ref)
+			if err != nil && e.Logger != nil {
+				e.Logger.Warn("Skipping image remove; could not check other containers", "app_id", appID, "image", ref, "error", err)
+			}
+		}
+	}
+	var outputs []string
+	for _, ref := range imagesSafeToRemove(refs, still) {
+		if e.Logger != nil {
+			e.Logger.Info("Removing image used only by deleted app", "app_id", appID, "image", ref)
+		}
+		out, err := e.runCommand(ctx, "docker", []string{"rmi", ref}, e.runtimeWorkDir(), nil, nil)
+		if strings.TrimSpace(out) != "" {
+			outputs = append(outputs, out)
+		}
+		if err != nil && e.Logger != nil {
+			e.Logger.Warn("Failed to remove image", "app_id", appID, "image", ref, "error", err)
+		}
+	}
+	return strings.Join(outputs, "\n")
+}
+
+// ProjectHealth returns runtime health for one app's compose project.
+func (e *ComposeExecutor) ProjectHealth(ctx context.Context, appID string) (ProjectRuntimeState, error) {
+	snap, err := e.SnapshotProjects(ctx)
+	if err != nil {
+		return ProjectRuntimeState{}, err
+	}
+	return snap[ProjectNameForApp(appID)], nil
 }
 
 // SnapshotProjects captures compose runtime status from Docker for all projects.
@@ -447,8 +534,12 @@ func (e *ComposeExecutor) SnapshotProjects(ctx context.Context) (map[string]Proj
 		} else {
 			state.ExitedCount++
 		}
-		if strings.Contains(strings.ToLower(status), "(unhealthy)") {
+		lowerStatus := strings.ToLower(status)
+		if strings.Contains(lowerStatus, "(unhealthy)") {
 			state.UnhealthyCount++
+		}
+		if strings.Contains(lowerStatus, "(health: starting)") || strings.Contains(lowerStatus, "(starting)") {
+			state.StartingCount++
 		}
 		snapshot[projectName] = state
 	}

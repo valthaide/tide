@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/valthaide/conops-private/internal/api"
 )
 
 type PostgresStore struct {
@@ -88,6 +88,15 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS deploy_policy_json TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS operator_suspended BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_healthy_commit TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS rejected_commit TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
 
@@ -179,15 +188,19 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		last_sync_at,
 		status,
 		COALESCE(suspended, FALSE),
+		COALESCE(operator_suspended, FALSE),
 		COALESCE(last_applied_env_hash, ''),
 		COALESCE(last_applied_watch_hash, ''),
-		COALESCE(deploy_policy_json, '')
+		COALESCE(deploy_policy_json, ''),
+		COALESCE(last_healthy_commit, ''),
+		COALESCE(rejected_commit, '')
 	FROM apps
 	WHERE id = $1
 	`
 	row := s.pool.QueryRow(ctx, query, id)
 
 	var app api.App
+	var fleetSuspended, operatorSuspended bool
 	err := row.Scan(
 		&app.ID,
 		&app.Name,
@@ -204,15 +217,18 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		&app.LastSyncError,
 		&app.LastSyncAt,
 		&app.Status,
-		&app.Suspended,
+		&fleetSuspended,
+		&operatorSuspended,
 		&app.LastAppliedEnvHash,
 		&app.LastAppliedWatchHash,
 		&app.DeployPolicyJSON,
+		&app.LastHealthyCommit,
+		&app.RejectedCommit,
 	)
 	if err != nil {
 		return nil, err
 	}
-	app.ApplyPolicy()
+	applyRuntimeFlags(&app, fleetSuspended, operatorSuspended)
 	return &app, nil
 }
 
@@ -235,9 +251,12 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		last_sync_at,
 		status,
 		COALESCE(suspended, FALSE),
+		COALESCE(operator_suspended, FALSE),
 		COALESCE(last_applied_env_hash, ''),
 		COALESCE(last_applied_watch_hash, ''),
-		COALESCE(deploy_policy_json, '')
+		COALESCE(deploy_policy_json, ''),
+		COALESCE(last_healthy_commit, ''),
+		COALESCE(rejected_commit, '')
 	FROM apps
 	`
 	rows, err := s.pool.Query(ctx, query)
@@ -249,6 +268,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 	var apps []*api.App
 	for rows.Next() {
 		var app api.App
+		var fleetSuspended, operatorSuspended bool
 		if err := rows.Scan(
 			&app.ID,
 			&app.Name,
@@ -265,14 +285,17 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.LastSyncError,
 			&app.LastSyncAt,
 			&app.Status,
-			&app.Suspended,
+			&fleetSuspended,
+			&operatorSuspended,
 			&app.LastAppliedEnvHash,
 			&app.LastAppliedWatchHash,
 			&app.DeployPolicyJSON,
+			&app.LastHealthyCommit,
+			&app.RejectedCommit,
 		); err != nil {
 			continue
 		}
-		app.ApplyPolicy()
+		applyRuntimeFlags(&app, fleetSuspended, operatorSuspended)
 		apps = append(apps, &app)
 	}
 	return apps, nil
@@ -294,7 +317,26 @@ func (s *PostgresStore) DeleteApp(ctx context.Context, id string) error {
 }
 
 func (s *PostgresStore) SetAppSuspended(ctx context.Context, id string, suspended bool) error {
-	ct, err := s.pool.Exec(ctx, `UPDATE apps SET suspended = $1 WHERE id = $2`, suspended, id)
+	return s.setBoolColumn(ctx, "suspended", id, suspended)
+}
+
+func (s *PostgresStore) SetOperatorSuspended(ctx context.Context, id string, suspended bool) error {
+	return s.setBoolColumn(ctx, "operator_suspended", id, suspended)
+}
+
+func (s *PostgresStore) setBoolColumn(ctx context.Context, column, id string, value bool) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE apps SET `+column+` = $1 WHERE id = $2`, value, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateAppRollback(ctx context.Context, id, lastHealthyCommit, rejectedCommit string) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE apps SET last_healthy_commit = $1, rejected_commit = $2 WHERE id = $3`, lastHealthyCommit, rejectedCommit, id)
 	if err != nil {
 		return err
 	}

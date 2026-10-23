@@ -35,8 +35,9 @@ type AppManager interface {
 }
 
 // RuntimeCleaner destroys compose runtime for a deleted app (best-effort).
+// pruneVolumes removes named volumes declared by that app only.
 type RuntimeCleaner interface {
-	Destroy(ctx context.Context, appID, composePath string, envVars map[string]string) (string, error)
+	Destroy(ctx context.Context, appID, composePath string, envVars map[string]string, pruneVolumes bool) (string, error)
 }
 
 // Reconciler syncs the local registry from a fleet git repository.
@@ -77,6 +78,9 @@ func (r *Reconciler) Run(ctx context.Context) {
 func (r *Reconciler) syncOnce(ctx context.Context) {
 	doc, err := r.loadDesired(ctx)
 	if err != nil {
+		if IsHostFileMissing(err) {
+			metrics.SetFleetHostFileMissing(true)
+		}
 		se := syncerr.Classify(err)
 		metrics.ObserveFleetError(se.GetCode())
 		if r.Logger != nil {
@@ -84,6 +88,7 @@ func (r *Reconciler) syncOnce(ctx context.Context) {
 		}
 		return
 	}
+	metrics.SetFleetHostFileMissing(false)
 	if err := r.applyDesired(ctx, doc); err != nil {
 		se := syncerr.Classify(err)
 		metrics.ObserveFleetError(se.GetCode())
@@ -238,7 +243,7 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 			r.Logger.Info("Fleet removing app not in desired state", "name", app.Name, "id", app.ID)
 		}
 		if r.Cleaner != nil {
-			_, _ = r.Cleaner.Destroy(ctx, app.ID, app.ComposePath, nil)
+			_, _ = r.Cleaner.Destroy(ctx, app.ID, app.ComposePath, nil, app.Policy().PruneVolumes)
 		}
 		if err := r.Apps.Delete(app.ID); err != nil {
 			return fmt.Errorf("delete app %q: %w", app.Name, err)
@@ -287,7 +292,7 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 	if !strings.EqualFold(existing.RepoURL, spec.RepoURL) ||
 		repoauth.NormalizeMethod(existing.RepoAuthMethod) != method {
 		if r.Cleaner != nil {
-			_, _ = r.Cleaner.Destroy(context.Background(), existing.ID, existing.ComposePath, nil)
+			_, _ = r.Cleaner.Destroy(context.Background(), existing.ID, existing.ComposePath, nil, existing.Policy().PruneVolumes)
 		}
 		if err := r.Apps.Delete(existing.ID); err != nil {
 			return err
@@ -325,7 +330,9 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 	if err := r.syncFleetSecret(existing.ID, method, secret, spec); err != nil {
 		return err
 	}
-	if existing.Suspended != spec.Suspended {
+	// Fleet owns only the git suspend flag. An operator pause (cps suspend) is a
+	// separate column and must survive this reconcile.
+	if existing.FleetSuspended != spec.Suspended {
 		if err := r.Apps.SetSuspended(existing.ID, spec.Suspended); err != nil {
 			return err
 		}
@@ -365,6 +372,8 @@ func (r *Reconciler) syncFleetSecret(appID, method, secret string, spec AppSpec)
 func policyJSONFromSpec(spec AppSpec) string {
 	p := deploypolicy.Policy{
 		RequirePipelineSuccess: spec.RequirePipelineSuccess,
+		PruneVolumes:           spec.PruneVolumes,
+		HealthTimeout:          spec.HealthTimeout,
 	}
 	for _, w := range spec.WatchFiles {
 		p.WatchFiles = append(p.WatchFiles, deploypolicy.WatchFile{

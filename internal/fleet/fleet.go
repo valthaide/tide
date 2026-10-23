@@ -12,22 +12,24 @@ import (
 
 // HostDocument describes apps that should run on one host.
 type HostDocument struct {
-	Host string     `yaml:"host"`
-	Apps []AppSpec  `yaml:"apps"`
+	Host string    `yaml:"host"`
+	Apps []AppSpec `yaml:"apps"`
 }
 
 // AppSpec is a desired application registration from fleet git.
 type AppSpec struct {
-	Name                   string              `yaml:"name"`
-	RepoURL                string              `yaml:"repo_url"`
-	Branch                 string              `yaml:"branch"`
-	ComposePath            string              `yaml:"compose_path"`
-	RepoAuthMethod         string              `yaml:"repo_auth_method"`
-	PollInterval           string              `yaml:"poll_interval"`
-	DeployKeyFile          string              `yaml:"deploy_key_file"`
-	Suspended              bool                `yaml:"suspended"`
-	RequirePipelineSuccess bool                `yaml:"require_pipeline_success"`
-	WatchFiles             []WatchFileSpec     `yaml:"watch_files"`
+	Name                   string          `yaml:"name"`
+	RepoURL                string          `yaml:"repo_url"`
+	Branch                 string          `yaml:"branch"`
+	ComposePath            string          `yaml:"compose_path"`
+	RepoAuthMethod         string          `yaml:"repo_auth_method"`
+	PollInterval           string          `yaml:"poll_interval"`
+	DeployKeyFile          string          `yaml:"deploy_key_file"`
+	Suspended              bool            `yaml:"suspended"`
+	PruneVolumes           bool            `yaml:"prune_volumes"`
+	HealthTimeout          string          `yaml:"health_timeout"`
+	RequirePipelineSuccess bool            `yaml:"require_pipeline_success"`
+	WatchFiles             []WatchFileSpec `yaml:"watch_files"`
 }
 
 // WatchFileSpec is a path watched for content changes after sync.
@@ -168,4 +170,14 @@ func FindHostFile(root, hostname string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("fleet host file for %q not found", hostname)
+}
+
+// IsHostFileMissing reports the error returned when hosts/<fqdn>.yaml is absent.
+// Other fleet failures (clone, parse) are not this condition.
+func IsHostFileMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "fleet host file for ") && strings.Contains(msg, " not found")
 }
