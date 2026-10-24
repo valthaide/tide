@@ -84,12 +84,67 @@ apps:
 	if !doc.Apps[0].PruneVolumes || doc.Apps[0].HealthTimeout != "45s" {
 		t.Fatalf("%+v", doc.Apps[0])
 	}
-	app := &api.App{DeployPolicyJSON: policyJSONFromSpec(doc.Apps[0])}
+	app := &api.App{DeployPolicyJSON: policyJSONFromSpec(doc.Apps[0], "")}
 	if d := app.HealthTimeoutDuration(); d.String() != "45s" {
 		t.Fatalf("timeout %s", d)
 	}
 	if (&api.App{}).HealthTimeoutDuration() != api.DefaultHealthTimeout {
 		t.Fatal("default health timeout")
+	}
+}
+
+func TestParseVarsAndBuild(t *testing.T) {
+	doc, err := ParseHostDocument([]byte(`
+host: club.example
+build: forbidden
+apps:
+  - name: php
+    repo_url: https://git.example/org/php.git
+    vars:
+      APP_TAG: "1.2.3"
+    build: allowed
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Build != "forbidden" || doc.Apps[0].Build != "allowed" || doc.Apps[0].Vars["APP_TAG"] != "1.2.3" {
+		t.Fatalf("%+v", doc)
+	}
+	raw := policyJSONFromSpec(doc.Apps[0], doc.Build)
+	policy := deploypolicy.Decode(raw)
+	if policy.Build != "allowed" || policy.Vars["APP_TAG"] != "1.2.3" {
+		t.Fatalf("policy %+v", policy)
+	}
+	inherited := policyJSONFromSpec(AppSpec{Name: "php"}, "forbidden")
+	if deploypolicy.Decode(inherited).EffectiveBuild() != "forbidden" {
+		t.Fatalf("inherited: %s", inherited)
+	}
+}
+
+func TestVarsChangeMarksPending(t *testing.T) {
+	app := &api.App{
+		ID: "web", Name: "web", RepoURL: "https://git.example/web.git",
+		Branch: "main", ComposePath: "docker-compose.yml", RepoAuthMethod: "public", Status: "synced",
+		DeployPolicyJSON: deploypolicy.Encode(deploypolicy.Policy{Vars: map[string]string{"APP_TAG": "1"}}),
+	}
+	apps := &fakeApps{list: []*api.App{app}}
+	r := &Reconciler{Apps: apps, Cleaner: &fakeCleaner{}}
+	spec := AppSpec{
+		Name: "web", RepoURL: app.RepoURL, Branch: "main", ComposePath: "docker-compose.yml",
+		Vars: map[string]string{"APP_TAG": "2"},
+	}
+	if err := r.applyDesired(context.Background(), &HostDocument{Apps: []AppSpec{spec}}); err != nil {
+		t.Fatal(err)
+	}
+	if app.Status != "pending" {
+		t.Fatalf("status %s, want pending", app.Status)
+	}
+	app.Status = "synced"
+	if err := r.applyDesired(context.Background(), &HostDocument{Apps: []AppSpec{spec}}); err != nil {
+		t.Fatal(err)
+	}
+	if app.Status != "synced" {
+		t.Fatalf("unchanged vars set status %s", app.Status)
 	}
 }
 
@@ -153,6 +208,12 @@ func (f *fakeApps) GetRepoSecret(string) ([]byte, error)  { return nil, nil }
 func (f *fakeApps) SetRevision(id, revision string) error {
 	if app := f.byID(id); app != nil {
 		app.Revision = revision
+	}
+	return nil
+}
+func (f *fakeApps) MarkPending(id string) error {
+	if app := f.byID(id); app != nil {
+		app.Status = "pending"
 	}
 	return nil
 }

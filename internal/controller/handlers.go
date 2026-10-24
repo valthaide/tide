@@ -13,6 +13,7 @@ import (
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/cigate"
 	"github.com/valthaide/conops-private/internal/compose"
+	"github.com/valthaide/conops-private/internal/deploypolicy"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/syncerr"
@@ -196,9 +197,43 @@ func (h *Handler) RegisterApp(w http.ResponseWriter, r *http.Request) {
 // ListApps handles GET /api/v1/apps
 func (h *Handler) ListApps(w http.ResponseWriter, r *http.Request) {
 	apps := h.Registry.List()
+	h.attachRunningImages(r.Context(), apps)
 	json.NewEncoder(w).Encode(api.APIResponse{
 		Data: apps,
 	})
+}
+
+func (h *Handler) attachRunningImages(ctx context.Context, apps []*api.App) {
+	if h == nil || h.Inspector == nil {
+		return
+	}
+	type imageReporter interface {
+		RunningImages(ctx context.Context) ([]compose.RunningImage, error)
+	}
+	reporter, ok := h.Inspector.(imageReporter)
+	if !ok {
+		return
+	}
+	ictx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	images, err := reporter.RunningImages(ictx)
+	if err != nil {
+		return
+	}
+	byProject := map[string][]api.ImageRef{}
+	for _, img := range images {
+		byProject[img.Project] = append(byProject[img.Project], api.ImageRef{
+			Service: img.Service,
+			Image:   img.Image,
+			Digest:  img.Digest,
+		})
+	}
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		app.Images = byProject[compose.ProjectNameForApp(app.ID)]
+	}
 }
 
 // GetApp handles GET /api/v1/apps/{id}
@@ -562,27 +597,28 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 	}
 
 	progress := newSyncProgressReporter(h.Registry, h.Logger, app.ID, syncProgressFlushInterval)
-	output, err := h.Applier.Apply(
-		syncCtx,
-		app.ID,
-		"",
-		envVars,
-		app.RepoURL,
-		app.Branch,
-		app.ComposePath,
-		"",
-		app.RepoAuthMethod,
-		repoSecret,
-		progress.Update,
-	)
+	opts := compose.ApplyOptions{
+		Vars:      app.Policy().Vars,
+		BuildMode: app.Policy().EffectiveBuild(),
+	}
+	var output string
+	if ia, ok := h.Applier.(imageApplier); ok {
+		output, err = ia.ApplyImages(syncCtx, app.ID, "", envVars, app.RepoURL, app.Branch, app.ComposePath, app.LastSeenCommit, app.RepoAuthMethod, repoSecret, opts, progress.Update)
+	} else {
+		output, err = h.Applier.Apply(syncCtx, app.ID, "", envVars, app.RepoURL, app.Branch, app.ComposePath, app.LastSeenCommit, app.RepoAuthMethod, repoSecret, progress.Update)
+	}
 	progress.Flush()
 	if err != nil {
 		se := syncerr.Classify(err)
 		se.Message = redact.String(se.Message)
+		status := "error"
+		if declaredFailure(se) {
+			status = "failed"
+		}
 		now := time.Now()
 		_ = h.Registry.UpdateSyncResultErr(
 			app.ID,
-			"error",
+			status,
 			now,
 			app.LastSyncedCommit,
 			app.LastSyncedCommitMessage,
@@ -607,6 +643,7 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 	); err != nil && h.Logger != nil {
 		h.Logger.Warn("Failed to update sync status after force sync", "id", app.ID, "error", err)
 	}
+	_ = h.Registry.UpdateRollback(app.ID, app.LastSeenCommit, "", deploypolicy.EncodeVars(opts.Vars), "")
 	if hasher, ok := h.Applier.(EnvFileHasher); ok {
 		if hash, hashErr := hasher.ExternalEnvHashForApp(app.ID, app.ComposePath); hashErr == nil && hash != "" {
 			_ = h.Registry.UpdateEnvHash(app.ID, hash)

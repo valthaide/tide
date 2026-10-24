@@ -8,31 +8,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/valthaide/conops-private/internal/deploypolicy"
 	"github.com/valthaide/conops-private/internal/pollinterval"
 	"go.yaml.in/yaml/v3"
 )
 
 // HostDocument describes apps that should run on one host.
 type HostDocument struct {
-	Host string    `yaml:"host"`
-	Apps []AppSpec `yaml:"apps"`
+	Host  string    `yaml:"host"`
+	Build string    `yaml:"build"`
+	Apps  []AppSpec `yaml:"apps"`
 }
 
 // AppSpec is a desired application registration from fleet git.
 type AppSpec struct {
-	Name                   string          `yaml:"name"`
-	RepoURL                string          `yaml:"repo_url"`
-	Branch                 string          `yaml:"branch"`
-	Revision               string          `yaml:"revision"`
-	ComposePath            string          `yaml:"compose_path"`
-	RepoAuthMethod         string          `yaml:"repo_auth_method"`
-	PollInterval           string          `yaml:"poll_interval"`
-	DeployKeyFile          string          `yaml:"deploy_key_file"`
-	Suspended              bool            `yaml:"suspended"`
-	PruneVolumes           bool            `yaml:"prune_volumes"`
-	HealthTimeout          string          `yaml:"health_timeout"`
-	RequirePipelineSuccess bool            `yaml:"require_pipeline_success"`
-	WatchFiles             []WatchFileSpec `yaml:"watch_files"`
+	Name                   string            `yaml:"name"`
+	RepoURL                string            `yaml:"repo_url"`
+	Branch                 string            `yaml:"branch"`
+	Revision               string            `yaml:"revision"`
+	ComposePath            string            `yaml:"compose_path"`
+	RepoAuthMethod         string            `yaml:"repo_auth_method"`
+	PollInterval           string            `yaml:"poll_interval"`
+	DeployKeyFile          string            `yaml:"deploy_key_file"`
+	Suspended              bool              `yaml:"suspended"`
+	PruneVolumes           bool              `yaml:"prune_volumes"`
+	HealthTimeout          string            `yaml:"health_timeout"`
+	RequirePipelineSuccess bool              `yaml:"require_pipeline_success"`
+	WatchFiles             []WatchFileSpec   `yaml:"watch_files"`
+	Build                  string            `yaml:"build"`
+	Vars                   map[string]string `yaml:"vars"`
 }
 
 // WatchFileSpec is a path watched for content changes after sync.
@@ -121,6 +125,7 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 		return nil, err
 	}
 	doc.Host = strings.TrimSpace(doc.Host)
+	doc.Build = deploypolicy.NormalizeBuild(doc.Build)
 	for i := range doc.Apps {
 		doc.Apps[i].Name = strings.TrimSpace(doc.Apps[i].Name)
 		doc.Apps[i].RepoURL = strings.TrimSpace(doc.Apps[i].RepoURL)
@@ -137,6 +142,8 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 		if doc.Apps[i].RepoAuthMethod == "" {
 			doc.Apps[i].RepoAuthMethod = "public"
 		}
+		doc.Apps[i].Build = deploypolicy.NormalizeBuild(doc.Apps[i].Build)
+		doc.Apps[i].Vars = deploypolicy.NormalizeVars(doc.Apps[i].Vars)
 	}
 	return &doc, nil
 }

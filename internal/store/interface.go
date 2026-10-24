@@ -20,7 +20,7 @@ type Store interface {
 	SetAppSuspended(ctx context.Context, id string, suspended bool) error
 	SetAppRevision(ctx context.Context, id, revision string) error
 	SetOperatorSuspended(ctx context.Context, id string, suspended bool) error
-	UpdateAppRollback(ctx context.Context, id, lastHealthyCommit, rejectedCommit string) error
+	UpdateAppRollback(ctx context.Context, id, lastHealthyCommit, rejectedCommit, lastHealthyVars, rejectedVars string) error
 	UpsertAppCredential(ctx context.Context, credential *AppCredential) error
 	GetAppCredential(ctx context.Context, id string) (*AppCredential, error)
 	DeleteAppCredential(ctx context.Context, id string) error

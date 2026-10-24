@@ -566,12 +566,20 @@ func (r *Registry) SetRevision(id, revision string) error {
 	return r.store.SetAppRevision(context.Background(), id, strings.TrimSpace(revision))
 }
 
-// UpdateRollback stores the last healthy revision and a revision that must not be retried.
-func (r *Registry) UpdateRollback(id, lastHealthyCommit, rejectedCommit string) error {
+// MarkPending queues the app for the next reconcile even when the git commit is unchanged.
+func (r *Registry) MarkPending(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("app id is required")
 	}
-	return r.store.UpdateAppRollback(context.Background(), id, lastHealthyCommit, rejectedCommit)
+	return r.UpdateStatus(id, "pending", nil)
+}
+
+// UpdateRollback stores the last healthy revision and a revision that must not be retried.
+func (r *Registry) UpdateRollback(id, lastHealthyCommit, rejectedCommit, lastHealthyVars, rejectedVars string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	return r.store.UpdateAppRollback(context.Background(), id, lastHealthyCommit, rejectedCommit, lastHealthyVars, rejectedVars)
 }
 
 // UpdateSyncResult stores sync execution metadata.

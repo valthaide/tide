@@ -107,6 +107,28 @@ conops_app_suspended{app="web"} 1
 	}
 }
 
+func TestAppImageInfo(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(appImageInfo); err != nil {
+		t.Fatal(err)
+	}
+	SetAppImages([]ImageSample{{
+		App: "php", Service: "web", Image: "registry.example/php:1", Digest: "sha256:abc",
+	}})
+	expected := `
+# HELP conops_app_image_info Running compose image and digest (value always 1).
+# TYPE conops_app_image_info gauge
+conops_app_image_info{app="php",digest="sha256:abc",image="registry.example/php:1",service="web"} 1
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "conops_app_image_info"); err != nil {
+		t.Fatal(err)
+	}
+	SetAppImages(nil)
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(""), "conops_app_image_info"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGitFetchErrorsStartAtZero(t *testing.T) {
 	EnsureGitFetchErrors("https://git.example/org/monitoring.git")
 	for _, reason := range []string{"auth", "network", "not_found", "other"} {

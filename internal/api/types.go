@@ -47,6 +47,20 @@ type App struct {
 	// RejectedCommit is a revision that failed its health timeout and must not be applied again
 	// until git moves to a different commit.
 	RejectedCommit string `json:"rejected_commit,omitempty"`
+	// LastHealthyVars is the fleet vars JSON of the last revision that became healthy.
+	LastHealthyVars string `json:"last_healthy_vars,omitempty"`
+	// RejectedVars is the fleet vars JSON that failed and must not be applied again
+	// until the desired vars change.
+	RejectedVars string `json:"rejected_vars,omitempty"`
+	// Images are the containers actually running for this app. Filled on read, not stored.
+	Images []ImageRef `json:"images,omitempty"`
+}
+
+// ImageRef is one running compose service image.
+type ImageRef struct {
+	Service string `json:"service"`
+	Image   string `json:"image"`
+	Digest  string `json:"digest"`
 }
 
 // DefaultHealthTimeout is how long a new revision may stay unhealthy before rollback.

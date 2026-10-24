@@ -3,6 +3,7 @@ package metrics
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -176,7 +177,43 @@ var (
 		Name:      "app_sync_error_info",
 		Help:      "Last sync error code/stage as a gauge (1=active for that code/stage).",
 	}, []string{"app", "code", "stage"})
+
+	appImageInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_image_info",
+		Help:      "Running compose image and digest (value always 1).",
+	}, []string{"app", "service", "image", "digest"})
 )
+
+// ImageSample is one running service image reported by the reconciler.
+type ImageSample struct {
+	App     string
+	Service string
+	Image   string
+	Digest  string
+}
+
+var imageMu sync.Mutex
+
+// SetAppImages replaces conops_app_image_info with the images that are running now.
+func SetAppImages(samples []ImageSample) {
+	imageMu.Lock()
+	defer imageMu.Unlock()
+	appImageInfo.Reset()
+	for _, sample := range samples {
+		app := strings.TrimSpace(sample.App)
+		service := strings.TrimSpace(sample.Service)
+		image := strings.TrimSpace(sample.Image)
+		digest := strings.TrimSpace(sample.Digest)
+		if app == "" || service == "" || image == "" {
+			continue
+		}
+		if digest == "" {
+			digest = "unknown"
+		}
+		appImageInfo.WithLabelValues(app, service, image, digest).Set(1)
+	}
+}
 
 // Register registers process counters/histograms and an apps collector.
 func Register(registry prometheus.Registerer, lister AppLister) error {
@@ -204,6 +241,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		envDrift,
 		envHashApplied,
 		syncErrorInfo,
+		appImageInfo,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {

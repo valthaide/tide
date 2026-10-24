@@ -43,7 +43,9 @@ Metrics: `http://127.0.0.1:8081/metrics` · Health: `/healthz`
 | Env | Назначение |
 |-----|------------|
 | `CONOPS_API_TOKEN` / `bootstrap_token` | Bearer API |
-| `CONOPS_MAX_CONCURRENT_SYNCS` | Лимит параллельных sync (default 2) |
+| `CONOPS_SYNC_PARALLEL` | Лимит параллельных sync (default 2). `CONOPS_MAX_CONCURRENT_SYNCS` — старое имя, если новое не задано |
+| `CONOPS_BUILD` | `allowed` (default) или `forbidden`. Вместе с `build:` в fleet |
+| `REGISTRY_HOST` / `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | Вход в registry на время `compose pull` (задаёт puppet) |
 | `CONOPS_WEBHOOK_SECRET` | Включает `POST /api/v1/hooks/git` |
 | `CONOPS_SOPS` | ignored (warning); remove from env |
 | `CONOPS_VAULT_ADDR` + `CONOPS_VAULT_TOKEN` | Resolve `vault://path#key` в env |
@@ -73,6 +75,20 @@ apps:
 ```
 
 Удаление приложения из `apps[]` останавливает контейнеры и удаляет образы, которые использовало только оно. Именованные тома (`<project>_hello_data`) остаются, пока у приложения не задано `prune_volumes: true`. В лог пишется одна строка `Named volumes kept` со списком оставленных томов.
+
+Готовые образы (тег в fleet, compose в репозитории приложения):
+
+```yaml
+build: forbidden
+apps:
+  - name: php
+    repo_url: https://git.example/org/php.git
+    build: forbidden
+    vars:
+      APP_TAG: "1.4.2"
+```
+
+В compose приложения: `image: registry.example/php:${APP_TAG}`. Смена тега — одна строка `APP_TAG` в fleet. `cps get apps` показывает образ и дайджест, которые реально запущены.
 
 ## Лицензия
 

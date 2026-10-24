@@ -102,6 +102,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS revision TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_healthy_vars TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS rejected_vars TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
@@ -197,7 +203,9 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
 		COALESCE(rejected_commit, ''),
-		COALESCE(revision, '')
+		COALESCE(revision, ''),
+		COALESCE(last_healthy_vars, ''),
+		COALESCE(rejected_vars, '')
 	FROM apps
 	WHERE id = $1
 	`
@@ -229,6 +237,8 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		&app.LastHealthyCommit,
 		&app.RejectedCommit,
 		&app.Revision,
+		&app.LastHealthyVars,
+		&app.RejectedVars,
 	)
 	if err != nil {
 		return nil, err
@@ -262,7 +272,9 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
 		COALESCE(rejected_commit, ''),
-		COALESCE(revision, '')
+		COALESCE(revision, ''),
+		COALESCE(last_healthy_vars, ''),
+		COALESCE(rejected_vars, '')
 	FROM apps
 	`
 	rows, err := s.pool.Query(ctx, query)
@@ -299,6 +311,8 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.LastHealthyCommit,
 			&app.RejectedCommit,
 			&app.Revision,
+			&app.LastHealthyVars,
+			&app.RejectedVars,
 		); err != nil {
 			continue
 		}
@@ -353,8 +367,8 @@ func (s *PostgresStore) SetAppRevision(ctx context.Context, id, revision string)
 	return nil
 }
 
-func (s *PostgresStore) UpdateAppRollback(ctx context.Context, id, lastHealthyCommit, rejectedCommit string) error {
-	ct, err := s.pool.Exec(ctx, `UPDATE apps SET last_healthy_commit = $1, rejected_commit = $2 WHERE id = $3`, lastHealthyCommit, rejectedCommit, id)
+func (s *PostgresStore) UpdateAppRollback(ctx context.Context, id, lastHealthyCommit, rejectedCommit, lastHealthyVars, rejectedVars string) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE apps SET last_healthy_commit = $1, rejected_commit = $2, last_healthy_vars = $3, rejected_vars = $4 WHERE id = $5`, lastHealthyCommit, rejectedCommit, lastHealthyVars, rejectedVars, id)
 	if err != nil {
 		return err
 	}

@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.12
+
+### Features
+- **Fleet `vars`.** `hosts/<fqdn>.yaml` may set `vars` on an app. ConOps passes them to `docker compose` so `${APP_TAG}` is substituted. A variable with no default that is unset fails validation (`unset_var: <name>`), status `failed`, and running containers stay up. Changing `vars` is a new revision and syncs even when the app commit did not move.
+- **Ready images only.** `build: forbidden` on the app, on the host file, or via `CONOPS_BUILD` (default `allowed`). If `compose config` still has `build` for a service, sync does not start: status `failed`, reason `build_forbidden: <service>`, one ERROR, and the error metric. Running containers are not stopped.
+- **Registry login for pull.** `REGISTRY_HOST`, `REGISTRY_USERNAME`, and `REGISTRY_PASSWORD` (puppet). The password goes to `docker login --password-stdin` and is not written in the clear or logged. Login failure is `failed` / `registry_auth` and does not touch running containers.
+- **Pull, then up, no build.** For `build: forbidden`, `compose pull` runs first and `up -d` runs only after it succeeds, without `--build`. A missing image is `failed` / `pull_failed: <image>`; the previous containers keep running.
+- **Rollback by tag.** A failed health check restores the images and `vars` of the last healthy revision from ConOps state, without a build. The status says which version was restored and why.
+- **Independent app sync.** One slow or failed sync does not hold the others in `pending`. Parallelism is `CONOPS_SYNC_PARALLEL` (default 2; `CONOPS_MAX_CONCURRENT_SYNCS` still works when the new variable is unset).
+- **SQLite lock after restart.** `database is locked` is retried for up to 5 seconds. A retry that then succeeds is logged at DEBUG.
+- **Running images.** `cps get apps` shows the image and digest that are actually running. `conops_app_image_info{app,service,image,digest}` is 1 for the same set.
+
 ## v1.0.11
 
 ### Fixes

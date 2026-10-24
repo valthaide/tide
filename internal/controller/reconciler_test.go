@@ -19,6 +19,7 @@ import (
 	"github.com/valthaide/conops-private/internal/deploypolicy"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/store"
+	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
 type fakeRuntime struct {
@@ -297,6 +298,162 @@ func (s *scriptedRuntime) ProjectHealth(context.Context, string) (compose.Projec
 	return compose.ProjectRuntimeState{ContainerCount: 1, RunningCount: 1}, nil
 }
 
+func TestBuildForbiddenFailsWithoutSecondApply(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "web", RepoURL: "https://example.com/a.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "aaaaaaaa", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rt := &errRuntime{err: syncerr.New(syncerr.CodeBuildForbidden, syncerr.StageValidate, "build_forbidden: web")}
+	r := NewReconciler(reg, rt, logger, ReconcilerConfig{Interval: time.Hour, SyncTimeout: time.Minute, MaxConcurrent: 2})
+	r.reconcileOnce()
+	if len(rt.applyCalls) != 1 {
+		t.Fatalf("apply calls %d", len(rt.applyCalls))
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "failed" || !strings.Contains(got.LastSyncError, "build_forbidden: web") {
+		t.Fatalf("status=%s err=%s", got.Status, got.LastSyncError)
+	}
+	if strings.Count(buf.String(), "level=ERROR") != 1 {
+		t.Fatalf("error logs:\n%s", buf.String())
+	}
+}
+
+func TestRollbackRestoresVars(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "web", RepoURL: "https://example.com/a.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "aaaaaaaa", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	if err := reg.UpdateSyncResult(app.ID, "synced", time.Now(), "aaaaaaaa", "good", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateRollback(app.ID, "aaaaaaaa", "", deploypolicy.EncodeVars(map[string]string{"APP_TAG": "1"}), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{
+		HealthTimeout: "40ms",
+		Vars:          map[string]string{"APP_TAG": "2"},
+		Build:         deploypolicy.BuildForbidden,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateStatus(app.ID, "pending", nil); err != nil {
+		t.Fatal(err)
+	}
+	rt := &optRuntime{}
+	testReconciler(t, reg, rt, ReconcilerConfig{}).reconcileOnce()
+	if len(rt.opts) != 2 {
+		t.Fatalf("applies %d", len(rt.opts))
+	}
+	if rt.opts[1].Vars["APP_TAG"] != "1" || !rt.opts[1].NoBuild {
+		t.Fatalf("rollback opts: %+v", rt.opts[1])
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "synced" || !strings.Contains(got.LastSyncError, "rolled back to") || !strings.Contains(got.LastSyncError, "APP_TAG=1") {
+		t.Fatalf("status=%s err=%s", got.Status, got.LastSyncError)
+	}
+}
+
+func TestSyncParallelDoesNotHoldOtherApp(t *testing.T) {
+	reg := testRegistry(t)
+	for _, name := range []string{"one", "two"} {
+		app := &api.App{
+			Name: name, RepoURL: "https://example.com/" + name + ".git", Branch: "main",
+			ComposePath: "compose.yaml", PollInterval: "30s",
+			LastSeenCommit: "aaaaaaaa", Status: "pending",
+		}
+		addPublicApp(t, reg, app)
+	}
+	release := make(chan struct{})
+	rt := &gateRuntime{entered: make(chan string, 2), release: release}
+	r := testReconciler(t, reg, rt, ReconcilerConfig{MaxConcurrent: 1})
+	r.dispatch()
+	select {
+	case <-rt.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first sync did not start")
+	}
+	select {
+	case id := <-rt.entered:
+		t.Fatalf("second app started while the slot was taken: %s", id)
+	case <-time.After(150 * time.Millisecond):
+	}
+	pending := 0
+	for _, app := range reg.List() {
+		if app.Status == "pending" {
+			pending++
+		}
+	}
+	if pending != 1 {
+		t.Fatalf("pending apps: %d", pending)
+	}
+	close(release)
+	r.wg.Wait()
+	r.dispatch()
+	r.wg.Wait()
+	for _, app := range reg.List() {
+		if app.Status != "synced" {
+			t.Fatalf("%s status %s", app.Name, app.Status)
+		}
+	}
+}
+
+type errRuntime struct {
+	fakeRuntime
+	err error
+}
+
+func (e *errRuntime) Apply(ctx context.Context, appID, content string, env map[string]string, repoURL, branch, composePath, commit, method string, secret []byte, progress func(string)) (string, error) {
+	_, _ = e.fakeRuntime.Apply(ctx, appID, content, env, repoURL, branch, composePath, commit, method, secret, progress)
+	return "failed", e.err
+}
+
+type optRuntime struct {
+	fakeRuntime
+	opts []compose.ApplyOptions
+}
+
+func (o *optRuntime) ApplyImages(ctx context.Context, appID, content string, env map[string]string, repoURL, branch, composePath, commit, method string, secret []byte, opts compose.ApplyOptions, progress func(string)) (string, error) {
+	o.opts = append(o.opts, opts)
+	return o.fakeRuntime.Apply(ctx, appID, content, env, repoURL, branch, composePath, commit, method, secret, progress)
+}
+
+func (o *optRuntime) ProjectHealth(context.Context, string) (compose.ProjectRuntimeState, error) {
+	tag := ""
+	if n := len(o.opts); n > 0 {
+		tag = o.opts[n-1].Vars["APP_TAG"]
+	}
+	if tag == "2" {
+		return compose.ProjectRuntimeState{ContainerCount: 1, RunningCount: 1, UnhealthyCount: 1, NotReady: []string{"web"}}, nil
+	}
+	return compose.ProjectRuntimeState{ContainerCount: 1, RunningCount: 1}, nil
+}
+
+type gateRuntime struct {
+	fakeRuntime
+	entered chan string
+	release chan struct{}
+}
+
+func (g *gateRuntime) Apply(ctx context.Context, appID, content string, env map[string]string, repoURL, branch, composePath, commit, method string, secret []byte, progress func(string)) (string, error) {
+	g.entered <- appID
+	<-g.release
+	return g.fakeRuntime.Apply(ctx, appID, content, env, repoURL, branch, composePath, commit, method, secret, progress)
+}
+
 func TestRevisionToApplySkipsRejected(t *testing.T) {
 	if got := revisionToApply(&App{LastSeenCommit: "b", RejectedCommit: "b", LastHealthyCommit: "a"}); got != "a" {
 		t.Fatalf("got %q", got)
@@ -317,7 +474,7 @@ func TestRollbackUnhealthyRevision(t *testing.T) {
 	if err := reg.UpdateSyncResult(app.ID, "synced", time.Now(), "aaaaaaaa", "good", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.UpdateRollback(app.ID, "aaaaaaaa", ""); err != nil {
+	if err := reg.UpdateRollback(app.ID, "aaaaaaaa", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{HealthTimeout: "40ms"})); err != nil {

@@ -83,6 +83,20 @@ func (e *ComposeExecutor) Apply(
 	repoSecret []byte,
 	onProgress func(string),
 ) (string, error) {
+	return e.ApplyImages(ctx, appID, content, envVars, repoURL, branch, composePath, commitHash, repoAuthMethod, repoSecret, ApplyOptions{}, onProgress)
+}
+
+// ApplyImages executes the compose file with fleet vars and the build policy.
+func (e *ComposeExecutor) ApplyImages(
+	ctx context.Context,
+	appID, content string,
+	envVars map[string]string,
+	repoURL, branch, composePath, commitHash string,
+	repoAuthMethod string,
+	repoSecret []byte,
+	opts ApplyOptions,
+	onProgress func(string),
+) (string, error) {
 	var syncLog strings.Builder
 	emitProgress := func() {
 		if onProgress != nil {
@@ -243,7 +257,15 @@ func (e *ComposeExecutor) Apply(
 		"written", wroteCompose,
 	)
 
-	// Pull images
+	prep, prepErr := e.prepareImageSync(ctx, &syncLog, projectName, composeFileName, composeDir, composeFullPath, overrideArgs, opts, func(string) {})
+	emitProgress()
+	if prepErr != nil {
+		prep.clean()
+		return redact.String(strings.TrimSpace(syncLog.String())), prepErr
+	}
+	defer prep.clean()
+
+	// Pull images. Login, when configured, lives only in prep.env for this pull.
 	appendLogSection(&syncLog, "Docker image pull")
 	e.Logger.Info("Pulling images", "app_id", appID)
 
@@ -254,29 +276,43 @@ func (e *ComposeExecutor) Apply(
 	}
 	pullArgs = append(pullArgs, "pull")
 
-	_, err = e.runCommandWithTranscript(
+	pullOut, err := e.runCommandWithTranscript(
 		ctx,
 		&syncLog,
 		"docker",
 		pullArgs,
 		composeDir,
-		nil, // Do not inject process env vars for pull
+		prep.env,
 		onProgress,
 	)
 	if err != nil {
-		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("pull failed: %w", err)
+		prep.clean()
+		return redact.String(strings.TrimSpace(syncLog.String())), pullFailedError(pullOut+"\n"+err.Error(), prep.images)
+	}
+	// Drop the docker config before up. Images are already local.
+	prep.clean()
+	prep.cleanup = func() {}
+	if prep.env != nil {
+		delete(prep.env, "DOCKER_CONFIG")
 	}
 
 	// Up detached
 	appendLogSection(&syncLog, "Compose apply")
-	appendLogLine(&syncLog, "build output appears below when services require a build")
+	if prep.noBuild {
+		appendLogLine(&syncLog, "starting pulled images without build")
+	} else {
+		appendLogLine(&syncLog, "build output appears below when services require a build")
+	}
 	e.Logger.Info("Applying configuration", "app_id", appID)
 
 	upArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
 	if len(overrideArgs) > 0 {
 		upArgs = append(upArgs, overrideArgs...)
 	}
-	upArgs = append(upArgs, "up", "-d", "--remove-orphans", "--build")
+	upArgs = append(upArgs, "up", "-d", "--remove-orphans")
+	if !prep.noBuild {
+		upArgs = append(upArgs, "--build")
+	}
 
 	_, err = e.runCommandWithTranscript(
 		ctx,
@@ -284,7 +320,7 @@ func (e *ComposeExecutor) Apply(
 		"docker",
 		upArgs,
 		composeDir,
-		nil,
+		prep.env,
 		onProgress,
 	)
 	if err != nil {

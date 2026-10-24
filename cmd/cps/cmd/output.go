@@ -104,7 +104,7 @@ func suspendedValue(app api.App) string {
 
 func printAppsTable(apps []api.App) {
 	color := colorEnabled()
-	headers := []string{"NAME", "READY", "STATUS", "SUSPENDED", "DRIFT", "REVISION", "LAST SYNC", "MESSAGE"}
+	headers := []string{"NAME", "READY", "STATUS", "SUSPENDED", "DRIFT", "REVISION", "LAST SYNC", "MESSAGE", "IMAGES"}
 	rows := make([][]string, 0, len(apps))
 	for _, app := range apps {
 		rev := shortCommit(app.LastSyncedCommit)
@@ -123,6 +123,7 @@ func printAppsTable(apps []api.App) {
 			rev,
 			relativeTime(app.LastSyncAt),
 			messageFor(app),
+			imagesValue(app),
 		})
 	}
 	printAlignedTable(headers, rows,
@@ -164,6 +165,29 @@ func printAppDetail(app api.App) {
 	if out := strings.TrimSpace(app.LastSyncOutput); out != "" {
 		fmt.Printf("\n--- Last Sync Output ---\n%s\n", out)
 	}
+}
+
+func imagesValue(app api.App) string {
+	if len(app.Images) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(app.Images))
+	for _, img := range app.Images {
+		ref := strings.TrimSpace(img.Image)
+		if digest := strings.TrimSpace(img.Digest); digest != "" {
+			ref += "@" + digest
+		}
+		if service := strings.TrimSpace(img.Service); service != "" {
+			ref = service + "=" + ref
+		}
+		if ref != "" {
+			parts = append(parts, ref)
+		}
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ",")
 }
 
 func orDash(s string) string {

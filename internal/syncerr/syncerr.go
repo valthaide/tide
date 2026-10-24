@@ -20,6 +20,10 @@ const (
 	CodeBlockedByCI    = "blocked_by_ci"
 	CodeDirtyWorktree  = "dirty_worktree"
 	CodeUnhealthy      = "unhealthy"
+	CodeBuildForbidden = "build_forbidden"
+	CodeRegistryAuth   = "registry_auth"
+	CodePullFailed     = "pull_failed"
+	CodeUnsetVar       = "unset_var"
 	CodeUnknown        = "unknown"
 )
 
@@ -31,6 +35,9 @@ const (
 	StageCompose     = "compose"
 	StageCIGate      = "ci_gate"
 	StageHealth      = "health"
+	StageValidate    = "validate"
+	StageRegistry    = "registry"
+	StagePull        = "pull"
 	StageUnknown     = "unknown"
 )
 
@@ -172,6 +179,14 @@ func Classify(err error) *Error {
 		return New(CodeSecretsVault, StageSecrets, msg)
 	case strings.Contains(lower, "credential"):
 		return New(CodeCredentials, StageCredentials, msg)
+	case strings.Contains(lower, "build_forbidden"):
+		return New(CodeBuildForbidden, StageValidate, msg)
+	case strings.Contains(lower, "registry_auth"):
+		return New(CodeRegistryAuth, StageRegistry, msg)
+	case strings.Contains(lower, "pull_failed"):
+		return New(CodePullFailed, StagePull, msg)
+	case strings.Contains(lower, "unset_var"):
+		return New(CodeUnsetVar, StageValidate, msg)
 	case strings.Contains(lower, "compose") || strings.Contains(lower, "docker"):
 		return New(CodeComposeApply, StageCompose, msg)
 	default:

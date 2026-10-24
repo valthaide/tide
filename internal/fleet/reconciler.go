@@ -35,6 +35,7 @@ type AppManager interface {
 	GetRepoSecret(id string) ([]byte, error)
 	SetSuspended(id string, suspended bool) error
 	SetRevision(id, revision string) error
+	MarkPending(id string) error
 	Delete(id string) error
 }
 
@@ -292,7 +293,7 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 			continue
 		}
 		desiredNames[spec.Name] = struct{}{}
-		if err := r.upsertApp(spec); err != nil {
+		if err := r.upsertApp(spec, doc.Build); err != nil {
 			return fmt.Errorf("upsert app %q: %w", spec.Name, err)
 		}
 	}
@@ -317,7 +318,7 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 	return nil
 }
 
-func (r *Reconciler) upsertApp(spec AppSpec) error {
+func (r *Reconciler) upsertApp(spec AppSpec, hostBuild string) error {
 	method := repoauth.NormalizeMethod(spec.RepoAuthMethod)
 	if method == "" {
 		method = repoauth.MethodPublic
@@ -345,7 +346,7 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 		if err := r.Apps.SetRevision(app.ID, spec.Revision); err != nil {
 			return err
 		}
-		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec)); err != nil {
+		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec, hostBuild)); err != nil {
 			return err
 		}
 		if spec.Suspended {
@@ -382,7 +383,7 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 		if err := r.Apps.SetRevision(app.ID, spec.Revision); err != nil {
 			return err
 		}
-		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec)); err != nil {
+		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec, hostBuild)); err != nil {
 			return err
 		}
 		if spec.Suspended {
@@ -397,8 +398,17 @@ func (r *Reconciler) upsertApp(spec AppSpec) error {
 	if err := r.Apps.UpdateApp(existing.ID, spec.Name, spec.Branch, spec.ComposePath, spec.PollInterval, nil); err != nil {
 		return err
 	}
-	if err := r.Apps.UpdateDeployPolicy(existing.ID, policyJSONFromSpec(spec)); err != nil {
+	varsChanged := !deploypolicy.VarsEqual(existing.Policy().Vars, spec.Vars)
+	if err := r.Apps.UpdateDeployPolicy(existing.ID, policyJSONFromSpec(spec, hostBuild)); err != nil {
 		return err
+	}
+	if varsChanged {
+		if err := r.Apps.MarkPending(existing.ID); err != nil {
+			return err
+		}
+		if r.Logger != nil {
+			r.Logger.Info("Fleet vars changed", "name", spec.Name)
+		}
 	}
 	if err := r.syncFleetSecret(existing.ID, method, secret, spec); err != nil {
 		return err
@@ -450,11 +460,17 @@ func (r *Reconciler) syncFleetSecret(appID, method, secret string, spec AppSpec)
 	}
 }
 
-func policyJSONFromSpec(spec AppSpec) string {
+func policyJSONFromSpec(spec AppSpec, hostBuild string) string {
+	build := spec.Build
+	if build == "" {
+		build = deploypolicy.NormalizeBuild(hostBuild)
+	}
 	p := deploypolicy.Policy{
 		RequirePipelineSuccess: spec.RequirePipelineSuccess,
 		PruneVolumes:           spec.PruneVolumes,
 		HealthTimeout:          spec.HealthTimeout,
+		Build:                  build,
+		Vars:                   spec.Vars,
 	}
 	for _, w := range spec.WatchFiles {
 		p.WatchFiles = append(p.WatchFiles, deploypolicy.WatchFile{
