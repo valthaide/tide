@@ -50,6 +50,8 @@ type ProjectRuntimeState struct {
 	FlappingCount int
 	// NotReady lists container names that are not ready (unhealthy, starting, exited, or flapping).
 	NotReady []string
+	// Failure is a specific reason, such as "oneshot_failed: init exit 1" or "restarting: php 4 restarts".
+	Failure string
 }
 
 // Ready reports whether every service container is running and past healthcheck start.
@@ -333,6 +335,9 @@ func (e *ComposeExecutor) ApplyImages(
 		onProgress,
 	)
 	if err != nil {
+		if reason := e.oneshotFailure(ctx, projectName); reason != "" {
+			return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeOneshotFailed, syncerr.StageCompose, reason)
+		}
 		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("up failed: %w", err)
 	}
 
@@ -1360,6 +1365,18 @@ func ProjectNameForApp(appID string) string {
 	return composeProjectName(appID)
 }
 
+func (e *ComposeExecutor) oneshotFailure(ctx context.Context, project string) string {
+	obs, err := e.observeContainers(ctx)
+	if err != nil {
+		return ""
+	}
+	reason := foldObservations(obs, time.Now())[project].Failure
+	if strings.HasPrefix(reason, "oneshot_failed:") {
+		return reason
+	}
+	return ""
+}
+
 func (e *ComposeExecutor) observeContainers(ctx context.Context) ([]containerObs, error) {
 	output, err := e.runCommand(
 		ctx,
@@ -1484,7 +1501,14 @@ func quietCommandOutput(cmd string, args []string) bool {
 	if filepath.Base(cmd) != "docker" || len(args) == 0 {
 		return false
 	}
-	return args[0] == "ps"
+	switch args[0] {
+	case "ps", "inspect":
+		return true
+	case "image":
+		return len(args) > 1 && args[1] == "inspect"
+	default:
+		return false
+	}
 }
 
 func contextStopped(ctx context.Context) bool {

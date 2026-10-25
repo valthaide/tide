@@ -23,6 +23,7 @@ const (
 	CodeBuildForbidden = "build_forbidden"
 	CodeRegistryAuth   = "registry_auth"
 	CodePullFailed     = "pull_failed"
+	CodeOneshotFailed  = "oneshot_failed"
 	CodeUnsetVar       = "unset_var"
 	CodeDockerAPI      = "docker_api_incompatible"
 	CodeUnknown        = "unknown"
@@ -186,6 +187,8 @@ func Classify(err error) *Error {
 		return New(CodeRegistryAuth, StageRegistry, msg)
 	case strings.Contains(lower, "pull_failed"):
 		return New(CodePullFailed, StagePull, msg)
+	case strings.Contains(lower, "oneshot_failed"):
+		return New(CodeOneshotFailed, StageCompose, msg)
 	case strings.Contains(lower, "unset_var"):
 		return New(CodeUnsetVar, StageValidate, msg)
 	case strings.Contains(lower, "docker_api_incompatible") ||

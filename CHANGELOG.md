@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.17
+
+### Fixes
+- **Inspect logs.** `docker inspect` and `docker image inspect` output is DEBUG. Container config no longer lands in the INFO log.
+- **One-shot failure.** A one-shot service that exits non-zero is `oneshot_failed: <service> exit N`, not `up failed: exit status 1`.
+- **Restart loop.** The status says `restarting: <service> N restarts` instead of only `health timeout`.
+
 ## v1.0.16
 
 ### Fixes

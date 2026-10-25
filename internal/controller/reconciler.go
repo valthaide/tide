@@ -769,12 +769,18 @@ func (r *Reconciler) confirmHealthy(ctx context.Context, app *App, revision stri
 }
 
 func healthFailure(revision string, timeout time.Duration, state compose.ProjectRuntimeState) error {
+	if reason := strings.TrimSpace(state.Failure); reason != "" {
+		return fmt.Errorf("%s (revision %s)", reason, revision)
+	}
 	names := strings.Join(state.NotReady, ", ")
 	if names == "" {
 		names = "unknown"
 	}
 	if state.UnhealthyCount > 0 {
 		return fmt.Errorf("unhealthy: container %s after %s (revision %s)", names, timeout, revision)
+	}
+	if state.FlappingCount > 0 {
+		return fmt.Errorf("restarting: %s (revision %s)", names, revision)
 	}
 	return fmt.Errorf("health timeout: container %s after %s (revision %s)", names, timeout, revision)
 }

@@ -28,6 +28,36 @@ func TestOneshotExitZeroIsNotAFailure(t *testing.T) {
 	}
 }
 
+func TestFailureReasons(t *testing.T) {
+	now := time.Now()
+	oneshot := foldObservations([]containerObs{
+		{
+			Project: "crm", Service: "hasura", Name: "crm-hasura-1",
+			Running: true, State: "running", PSStatus: "Up 1 minute",
+			DependsOn: "init:service_completed_successfully:false",
+		},
+		{
+			Project: "crm", Service: "init", Name: "crm-init-1",
+			Running: false, State: "exited", ExitCode: 1, HasInspect: true,
+			PSStatus: "Exited (1) 1 second ago",
+		},
+	}, now)["crm"]
+	if oneshot.Failure != "oneshot_failed: init exit 1" {
+		t.Fatalf("oneshot reason %q", oneshot.Failure)
+	}
+	flap := foldObservations([]containerObs{{
+		Project: "crm", Service: "php-consume", Name: "crm-php-consume-1",
+		Running: true, State: "running", PSStatus: "Up 3 seconds",
+		RestartCount: 8, StartedAt: now.Add(-3 * time.Second), HasInspect: true,
+	}}, now)["crm"]
+	if flap.Failure != "restarting: php-consume 8 restarts" {
+		t.Fatalf("restart reason %q", flap.Failure)
+	}
+	if !quietCommandOutput("docker", []string{"inspect", "abc"}) || !quietCommandOutput("docker", []string{"image", "inspect", "php:1"}) {
+		t.Fatal("inspect output must be debug")
+	}
+}
+
 func TestOneshotExitNonZeroIsUnhealthy(t *testing.T) {
 	obs := []containerObs{
 		{

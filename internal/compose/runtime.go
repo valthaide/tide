@@ -210,6 +210,13 @@ func foldObservations(obs []containerObs, now time.Time) map[string]ProjectRunti
 			state.ContainerCount++
 			state.UnhealthyCount++
 			state.NotReady = append(state.NotReady, name)
+			if state.Failure == "" {
+				service := c.Service
+				if service == "" {
+					service = name
+				}
+				state.Failure = fmt.Sprintf("oneshot_failed: %s exit %d", service, c.ExitCode)
+			}
 		case isOneshot && (c.Running || c.State == "created" || c.State == "restarting"):
 			state.ContainerCount++
 			state.StartingCount++
@@ -218,6 +225,11 @@ func foldObservations(obs []containerObs, now time.Time) map[string]ProjectRunti
 			state.ContainerCount++
 			state.FlappingCount++
 			state.NotReady = append(state.NotReady, name)
+			service := c.Service
+			if service == "" {
+				service = name
+			}
+			state.Failure = fmt.Sprintf("restarting: %s %d restarts", service, c.RestartCount)
 		default:
 			state.ContainerCount++
 			running := c.Running || dockerStatusIsRunning(c.PSStatus)
