@@ -73,4 +73,8 @@ func TestPublicVarHidesSecrets(t *testing.T) {
 	if !PublicVar("COLOR", []string{"COLOR"}) {
 		t.Fatal("listed key is public")
 	}
+	kept := PublicVars(map[string]string{"APP_TAG": "1", "DB_PASSWORD": "secret", "COLOR": "blue"}, []string{"COLOR"})
+	if kept["APP_TAG"] != "1" || kept["COLOR"] != "blue" || kept["DB_PASSWORD"] != "" {
+		t.Fatalf("%v", kept)
+	}
 }

@@ -117,6 +117,7 @@ type Summary struct {
 	ExternalVols  []string
 	BindSources   []string
 	Rerun         []string
+	Build         []string
 }
 
 // SummarizeCompose reads compose config JSON.
@@ -124,6 +125,7 @@ func SummarizeCompose(raw []byte) (Summary, error) {
 	var doc struct {
 		Services map[string]struct {
 			Image         string            `json:"image"`
+			Build         json.RawMessage   `json:"build"`
 			ContainerName string            `json:"container_name"`
 			Ports         []composePort     `json:"ports"`
 			Volumes       []composeVolume   `json:"volumes"`
@@ -141,6 +143,9 @@ func SummarizeCompose(raw []byte) (Summary, error) {
 	for name, svc := range doc.Services {
 		if img := strings.TrimSpace(svc.Image); img != "" {
 			sum.Images[name] = img
+		}
+		if hasBuild(svc.Build) {
+			sum.Build = append(sum.Build, name)
 		}
 		if cn := strings.TrimSpace(svc.ContainerName); cn != "" {
 			sum.ContainerName = append(sum.ContainerName, name)
@@ -172,7 +177,17 @@ func SummarizeCompose(raw []byte) (Summary, error) {
 	sort.Strings(sum.ExternalVols)
 	sort.Strings(sum.BindSources)
 	sort.Strings(sum.Rerun)
+	sort.Strings(sum.Build)
 	return sum, nil
+}
+
+func hasBuild(raw json.RawMessage) bool {
+	raw = bytesTrim(raw)
+	return len(raw) > 0 && string(raw) != "null"
+}
+
+func bytesTrim(raw []byte) []byte {
+	return []byte(strings.TrimSpace(string(raw)))
 }
 
 type composePort struct {
@@ -287,6 +302,23 @@ func PublicVar(key string, publicVars []string) bool {
 	}
 	upper := strings.ToUpper(key)
 	return strings.HasSuffix(upper, "_TAG") || strings.HasSuffix(upper, "_IMAGE")
+}
+
+// PublicVars keeps only values that may be shown. Secrets are dropped.
+func PublicVars(vars map[string]string, listed []string) map[string]string {
+	if len(vars) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for key, value := range vars {
+		if PublicVar(key, listed) {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func secretKey(key string) bool {

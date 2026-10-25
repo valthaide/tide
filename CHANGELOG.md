@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.0-rc2
+
+### Fixes
+- **Sync deadline.** Git fetch, `compose config`, registry login and `image inspect` are bounded by `sync_timeout` again. A hung checkout cannot hold a sync slot forever. Pull still uses its own idle timeout, and that clock starts only after a pull slot is acquired.
+- **Pull queue.** Waiting for `CONOPS_PULL_PARALLEL` is not pull silence, so later apps are not failed with `timeout: pull` while another pull is running. Unset `CONOPS_PULL_PARALLEL` is still no extra limit.
+- **Released ports.** Removing an app drops its published-port claim. The next app can use that port without a controller restart.
+- **One-shot timeout.** The wait after `up` uses `oneshot_timeout` (default 10m), not the 5m sync deadline.
+- **History.** `GET /api/v1/apps/{id}/history` and `cps history -o json` return only public vars. Passwords, tokens and other secrets stay in the database and are not shown.
+- **`cps validate --with-compose`.** Fleet `vars` are passed into `docker compose config`. A service with both `build` and `image` fails `build: forbidden`. Suspended apps are left out of port checks. Repeated conflict lines are reported once.
+
 ## v1.1.0-rc1
 
 ### Features

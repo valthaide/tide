@@ -304,7 +304,8 @@ func (h *Handler) attachOneshot(ctx context.Context, apps []*api.App) {
 
 func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if _, err := h.Registry.Get(id); err != nil {
+	app, err := h.Registry.Get(id)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -318,6 +319,10 @@ func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	listed := app.Policy().PublicVars
+	for i := range revs {
+		revs[i].VarsJSON = deploypolicy.EncodeVars(fleetcheck.PublicVars(deploypolicy.DecodeVars(revs[i].VarsJSON), listed))
 	}
 	json.NewEncoder(w).Encode(api.APIResponse{Data: revs})
 }

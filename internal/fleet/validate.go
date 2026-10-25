@@ -71,6 +71,7 @@ func Validate(data []byte, opts ValidateOptions) (Report, error) {
 			issues = append(issues, fleetcheck.Issue{Rule: "unknown_field", Message: "unknown_field: " + field})
 		}
 	}
+	issues = dedupeIssues(issues)
 	return Report{OK: len(issues) == 0, Issues: issues, Unknown: unknown}, nil
 }
 
@@ -78,12 +79,16 @@ func composeIssues(doc *HostDocument, appsDir string) ([]fleetcheck.Issue, error
 	ports := map[int]string{}
 	var issues []fleetcheck.Issue
 	for _, app := range doc.Apps {
+		if !appChecked(app) {
+			continue
+		}
 		path, err := composeFile(appsDir, app)
 		if err != nil {
 			return nil, err
 		}
 		cmd := exec.Command("docker", "compose", "-f", path, "config", "--format", "json")
 		cmd.Dir = filepath.Dir(path)
+		cmd.Env = composeConfigEnv(os.Environ(), app.Vars)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -94,26 +99,84 @@ func composeIssues(doc *HostDocument, appsDir string) ([]fleetcheck.Issue, error
 		if err != nil {
 			return nil, fmt.Errorf("compose config %s: %w", app.Name, err)
 		}
-		if app.Build == "forbidden" || (app.Build == "" && doc.Build == "forbidden") {
-			if len(sum.Images) == 0 {
-				issues = append(issues, fleetcheck.Issue{App: app.Name, Rule: "build_forbidden", Message: "build_forbidden: no image"})
-			}
-		}
-		if app.RequireDigest {
-			for _, issue := range fleetcheck.DigestRequired(sum.Images) {
-				issue.App = app.Name
-				issues = append(issues, issue)
-			}
-		}
-		for _, port := range sum.Published {
-			if owner, ok := ports[port]; ok {
-				issues = append(issues, fleetcheck.PortConflict(app.Name, port, owner))
-				continue
-			}
-			ports[port] = app.Name
-		}
+		issues = append(issues, configIssues(app, doc.Build, sum, ports)...)
 	}
 	return issues, nil
+}
+
+func configIssues(app AppSpec, hostBuild string, sum fleetcheck.Summary, ports map[int]string) []fleetcheck.Issue {
+	var issues []fleetcheck.Issue
+	if app.Build == "forbidden" || (app.Build == "" && hostBuild == "forbidden") {
+		if len(sum.Build) > 0 {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Rule: "build_forbidden", Message: "build_forbidden: " + strings.Join(sum.Build, ",")})
+		}
+	}
+	if app.RequireDigest {
+		for _, issue := range fleetcheck.DigestRequired(sum.Images) {
+			issue.App = app.Name
+			issues = append(issues, issue)
+		}
+	}
+	for _, port := range sum.Published {
+		if owner, ok := ports[port]; ok {
+			issues = append(issues, fleetcheck.PortConflict(app.Name, port, owner))
+			continue
+		}
+		ports[port] = app.Name
+	}
+	return issues
+}
+
+func appChecked(app AppSpec) bool {
+	return !app.Suspended
+}
+
+func composeConfigEnv(base []string, vars map[string]string) []string {
+	if len(vars) == 0 {
+		return base
+	}
+	skip := map[string]struct{}{}
+	keys := make([]string, 0, len(vars))
+	for key := range vars {
+		skip[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	sortStrings(keys)
+	var out []string
+	for _, item := range base {
+		key, _, ok := strings.Cut(item, "=")
+		if ok {
+			if _, drop := skip[key]; drop {
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	for _, key := range keys {
+		out = append(out, key+"="+vars[key])
+	}
+	return out
+}
+
+func sortStrings(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
+}
+
+func dedupeIssues(in []fleetcheck.Issue) []fleetcheck.Issue {
+	seen := map[string]struct{}{}
+	var out []fleetcheck.Issue
+	for _, issue := range in {
+		if _, ok := seen[issue.Message]; ok {
+			continue
+		}
+		seen[issue.Message] = struct{}{}
+		out = append(out, issue)
+	}
+	return out
 }
 
 func composeFile(appsDir string, app AppSpec) (string, error) {

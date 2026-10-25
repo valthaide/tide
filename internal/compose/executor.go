@@ -114,6 +114,14 @@ func (e *ComposeExecutor) ApplyImages(
 	opts ApplyOptions,
 	onProgress func(string),
 ) (string, error) {
+	// Git, compose config, registry login and image inspect stay on the sync
+	// deadline. Pull and one-shot waits have their own clocks, started later.
+	callerCtx := ctx
+	if opts.SyncTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(callerCtx, opts.SyncTimeout)
+		defer cancel()
+	}
 	var syncLog strings.Builder
 	emitProgress := func() {
 		if onProgress != nil {
@@ -303,12 +311,11 @@ func (e *ComposeExecutor) ApplyImages(
 		}
 		pullArgs = append(pullArgs, "pull")
 
-		pullCtx, pullCancel, bumpPull := idleContext(ctx, opts.PullIdle)
-		if e.PullGate != nil {
-			if err := e.PullGate.Acquire(pullCtx); err != nil {
-				pullCancel()
-				return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeTimeout, syncerr.StagePull, "timeout: pull "+strings.Join(prep.images, ",")+" after "+opts.PullIdle.String())
-			}
+		// The idle clock starts after a pull slot is acquired. Time spent
+		// waiting for CONOPS_PULL_PARALLEL is not pull silence.
+		pullCtx, pullRelease, bumpPull, waitErr := e.beginPull(callerCtx, opts.PullIdle)
+		if waitErr != nil {
+			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("waiting for pull slot: %w", waitErr)
 		}
 		pullOut, err := e.runCommandWithTranscript(
 			pullCtx,
@@ -324,13 +331,10 @@ func (e *ComposeExecutor) ApplyImages(
 				}
 			},
 		)
-		if e.PullGate != nil {
-			e.PullGate.Release()
-		}
-		pullCancel()
+		pullRelease()
 		if err != nil {
 			prep.clean()
-			if pullCtx.Err() != nil && ctx.Err() == nil {
+			if pullCtx.Err() != nil && callerCtx.Err() == nil {
 				msg := "timeout: pull " + strings.Join(prep.images, ",") + " after " + opts.PullIdle.String()
 				return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeTimeout, syncerr.StagePull, msg)
 			}
@@ -396,7 +400,13 @@ func (e *ComposeExecutor) ApplyImages(
 			e.Logger.Warn("one-shot recreate failed", "project", projectName, "error", rerunErr)
 		}
 	}
-	if err := e.waitOneshots(upCtx, projectName, opts.OneshotTimeout); err != nil {
+	shotTimeout := opts.OneshotTimeout
+	if shotTimeout <= 0 {
+		shotTimeout = 10 * time.Minute
+	}
+	shotCtx, shotCancel := context.WithTimeout(context.Background(), shotTimeout)
+	defer shotCancel()
+	if err := e.waitOneshots(shotCtx, projectName, shotTimeout); err != nil {
 		return redact.String(strings.TrimSpace(syncLog.String())), err
 	}
 
@@ -461,6 +471,7 @@ func (e *ComposeExecutor) HTTPReload(ctx context.Context, reloadURL string) erro
 // Named volumes are removed only when pruneVolumes is true.
 func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string, envVars map[string]string, pruneVolumes bool) (string, error) {
 	projectName := e.projectFor(appID)
+	defer e.ReleasePorts(projectName)
 	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
 	if err != nil {
 		return "", fmt.Errorf("resolve app dir failed: %w", err)
@@ -620,11 +631,15 @@ func (e *ComposeExecutor) RememberProject(appID, project string) {
 		return
 	}
 	e.projectsMu.Lock()
-	defer e.projectsMu.Unlock()
 	if e.projects == nil {
 		e.projects = map[string]string{}
 	}
+	previous := e.projects[appID]
 	e.projects[appID] = project
+	e.projectsMu.Unlock()
+	if previous != "" && previous != project {
+		e.ReleasePorts(previous)
+	}
 }
 
 func (e *ComposeExecutor) projectFor(appID string) string {
@@ -1618,6 +1633,42 @@ func truncateOutput(value string) string {
 	return value[:maxLen] + "...(truncated)"
 }
 
+// beginPull waits for a pull slot, then starts the idle clock.
+// Queue time does not count as pull silence.
+func (e *ComposeExecutor) beginPull(ctx context.Context, idle time.Duration) (context.Context, func(), func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if e != nil && e.PullGate != nil {
+		if err := e.PullGate.Acquire(ctx); err != nil {
+			return nil, func() {}, func() {}, err
+		}
+	}
+	pullCtx, cancel, bump := idleContext(context.Background(), idle)
+	release := func() {
+		cancel()
+		if e != nil && e.PullGate != nil {
+			e.PullGate.Release()
+		}
+	}
+	return pullCtx, release, bump, nil
+}
+
+// ReleasePorts drops published-port claims for a compose project that is gone.
+func (e *ComposeExecutor) ReleasePorts(project string) {
+	if e == nil {
+		return
+	}
+	project = strings.TrimSpace(project)
+	e.portsMu.Lock()
+	defer e.portsMu.Unlock()
+	for port, owner := range e.portOwner {
+		if owner == project {
+			delete(e.portOwner, port)
+		}
+	}
+}
+
 func idleContext(parent context.Context, idle time.Duration) (context.Context, context.CancelFunc, func()) {
 	if idle <= 0 {
 		if parent == nil {
@@ -1746,6 +1797,10 @@ func (e *ComposeExecutor) waitOneshots(ctx context.Context, project string, time
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if pending != "" && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				e.stopServiceContainer(context.Background(), project, pending)
+				return syncerr.New(syncerr.CodeOneshotTimeout, syncerr.StageCompose, "oneshot_timeout: "+pending)
+			}
 			return ctx.Err()
 		case <-timer.C:
 		}
