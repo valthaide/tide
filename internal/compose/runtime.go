@@ -1,6 +1,8 @@
 package compose
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -25,6 +27,113 @@ type containerObs struct {
 	RepoDigest    string
 	Running       bool
 	HasInspect    bool
+}
+
+type containerInspect struct {
+	ID           string `json:"Id"`
+	Image        string `json:"Image"`
+	RestartCount int    `json:"RestartCount"`
+	State        struct {
+		Status    string `json:"Status"`
+		Running   bool   `json:"Running"`
+		ExitCode  int    `json:"ExitCode"`
+		StartedAt string `json:"StartedAt"`
+		Health    *struct {
+			Status string `json:"Status"`
+		} `json:"Health"`
+	} `json:"State"`
+	HostConfig struct {
+		RestartPolicy struct {
+			Name string `json:"Name"`
+		} `json:"RestartPolicy"`
+	} `json:"HostConfig"`
+	Config struct {
+		Image  string            `json:"Image"`
+		Labels map[string]string `json:"Labels"`
+	} `json:"Config"`
+}
+
+type imageInspect struct {
+	ID          string   `json:"Id"`
+	RepoDigests []string `json:"RepoDigests"`
+	RepoTags    []string `json:"RepoTags"`
+}
+
+// applyContainerInspectJSON merges `docker inspect` JSON into observations.
+// Health may be absent. RepoDigests are not read here; they belong to the image.
+func applyContainerInspectJSON(obs []containerObs, raw []byte) error {
+	payload := extractJSON(string(raw))
+	if len(payload) == 0 {
+		return fmt.Errorf("docker inspect returned no json")
+	}
+	var docs []containerInspect
+	if err := json.Unmarshal(payload, &docs); err != nil {
+		return err
+	}
+	byID := map[string]int{}
+	for i := range obs {
+		byID[containerKey(obs[i].ID)] = i
+	}
+	for _, doc := range docs {
+		idx, ok := byID[containerKey(doc.ID)]
+		if !ok {
+			continue
+		}
+		obs[idx].HasInspect = true
+		obs[idx].State = strings.TrimSpace(doc.State.Status)
+		obs[idx].ExitCode = doc.State.ExitCode
+		obs[idx].RestartCount = doc.RestartCount
+		obs[idx].RestartPolicy = strings.TrimSpace(doc.HostConfig.RestartPolicy.Name)
+		obs[idx].ImageID = strings.TrimSpace(doc.Image)
+		if doc.Config.Labels != nil {
+			obs[idx].DependsOn = strings.TrimSpace(doc.Config.Labels["com.docker.compose.depends_on"])
+		}
+		if doc.State.Health != nil {
+			obs[idx].Health = strings.TrimSpace(doc.State.Health.Status)
+		}
+		if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(doc.State.StartedAt)); err == nil {
+			obs[idx].StartedAt = t
+		}
+		obs[idx].Running = doc.State.Running || obs[idx].State == "running" || dockerStatusIsRunning(obs[idx].PSStatus)
+	}
+	return nil
+}
+
+// applyImageInspectJSON copies RepoDigests from `docker image inspect` onto containers.
+func applyImageInspectJSON(obs []containerObs, raw []byte) error {
+	payload := extractJSON(string(raw))
+	if len(payload) == 0 {
+		return fmt.Errorf("docker image inspect returned no json")
+	}
+	var docs []imageInspect
+	if err := json.Unmarshal(payload, &docs); err != nil {
+		return err
+	}
+	byID := map[string]string{}
+	byRef := map[string]string{}
+	for _, doc := range docs {
+		if len(doc.RepoDigests) == 0 {
+			continue
+		}
+		digest := doc.RepoDigests[0]
+		byID[containerKey(doc.ID)] = digest
+		for _, tag := range doc.RepoTags {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				byRef[tag] = digest
+			}
+		}
+	}
+	for i := range obs {
+		if d := byID[containerKey(obs[i].ImageID)]; d != "" {
+			obs[i].RepoDigest = d
+			continue
+		}
+		if d := byRef[strings.TrimSpace(obs[i].Image)]; d != "" {
+			obs[i].RepoDigest = d
+		}
+	}
+	return nil
 }
 
 // oneshotServices returns service names that other containers wait to complete.

@@ -560,6 +560,11 @@ func (r *Reconciler) syncApp(app *App) error {
 			output,
 			se,
 		)
+		if transientFailure(se) {
+			// Keep the attempted vars as rejected so the next loop does not
+			// treat the same fleet vars as a new revision and skip the backoff.
+			_ = r.Registry.UpdateRollback(app.ID, app.LastHealthyCommit, app.RejectedCommit, app.LastHealthyVars, deploypolicy.EncodeVars(opts.Vars))
+		}
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
 		if declaredFailure(se) {
 			return nil
@@ -855,6 +860,16 @@ func (r *Reconciler) varsDriftReason(app *App) string {
 		strings.TrimSpace(app.RejectedCommit) != "" &&
 		strings.TrimSpace(app.LastSeenCommit) == strings.TrimSpace(app.RejectedCommit) {
 		return ""
+	}
+	// A failed pull of these same vars is not a new revision. Retry only when
+	// the transient backoff elapses. A different tag still queues at once.
+	if transientFailure(&syncerr.Error{Code: app.LastSyncErrorCode}) {
+		if len(rejected) > 0 && deploypolicy.VarsEqual(desired, rejected) {
+			return ""
+		}
+		if len(rejected) == 0 && !r.transientReady(app) {
+			return ""
+		}
 	}
 	return "vars_changed"
 }

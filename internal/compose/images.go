@@ -116,9 +116,19 @@ func imagesFromConfig(configJSON []byte) []string {
 }
 
 func extractJSON(output string) []byte {
-	start := strings.Index(output, "{")
-	end := strings.LastIndex(output, "}")
-	if start < 0 || end <= start {
+	startObj := strings.Index(output, "{")
+	startArr := strings.Index(output, "[")
+	start := startObj
+	endMark := "}"
+	if startArr >= 0 && (startObj < 0 || startArr < startObj) {
+		start = startArr
+		endMark = "]"
+	}
+	if start < 0 {
+		return nil
+	}
+	end := strings.LastIndex(output, endMark)
+	if end < start {
 		return nil
 	}
 	return []byte(output[start : end+1])

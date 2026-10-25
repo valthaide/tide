@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1420,60 +1419,55 @@ func (e *ComposeExecutor) enrichObservations(ctx context.Context, ids []string, 
 	if len(ids) == 0 {
 		return
 	}
-	args := []string{
-		"inspect", "--format",
-		`{{.Id}}|{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}|{{.State.StartedAt}}|{{.HostConfig.RestartPolicy.Name}}|{{index .Config.Labels "com.docker.compose.depends_on"}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}|{{.Image}}`,
-	}
-	args = append(args, ids...)
+	args := append([]string{"inspect"}, ids...)
 	output, err := e.runCommand(ctx, "docker", args, e.runtimeWorkDir(), nil, nil)
 	if err != nil {
+		if e.Logger != nil {
+			e.Logger.Warn("docker inspect failed; restart and oneshot details unavailable", "error", err)
+		}
 		return
 	}
-	byID := map[string]int{}
-	for i := range obs {
-		byID[containerKey(obs[i].ID)] = i
+	if err := applyContainerInspectJSON(obs, []byte(output)); err != nil {
+		if e.Logger != nil {
+			e.Logger.Warn("docker inspect json rejected", "error", err)
+		}
+		return
 	}
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "|", 10)
-		if len(parts) < 5 {
-			continue
-		}
-		idx, ok := byID[containerKey(parts[0])]
-		if !ok {
-			continue
-		}
-		obs[idx].HasInspect = true
-		obs[idx].State = strings.TrimSpace(parts[1])
-		if n, convErr := strconv.Atoi(strings.TrimSpace(parts[2])); convErr == nil {
-			obs[idx].ExitCode = n
-		}
-		if n, convErr := strconv.Atoi(strings.TrimSpace(parts[3])); convErr == nil {
-			obs[idx].RestartCount = n
-		}
-		if t, convErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(parts[4])); convErr == nil {
-			obs[idx].StartedAt = t
-		}
-		if len(parts) > 5 {
-			obs[idx].RestartPolicy = strings.TrimSpace(parts[5])
-		}
-		if len(parts) > 6 {
-			obs[idx].DependsOn = strings.TrimSpace(parts[6])
-		}
-		if len(parts) > 7 {
-			obs[idx].Health = strings.TrimSpace(parts[7])
-		}
-		if len(parts) > 8 {
-			obs[idx].RepoDigest = strings.TrimSpace(parts[8])
-		}
-		if len(parts) > 9 {
-			obs[idx].ImageID = strings.TrimSpace(parts[9])
-		}
-		obs[idx].Running = obs[idx].State == "running" || dockerStatusIsRunning(obs[idx].PSStatus)
+	refs := imageRefs(obs)
+	if len(refs) == 0 {
+		return
 	}
+	imgArgs := append([]string{"image", "inspect"}, refs...)
+	imgOut, imgErr := e.runCommand(ctx, "docker", imgArgs, e.runtimeWorkDir(), nil, nil)
+	if imgErr != nil {
+		if e.Logger != nil {
+			e.Logger.Warn("docker image inspect failed; digests unavailable", "error", imgErr)
+		}
+		return
+	}
+	if err := applyImageInspectJSON(obs, []byte(imgOut)); err != nil && e.Logger != nil {
+		e.Logger.Warn("docker image inspect json rejected", "error", err)
+	}
+}
+
+func imageRefs(obs []containerObs) []string {
+	seen := map[string]struct{}{}
+	var refs []string
+	for _, c := range obs {
+		ref := strings.TrimSpace(c.ImageID)
+		if ref == "" {
+			ref = strings.TrimSpace(c.Image)
+		}
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 func containerKey(id string) string {

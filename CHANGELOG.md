@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.16
+
+### Fixes
+- **Container inspect.** `docker inspect` is parsed as JSON. Containers without a healthcheck no longer drop `RestartCount`, exit code, and one-shot dependencies. Image digests come from `docker image inspect`. A failed inspect is a WARN, and `cps get apps` no longer shows `@unknown` when the registry digest is known.
+- **Retry pause.** `pull_failed` and `registry_auth` keep the attempted `vars` as rejected, so the same tag is not queued again as `vars_changed` before the backoff ends. A different tag still syncs immediately.
+
 ## v1.0.15
 
 ### Features

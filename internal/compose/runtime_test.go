@@ -60,6 +60,35 @@ func TestFrequentRestartsAreNotHealthy(t *testing.T) {
 	}
 }
 
+func TestContainerInspectWithoutHealthcheck(t *testing.T) {
+	raw := []byte(`[
+  {"Id":"sha256:abc123","Image":"sha256:img1","RestartCount":4,
+   "State":{"Status":"running","Running":true,"ExitCode":0,"StartedAt":"2026-10-25T06:00:00.5Z"},
+   "HostConfig":{"RestartPolicy":{"Name":"unless-stopped"}},
+   "Config":{"Image":"registry.example/php:81d4e14a","Labels":{"com.docker.compose.depends_on":"migrate:service_completed_successfully:false"}}}
+]`)
+	obs := []containerObs{{ID: "abc123", Project: "crm", Service: "php-consume", Image: "registry.example/php:81d4e14a", PSStatus: "Up 3 seconds"}}
+	if err := applyContainerInspectJSON(obs, raw); err != nil {
+		t.Fatal(err)
+	}
+	if !obs[0].HasInspect || obs[0].RestartCount != 4 || obs[0].State != "running" || obs[0].ExitCode != 0 {
+		t.Fatalf("inspect: %+v", obs[0])
+	}
+	if obs[0].Health != "" {
+		t.Fatalf("missing healthcheck must stay empty, got %q", obs[0].Health)
+	}
+	if obs[0].DependsOn == "" || obs[0].ImageID != "sha256:img1" {
+		t.Fatalf("labels/image: %+v", obs[0])
+	}
+	img := []byte(`[{"Id":"sha256:img1","RepoTags":["registry.example/php:81d4e14a"],"RepoDigests":["registry.example/php@sha256:deadbeef"]}]`)
+	if err := applyImageInspectJSON(obs, img); err != nil {
+		t.Fatal(err)
+	}
+	if digestLabel(obs[0].RepoDigest, obs[0].ImageID) != "sha256:deadbeef" {
+		t.Fatalf("digest %q", obs[0].RepoDigest)
+	}
+}
+
 func TestOldRestartCountStaysHealthy(t *testing.T) {
 	now := time.Now()
 	obs := []containerObs{{

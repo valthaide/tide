@@ -454,6 +454,40 @@ func (g *gateRuntime) Apply(ctx context.Context, appID, content string, env map[
 	return g.fakeRuntime.Apply(ctx, appID, content, env, repoURL, branch, composePath, commit, method, secret, progress)
 }
 
+func TestPullFailedDoesNotBypassBackoffViaVars(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "hello", RepoURL: "https://example.com/hello.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "aaaaaaaa", Status: "failed",
+		LastSyncError: syncerr.Encode(syncerr.New(syncerr.CodePullFailed, syncerr.StagePull, "pull_failed: missing:nope")),
+	}
+	addPublicApp(t, reg, app)
+	if err := reg.UpdateSyncResultErr(app.ID, "failed", time.Now(), "", "", "", syncerr.New(syncerr.CodePullFailed, syncerr.StagePull, "pull_failed: missing:nope")); err != nil {
+		t.Fatal(err)
+	}
+	vars := deploypolicy.EncodeVars(map[string]string{"APP_TAG": "nope"})
+	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{Vars: map[string]string{"APP_TAG": "nope"}})); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateRollback(app.ID, "", "", "", vars); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testReconciler(t, reg, &fakeRuntime{}, ReconcilerConfig{Interval: time.Hour, SyncTimeout: time.Minute, MaxConcurrent: 1})
+	r.scheduleTransient(got.ID)
+	if reason := r.varsDriftReason(got); reason != "" {
+		t.Fatalf("same failed vars must not requeue, got %q", reason)
+	}
+	got.DeployPolicyJSON = deploypolicy.Encode(deploypolicy.Policy{Vars: map[string]string{"APP_TAG": "other"}})
+	if reason := r.varsDriftReason(got); reason != "vars_changed" {
+		t.Fatalf("a new tag must still queue, got %q", reason)
+	}
+}
+
 func TestTransientBackoffGrows(t *testing.T) {
 	if transientBackoff(1) != 15*time.Second || transientBackoff(2) != 30*time.Second || transientBackoff(3) != time.Minute {
 		t.Fatalf("backoff %s %s %s", transientBackoff(1), transientBackoff(2), transientBackoff(3))
