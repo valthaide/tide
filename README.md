@@ -51,7 +51,7 @@ Metrics: `http://127.0.0.1:8081/metrics` · Health: `/healthz`
 | `CONOPS_VAULT_ADDR` + `CONOPS_VAULT_TOKEN` | Resolve `vault://path#key` в env |
 | `CONOPS_FLEET_REPO_URL` | Fleet GitOps |
 | `CONOPS_GITLAB_API_TOKEN` | optional; CI gate `require_pipeline_success` (`read_api`) |
-| `CONOPS_DIRTY_WORKTREE` | `refuse` (default) or `reset` when checkout has local changes |
+| `CONOPS_DIRTY_WORKTREE` | ignored. ConOps resets its checkout to the requested revision, including file-mode drift |
 | `CONOPS_MODE` / `CONOPS_HUB_URL` | agent/hub |
 
 ### Fleet app options (v1.0.4+; dirs/globs in v1.0.5)

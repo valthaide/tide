@@ -24,6 +24,7 @@ const (
 	CodeRegistryAuth   = "registry_auth"
 	CodePullFailed     = "pull_failed"
 	CodeUnsetVar       = "unset_var"
+	CodeDockerAPI      = "docker_api_incompatible"
 	CodeUnknown        = "unknown"
 )
 
@@ -187,6 +188,9 @@ func Classify(err error) *Error {
 		return New(CodePullFailed, StagePull, msg)
 	case strings.Contains(lower, "unset_var"):
 		return New(CodeUnsetVar, StageValidate, msg)
+	case strings.Contains(lower, "docker_api_incompatible") ||
+		(strings.Contains(lower, "client version") && strings.Contains(lower, "minimum supported api version")):
+		return New(CodeDockerAPI, StageCompose, msg)
 	case strings.Contains(lower, "compose") || strings.Contains(lower, "docker"):
 		return New(CodeComposeApply, StageCompose, msg)
 	default:

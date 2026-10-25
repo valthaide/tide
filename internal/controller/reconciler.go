@@ -805,7 +805,7 @@ func declaredFailure(se *syncerr.Error) bool {
 		return false
 	}
 	switch se.GetCode() {
-	case syncerr.CodeBuildForbidden, syncerr.CodeRegistryAuth, syncerr.CodePullFailed, syncerr.CodeUnsetVar:
+	case syncerr.CodeBuildForbidden, syncerr.CodeRegistryAuth, syncerr.CodePullFailed, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI:
 		return true
 	default:
 		return false

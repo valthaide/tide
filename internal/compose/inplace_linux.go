@@ -104,7 +104,10 @@ func writeFileInPlace(dest string, content []byte, mode os.FileMode) error {
 		if werr != nil {
 			return werr
 		}
-		return cerr
+		if cerr != nil {
+			return cerr
+		}
+		return os.Chmod(dest, mode)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err

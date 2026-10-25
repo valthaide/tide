@@ -36,4 +36,21 @@ func TestWriteFileInPlaceKeepsInode(t *testing.T) {
 	if string(got) != "new config\n" {
 		t.Fatalf("content %q", got)
 	}
+	if err := writeFileInPlace(path, []byte("new config\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("mode %o, want 755", info.Mode().Perm())
+	}
+	var afterMode syscall.Stat_t
+	if err := syscall.Stat(path, &afterMode); err != nil {
+		t.Fatal(err)
+	}
+	if before.Ino != afterMode.Ino {
+		t.Fatalf("chmod replaced inode %d -> %d", before.Ino, afterMode.Ino)
+	}
 }

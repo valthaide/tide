@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
 const (
@@ -151,7 +153,7 @@ func (e *ComposeExecutor) buildDockerResolution(ctx context.Context) (dockerComm
 		if systemErr != nil {
 			return dockerCommandResolution{}, fmt.Errorf("system docker probe failed (%v) and managed docker install failed: %w", systemErr, installErr)
 		}
-		return dockerCommandResolution{}, fmt.Errorf("system docker client api %s is below daemon minimum %s and managed docker install failed: %w", fallbackValue(systemProbe.ClientAPIVersion), fallbackValue(systemProbe.ServerMinAPIVersion), installErr)
+		return dockerCommandResolution{}, fmt.Errorf("%w; managed docker install failed: %v", dockerAPIIncompatibleError(systemProbe.ClientAPIVersion, systemProbe.ServerMinAPIVersion), installErr)
 	}
 
 	managedProbe, managedErr := probeDockerVersion(ctx, managedPath, nil)
@@ -167,12 +169,7 @@ func (e *ComposeExecutor) buildDockerResolution(ctx context.Context) (dockerComm
 		return dockerCommandResolution{}, fmt.Errorf("managed docker api compatibility check failed: %w", compatErr)
 	}
 	if !compatible {
-		return dockerCommandResolution{}, fmt.Errorf(
-			"managed docker client api %s is older than daemon minimum %s (managed_cli=%s)",
-			fallbackValue(managedProbe.ClientAPIVersion),
-			fallbackValue(managedProbe.ServerMinAPIVersion),
-			managedVersion,
-		)
+		return dockerCommandResolution{}, dockerAPIIncompatibleError(managedProbe.ClientAPIVersion, managedProbe.ServerMinAPIVersion)
 	}
 
 	composeVersion, composeEnv, composeErr := e.ensureComposeAvailable(ctx, managedPath)
@@ -218,6 +215,9 @@ func (e *ComposeExecutor) ensureComposeAvailable(ctx context.Context, dockerPath
 		return "", nil, fmt.Errorf("docker compose plugin check failed after install: %w", versionErr)
 	}
 	if daemonErr := probeComposeDaemonCompatibility(ctx, dockerPath, installEnv); daemonErr != nil {
+		if looksLikeDockerAPIMismatch(daemonErr) {
+			return "", nil, dockerAPIIncompatibleError("", "")
+		}
 		return "", nil, fmt.Errorf("docker compose daemon compatibility check failed after install: %w", daemonErr)
 	}
 	return version, installEnv, nil
@@ -748,6 +748,16 @@ func dockerStaticPlatformPath(goos, goarch string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported docker static os: %s", goos)
 	}
+}
+
+func dockerAPIIncompatibleError(clientAPI, minServerAPI string) error {
+	clientAPI = fallbackValue(clientAPI)
+	minServerAPI = fallbackValue(minServerAPI)
+	return syncerr.New(
+		syncerr.CodeDockerAPI,
+		syncerr.StageCompose,
+		fmt.Sprintf("docker_api_incompatible: client %s is below daemon minimum %s", clientAPI, minServerAPI),
+	)
 }
 
 func dockerAPICompatible(clientAPI, minServerAPI string) (bool, error) {

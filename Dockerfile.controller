@@ -19,16 +19,35 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -ldflags "-s -w -X github.com/valthaide/conops-private/cmd/cps/cmd.Version=${VERSION}" \
       -o /app/cps ./cmd/cps
 
-# Final stage
+# Final stage. Docker CLI and Compose are pinned so the client API is at least
+# 1.44 and DOCKER_API_VERSION is not required.
 FROM alpine:3.19
 
 ARG TARGETARCH=amd64
+ARG DOCKER_VERSION=29.9.2
+ARG COMPOSE_VERSION=5.6.1
 
 WORKDIR /app
 
-# docker CLI, compose, git/ssh for monolith apply (SOPS removed; secrets via env files)
-RUN apk add --no-cache docker-cli docker-cli-compose git openssh-client ca-certificates \
- && mkdir -p /root/.ssh && chmod 700 /root/.ssh
+RUN apk add --no-cache git openssh-client ca-certificates curl tar \
+ && mkdir -p /root/.ssh && chmod 700 /root/.ssh \
+ && case "${TARGETARCH}" in \
+      amd64) arch=x86_64 ;; \
+      arm64) arch=aarch64 ;; \
+      *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_VERSION}.tgz" \
+      | tar -xz -C /usr/local/bin --strip-components=1 docker/docker \
+ && mkdir -p /usr/local/lib/docker/cli-plugins \
+ && curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
+      "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${arch}" \
+ && chmod 755 /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-compose \
+ && api="$(docker version --format '{{.Client.APIVersion}}' 2>/dev/null || true)" \
+ && echo "docker client API ${api}" \
+ && awk -v got="$api" -v min="1.44" 'BEGIN { split(got, a, "."); split(min, b, "."); if ((a[1]+0 > b[1]+0) || (a[1]+0 == b[1]+0 && a[2]+0 >= b[2]+0)) exit 0; exit 1 }' \
+      || { echo "docker client API ${api} is below 1.44" >&2; exit 1; } \
+ && docker compose version \
+ && apk del curl tar
 
 # Copy the binaries from builder. cps is on PATH for `cps version`.
 COPY --from=builder /app/conops .

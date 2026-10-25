@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.13
+
+### Features
+- **Docker client API 1.44.** The controller image ships Docker CLI 29.9.2 and Compose 5.6.1. `DOCKER_API_VERSION` is not required. If the client still cannot speak the daemon's minimum API, sync status is `failed` with reason `docker_api_incompatible` and running containers stay up.
+- **Dirty checkout.** A dirty worktree, including a file-mode-only difference, does not block sync. ConOps resets its own checkout to the requested revision.
+
 ## v1.0.12
 
 ### Features

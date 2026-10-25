@@ -750,15 +750,6 @@ func (e *ComposeExecutor) updateRepo(ctx context.Context, repoLog *strings.Build
 	return nil
 }
 
-func dirtyWorktreeMode() string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_DIRTY_WORKTREE"))) {
-	case "reset", "force", "discard":
-		return "reset"
-	default:
-		return "refuse"
-	}
-}
-
 func isDirtyWorktreeErr(err error) bool {
 	if err == nil {
 		return false
@@ -774,23 +765,13 @@ func (e *ComposeExecutor) handleDirtyWorktree(ctx context.Context, repoLog *stri
 	if strings.TrimSpace(out) == "" {
 		return nil
 	}
-	mode := dirtyWorktreeMode()
 	appHint := filepath.Base(filepath.Dir(repoDir))
-	if mode == "reset" {
-		appendLogLine(repoLog, "dirty worktree detected; CONOPS_DIRTY_WORKTREE=reset, hard reset will discard local changes")
-		metrics.ObserveDirtyWorktree(appHint, "reset")
-		if e.Logger != nil {
-			e.Logger.Warn("Dirty worktree; resetting", "app", appHint, "action", "reset")
-		}
-		return nil
-	}
-	msg := fmt.Sprintf("dirty worktree in %s (local changes present); refusing sync — set CONOPS_DIRTY_WORKTREE=reset to discard, or clean the checkout", repoDir)
-	appendLogLine(repoLog, msg)
-	metrics.ObserveDirtyWorktree(appHint, "refuse")
+	appendLogLine(repoLog, "dirty worktree; resetting checkout to the requested revision")
+	metrics.ObserveDirtyWorktree(appHint, "reset")
 	if e.Logger != nil {
-		e.Logger.Error("Dirty worktree; refusing sync", "app", appHint, "action", "refuse")
+		e.Logger.Info("Dirty worktree; resetting checkout to the requested revision", "app", appHint)
 	}
-	return syncerr.New(syncerr.CodeDirtyWorktree, syncerr.StageFetch, msg)
+	return nil
 }
 
 // prepareEnvOverrides creates a compose override file with environment variables.
@@ -1049,23 +1030,29 @@ func (e *ComposeExecutor) runCommand(
 	// probeComposeDaemonCompatibility passes (e.g. "compose ls" exits 0)
 	// but heavier operations like "compose pull" are rejected.
 	if err != nil && isDocker && outputLooksLikeDockerAPIMismatch(output) {
-		e.Logger.Warn(
-			"Docker compose API version mismatch detected, upgrading plugin and retrying",
-			"original_cmd", formatCommand(cmd, args),
-		)
+		if e.Logger != nil {
+			e.Logger.Warn(
+				"Docker compose API version mismatch detected, upgrading plugin and retrying",
+				"original_cmd", formatCommand(cmd, args),
+			)
+		}
 		if refreshErr := e.forceRefreshComposePlugin(ctx); refreshErr != nil {
-			e.Logger.Error("Compose plugin upgrade failed", "error", refreshErr)
-			return output, err
+			if e.Logger != nil {
+				e.Logger.Error("Compose plugin upgrade failed", "error", refreshErr)
+			}
+			return output, dockerAPIIncompatibleError("", "")
 		}
 		resolution, resErr := e.resolveDockerCommand(ctx)
 		if resErr != nil {
-			e.Logger.Error("Docker re-resolution failed after compose upgrade", "error", resErr)
-			return output, err
+			if e.Logger != nil {
+				e.Logger.Error("Docker re-resolution failed after compose upgrade", "error", resErr)
+			}
+			return output, dockerAPIIncompatibleError("", "")
 		}
 		if onOutput != nil {
 			onOutput("\n--- compose plugin upgraded, retrying command ---\n")
 		}
-		return e.execProcess(
+		retryOut, retryErr := e.execProcess(
 			ctx,
 			resolution.Path,
 			args,
@@ -1073,6 +1060,10 @@ func (e *ComposeExecutor) runCommand(
 			mergeCommandEnv(callerEnv, resolution.Env),
 			onOutput,
 		)
+		if retryErr != nil && outputLooksLikeDockerAPIMismatch(retryOut+retryErr.Error()) {
+			return retryOut, dockerAPIIncompatibleError("", "")
+		}
+		return retryOut, retryErr
 	}
 
 	return output, err
