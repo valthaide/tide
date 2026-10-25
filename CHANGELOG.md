@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.14
+
+### Fixes
+- **Image build without download.docker.com.** Docker CLI 27.5.1 (API 1.47) and Compose are copied from `docker:27-cli`, the image the platform runner already pulls. The git host does not need to reach download.docker.com.
+
 ## v1.0.13
 
 ### Features
