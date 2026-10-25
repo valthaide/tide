@@ -35,6 +35,9 @@ type Policy struct {
 	Build string `json:"build,omitempty" yaml:"build"`
 	// Vars are passed to docker compose for ${NAME} interpolation.
 	Vars map[string]string `json:"vars,omitempty" yaml:"vars"`
+	// Project is the compose project name. Empty keeps the name derived from the app id.
+	// Set it to the existing project to adopt its containers and volumes.
+	Project string `json:"project,omitempty" yaml:"project"`
 }
 
 // Normalize trims fields and defaults.
@@ -45,6 +48,7 @@ func (p *Policy) Normalize() {
 	p.HealthTimeout = strings.TrimSpace(p.HealthTimeout)
 	p.Build = NormalizeBuild(p.Build)
 	p.Vars = NormalizeVars(p.Vars)
+	p.Project = strings.TrimSpace(p.Project)
 	out := p.WatchFiles[:0]
 	for _, w := range p.WatchFiles {
 		w.Path = strings.TrimSpace(w.Path)

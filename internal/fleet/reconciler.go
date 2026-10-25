@@ -309,6 +309,7 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 			r.Logger.Info("Fleet removing app not in desired state", "name", app.Name, "id", app.ID)
 		}
 		if r.Cleaner != nil {
+			rememberProject(r.Cleaner, app)
 			_, _ = r.Cleaner.Destroy(ctx, app.ID, app.ComposePath, nil, app.Policy().PruneVolumes)
 		}
 		if err := r.Apps.Delete(app.ID); err != nil {
@@ -362,6 +363,7 @@ func (r *Reconciler) upsertApp(spec AppSpec, hostBuild string) error {
 	if !strings.EqualFold(existing.RepoURL, spec.RepoURL) ||
 		repoauth.NormalizeMethod(existing.RepoAuthMethod) != method {
 		if r.Cleaner != nil {
+			rememberProject(r.Cleaner, existing)
 			_, _ = r.Cleaner.Destroy(context.Background(), existing.ID, existing.ComposePath, nil, existing.Policy().PruneVolumes)
 		}
 		if err := r.Apps.Delete(existing.ID); err != nil {
@@ -460,6 +462,17 @@ func (r *Reconciler) syncFleetSecret(appID, method, secret string, spec AppSpec)
 	}
 }
 
+func rememberProject(cleaner RuntimeCleaner, app *api.App) {
+	if cleaner == nil || app == nil {
+		return
+	}
+	namer, ok := cleaner.(interface{ RememberProject(appID, project string) })
+	if !ok {
+		return
+	}
+	namer.RememberProject(app.ID, app.ComposeProject())
+}
+
 func policyJSONFromSpec(spec AppSpec, hostBuild string) string {
 	build := spec.Build
 	if build == "" {
@@ -471,6 +484,7 @@ func policyJSONFromSpec(spec AppSpec, hostBuild string) string {
 		HealthTimeout:          spec.HealthTimeout,
 		Build:                  build,
 		Vars:                   spec.Vars,
+		Project:                spec.Project,
 	}
 	for _, w := range spec.WatchFiles {
 		p.WatchFiles = append(p.WatchFiles, deploypolicy.WatchFile{

@@ -129,7 +129,7 @@ func (h *Handler) ListAppContainers(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	project := compose.ProjectNameForApp(app.ID)
+	project := app.ComposeProject()
 	runtimeContainers, err := h.Inspector.InspectProjectContainers(ctx, project)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -232,7 +232,7 @@ func (h *Handler) attachRunningImages(ctx context.Context, apps []*api.App) {
 		if app == nil {
 			continue
 		}
-		app.Images = byProject[compose.ProjectNameForApp(app.ID)]
+		app.Images = byProject[app.ComposeProject()]
 	}
 }
 
@@ -264,6 +264,9 @@ func (h *Handler) DeleteApp(w http.ResponseWriter, r *http.Request) {
 		cleanupCtx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 
+		if namer, ok := h.Cleaner.(interface{ RememberProject(appID, project string) }); ok {
+			namer.RememberProject(app.ID, app.ComposeProject())
+		}
 		if _, err := h.Cleaner.Destroy(cleanupCtx, app.ID, app.ComposePath, nil, app.Policy().PruneVolumes); err != nil {
 			if h.Logger != nil {
 				h.Logger.Error("Failed to cleanup app runtime", "id", app.ID, "error", err)
@@ -600,6 +603,7 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 	opts := compose.ApplyOptions{
 		Vars:      app.Policy().Vars,
 		BuildMode: app.Policy().EffectiveBuild(),
+		Project:   app.ComposeProject(),
 	}
 	var output string
 	if ia, ok := h.Applier.(imageApplier); ok {

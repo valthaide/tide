@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.15
+
+### Features
+- **Compose project name.** Fleet field `project` selects the compose project. Set it to the name of an already running stack to keep its containers and volumes. Empty still derives the name from the app id.
+- **Transient retry.** `pull_failed` and `registry_auth` are retried with a growing pause (15s, 30s, 1m, up to 5m) without a new git commit.
+- **One-shot services.** A service required with `condition: service_completed_successfully` may exit 0. A non-zero exit still fails the app.
+- **Restart loops.** A container without a healthcheck is not healthy just because it is up. Three or more restarts and an uptime under two minutes is a failure.
+
+### Fixes
+- **`cps get apps` IMAGES.** The column is filled from `docker ps`. A digest lookup that fails no longer hides the image. The project name used for the lookup is the fleet `project` when set.
+
+### Compose
+- The v1.0.14 image includes Docker Compose v2.33.0. Long `env_file` (`path`, `required`) is accepted. The Alpine plugin in v1.0.12 rejected that syntax.
+
 ## v1.0.14
 
 ### Fixes

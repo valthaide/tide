@@ -93,6 +93,30 @@ apps:
 	}
 }
 
+func TestParseProjectAdoptsExistingStack(t *testing.T) {
+	doc, err := ParseHostDocument([]byte(`
+host: dev.example
+apps:
+  - name: crm
+    repo_url: https://git.example/org/crm.git
+    project: crm-backend
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Apps[0].Project != "crm-backend" {
+		t.Fatalf("project %q", doc.Apps[0].Project)
+	}
+	app := &api.App{ID: "11111111-2222-3333-4444-555555555555", DeployPolicyJSON: policyJSONFromSpec(doc.Apps[0], "")}
+	if app.ComposeProject() != "crm-backend" {
+		t.Fatalf("compose project %s", app.ComposeProject())
+	}
+	bare := &api.App{ID: "app-1"}
+	if bare.ComposeProject() != "app-1" {
+		t.Fatalf("default project %s", bare.ComposeProject())
+	}
+}
+
 func TestParseVarsAndBuild(t *testing.T) {
 	doc, err := ParseHostDocument([]byte(`
 host: club.example

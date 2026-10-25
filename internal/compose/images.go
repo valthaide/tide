@@ -24,6 +24,8 @@ type ApplyOptions struct {
 	// NoBuild pulls and starts containers without docker build.
 	// Health rollback sets this so a failed tag is restored without a build.
 	NoBuild bool
+	// Project is the compose project name. Empty derives one from the app id.
+	Project string
 }
 
 // RunningImage is one compose service container that is actually running.
@@ -323,46 +325,22 @@ func dockerLogin(ctx context.Context, bin string, creds RegistryCreds, configDir
 }
 
 // RunningImages lists image and digest for running compose containers.
+// The list comes from docker ps. A digest inspect failure still returns the images.
 func (e *ComposeExecutor) RunningImages(ctx context.Context) ([]RunningImage, error) {
-	ids, err := e.listContainerIDsByFilter(ctx, []string{"label=com.docker.compose.project"}, e.runtimeWorkDir())
-	if err != nil || len(ids) == 0 {
+	obs, err := e.observeContainers(ctx)
+	if err != nil {
 		return nil, err
 	}
-	args := []string{
-		"inspect",
-		"--format",
-		`{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.oneoff"}}|{{.Config.Image}}|{{.Image}}|{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}|{{.State.Running}}`,
-	}
-	args = append(args, ids...)
-	output, err := e.runCommand(ctx, "docker", args, e.runtimeWorkDir(), nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("docker inspect failed: %w", err)
-	}
 	var images []RunningImage
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.Split(line, "|")
-		if len(parts) < 7 {
-			continue
-		}
-		project := strings.TrimSpace(parts[0])
-		service := strings.TrimSpace(parts[1])
-		oneoff := strings.TrimSpace(parts[2])
-		image := strings.TrimSpace(parts[3])
-		imageID := strings.TrimSpace(parts[4])
-		repoDigest := strings.TrimSpace(parts[5])
-		running := strings.TrimSpace(parts[6])
-		if project == "" || service == "" || strings.EqualFold(oneoff, "true") || running != "true" {
+	for _, c := range obs {
+		if c.Project == "" || c.Service == "" || c.OneOff || !c.Running {
 			continue
 		}
 		images = append(images, RunningImage{
-			Project: project,
-			Service: service,
-			Image:   image,
-			Digest:  digestLabel(repoDigest, imageID),
+			Project: c.Project,
+			Service: c.Service,
+			Image:   c.Image,
+			Digest:  digestLabel(c.RepoDigest, c.ImageID),
 		})
 	}
 	return images, nil

@@ -454,6 +454,21 @@ func (g *gateRuntime) Apply(ctx context.Context, appID, content string, env map[
 	return g.fakeRuntime.Apply(ctx, appID, content, env, repoURL, branch, composePath, commit, method, secret, progress)
 }
 
+func TestTransientBackoffGrows(t *testing.T) {
+	if transientBackoff(1) != 15*time.Second || transientBackoff(2) != 30*time.Second || transientBackoff(3) != time.Minute {
+		t.Fatalf("backoff %s %s %s", transientBackoff(1), transientBackoff(2), transientBackoff(3))
+	}
+	if transientBackoff(20) != 5*time.Minute {
+		t.Fatalf("cap %s", transientBackoff(20))
+	}
+	if !transientFailure(syncerr.New(syncerr.CodePullFailed, syncerr.StagePull, "pull_failed: img")) {
+		t.Fatal("pull_failed should retry")
+	}
+	if transientFailure(syncerr.New(syncerr.CodeBuildForbidden, syncerr.StageValidate, "build_forbidden: web")) {
+		t.Fatal("build_forbidden is not transient")
+	}
+}
+
 func TestRevisionToApplySkipsRejected(t *testing.T) {
 	if got := revisionToApply(&App{LastSeenCommit: "b", RejectedCommit: "b", LastHealthyCommit: "a"}); got != "a" {
 		t.Fatalf("got %q", got)

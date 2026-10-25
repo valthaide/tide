@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/deploypolicy"
 )
 
@@ -92,6 +93,18 @@ func (a *App) ApplyPolicy() {
 	a.WatchFiles = p.WatchFiles
 	a.PruneVolumes = p.PruneVolumes
 	a.HealthTimeout = p.HealthTimeout
+}
+
+// ComposeProject is the docker compose project name for this app.
+// A fleet `project` value adopts an existing stack. Otherwise the name is derived from the app id.
+func (a *App) ComposeProject() string {
+	if a == nil {
+		return compose.ProjectNameForApp("")
+	}
+	if p := strings.TrimSpace(a.Policy().Project); p != "" {
+		return compose.ProjectNameForApp(p)
+	}
+	return compose.ProjectNameForApp(a.ID)
 }
 
 // HealthTimeoutDuration parses the fleet health_timeout. Invalid or empty values use DefaultHealthTimeout.

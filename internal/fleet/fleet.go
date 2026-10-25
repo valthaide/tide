@@ -37,6 +37,7 @@ type AppSpec struct {
 	WatchFiles             []WatchFileSpec   `yaml:"watch_files"`
 	Build                  string            `yaml:"build"`
 	Vars                   map[string]string `yaml:"vars"`
+	Project                string            `yaml:"project"`
 }
 
 // WatchFileSpec is a path watched for content changes after sync.
@@ -144,6 +145,7 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 		}
 		doc.Apps[i].Build = deploypolicy.NormalizeBuild(doc.Apps[i].Build)
 		doc.Apps[i].Vars = deploypolicy.NormalizeVars(doc.Apps[i].Vars)
+		doc.Apps[i].Project = strings.TrimSpace(doc.Apps[i].Project)
 	}
 	return &doc, nil
 }

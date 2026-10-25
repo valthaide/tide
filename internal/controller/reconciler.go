@@ -145,6 +145,8 @@ type Reconciler struct {
 	sem              chan struct{}
 	inFlight         map[string]struct{}
 	nudge            chan struct{}
+	retryMu          sync.Mutex
+	retryAfter       map[string]transientRetry
 	wg               sync.WaitGroup
 	watchHashErrSeen map[string]string    // appID -> last error text (rate-limit logs)
 	ciWaitSince      map[string]time.Time // appID -> when CI wait started
@@ -163,6 +165,7 @@ func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger,
 		sem:              make(chan struct{}, cfg.MaxConcurrent),
 		inFlight:         make(map[string]struct{}),
 		nudge:            make(chan struct{}, 1),
+		retryAfter:       map[string]transientRetry{},
 		watchHashErrSeen: make(map[string]string),
 		ciWaitSince:      make(map[string]time.Time),
 	}
@@ -241,6 +244,7 @@ func (r *Reconciler) dispatch() {
 	}
 
 	apps := r.Registry.List()
+	r.noteProjects(apps)
 	r.publishRunningImages(apps)
 	for _, app := range apps {
 		if app.Suspended {
@@ -259,7 +263,7 @@ func (r *Reconciler) dispatch() {
 		}
 
 		if app.Status == "synced" && runtimeSnapshot != nil {
-			if reason := r.runtimeDriftReason(app.ID, runtimeSnapshot); reason != "" {
+			if reason := r.runtimeDriftReason(app.ComposeProject(), runtimeSnapshot); reason != "" {
 				r.requeuePending(app, reason)
 			}
 		}
@@ -286,6 +290,10 @@ func (r *Reconciler) dispatch() {
 				app.LastSeenCommit != "" && app.LastSeenCommit != app.LastSyncedCommit {
 				// fall through
 			} else if !r.Config.RetryErrors {
+				continue
+			}
+		case "failed":
+			if !r.transientReady(app) {
 				continue
 			}
 		default:
@@ -356,11 +364,13 @@ func (r *Reconciler) captureRuntimeSnapshot() (map[string]compose.ProjectRuntime
 	return r.Executor.SnapshotProjects(ctx)
 }
 
-func (r *Reconciler) runtimeDriftReason(appID string, snapshot map[string]compose.ProjectRuntimeState) string {
-	projectName := compose.ProjectNameForApp(appID)
-	state, ok := snapshot[projectName]
+func (r *Reconciler) runtimeDriftReason(project string, snapshot map[string]compose.ProjectRuntimeState) string {
+	state, ok := snapshot[project]
 	if !ok || state.ContainerCount == 0 {
 		return "runtime_missing"
+	}
+	if state.FlappingCount > 0 {
+		return "runtime_restarting"
 	}
 	if state.UnhealthyCount > 0 {
 		return "runtime_unhealthy"
@@ -506,6 +516,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	opts := compose.ApplyOptions{
 		Vars:      app.Policy().Vars,
 		BuildMode: app.Policy().EffectiveBuild(),
+		Project:   app.ComposeProject(),
 	}
 	if target != strings.TrimSpace(app.LastSeenCommit) {
 		opts.Vars = deploypolicy.DecodeVars(app.LastHealthyVars)
@@ -522,9 +533,19 @@ func (r *Reconciler) syncApp(app *App) error {
 		if declaredFailure(se) {
 			status = "failed"
 		}
+		attempt, wait := 0, time.Duration(0)
+		if transientFailure(se) {
+			attempt, wait = r.scheduleTransient(app.ID)
+		} else {
+			r.clearTransient(app.ID)
+		}
 		if r.Logger != nil {
 			if declaredFailure(se) {
-				r.Logger.Error("App sync failed", "app", app.Name, "reason", se.Message)
+				if attempt > 1 {
+					r.Logger.Info("Retrying transient failure", "app", app.Name, "reason", se.Message, "attempt", attempt, "next", wait.String())
+				} else {
+					r.Logger.Error("App sync failed", "app", app.Name, "reason", se.Message)
+				}
 			} else {
 				r.Logger.Error("Sync apply failed", "app_id", app.ID, "commit", target, "code", se.Code, "stage", se.Stage, "output", truncateOutput(output))
 			}
@@ -585,11 +606,89 @@ func (r *Reconciler) syncApp(app *App) error {
 	r.recordAppliedEnvHash(app)
 	r.recordAppliedWatchHash(app)
 	if syncErr == "" {
+		r.clearTransient(app.ID)
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
 		metrics.ObserveReconcileSuccess()
 		metrics.SetLastSyncTimestamp(app.Name)
 	}
 	return nil
+}
+
+type transientRetry struct {
+	attempts int
+	next     time.Time
+}
+
+func transientFailure(se *syncerr.Error) bool {
+	if se == nil {
+		return false
+	}
+	switch se.GetCode() {
+	case syncerr.CodePullFailed, syncerr.CodeRegistryAuth:
+		return true
+	default:
+		return false
+	}
+}
+
+func transientBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	wait := 15 * time.Second
+	for i := 1; i < attempt; i++ {
+		wait *= 2
+		if wait >= 5*time.Minute {
+			return 5 * time.Minute
+		}
+	}
+	return wait
+}
+
+func (r *Reconciler) transientReady(app *App) bool {
+	if app == nil || !transientFailure(&syncerr.Error{Code: app.LastSyncErrorCode}) {
+		return false
+	}
+	r.retryMu.Lock()
+	defer r.retryMu.Unlock()
+	st := r.retryAfter[app.ID]
+	return st.next.IsZero() || !time.Now().Before(st.next)
+}
+
+func (r *Reconciler) scheduleTransient(appID string) (int, time.Duration) {
+	r.retryMu.Lock()
+	defer r.retryMu.Unlock()
+	if r.retryAfter == nil {
+		r.retryAfter = map[string]transientRetry{}
+	}
+	st := r.retryAfter[appID]
+	st.attempts++
+	wait := transientBackoff(st.attempts)
+	st.next = time.Now().Add(wait)
+	r.retryAfter[appID] = st
+	return st.attempts, wait
+}
+
+func (r *Reconciler) clearTransient(appID string) {
+	r.retryMu.Lock()
+	delete(r.retryAfter, appID)
+	r.retryMu.Unlock()
+}
+
+func (r *Reconciler) noteProjects(apps []*App) {
+	type namer interface {
+		RememberProject(appID, project string)
+	}
+	rec, ok := r.Executor.(namer)
+	if !ok {
+		return
+	}
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		rec.RememberProject(app.ID, app.ComposeProject())
+	}
 }
 
 // revisionToApply returns the git commit to deploy.
@@ -638,7 +737,7 @@ func (r *Reconciler) confirmHealthy(ctx context.Context, app *App, revision stri
 	var sawState bool
 	var lastProbeErr error
 	for {
-		state, err := probe.ProjectHealth(hctx, app.ID)
+		state, err := probe.ProjectHealth(hctx, app.ComposeProject())
 		if err != nil {
 			if hctx.Err() == nil {
 				lastProbeErr = err
@@ -700,6 +799,7 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 					Vars:      prevVars,
 					BuildMode: deploypolicy.BuildForbidden,
 					NoBuild:   true,
+					Project:   app.ComposeProject(),
 				}, nil)
 				cancel()
 				if strings.TrimSpace(rbOut) != "" {
@@ -782,7 +882,7 @@ func (r *Reconciler) publishRunningImages(apps []*App) {
 		if name == "" {
 			name = app.ID
 		}
-		byProject[compose.ProjectNameForApp(app.ID)] = name
+		byProject[app.ComposeProject()] = name
 	}
 	samples := make([]metrics.ImageSample, 0, len(images))
 	for _, img := range images {

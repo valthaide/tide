@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,9 @@ type ComposeExecutor struct {
 	toolchainMu      sync.Mutex
 	dockerResolution dockerCommandResolution
 	resolutionAt     time.Time
+
+	projectsMu sync.Mutex
+	projects   map[string]string
 }
 
 // ProjectRuntimeState summarizes runtime state for one compose project.
@@ -43,7 +47,9 @@ type ProjectRuntimeState struct {
 	ExitedCount    int
 	UnhealthyCount int
 	StartingCount  int
-	// NotReady lists container names that are not ready (unhealthy, starting, or exited).
+	// FlappingCount is containers that stay up only by restarting.
+	FlappingCount int
+	// NotReady lists container names that are not ready (unhealthy, starting, exited, or flapping).
 	NotReady []string
 }
 
@@ -53,7 +59,7 @@ func (s ProjectRuntimeState) Ready() bool {
 	if s.ContainerCount == 0 {
 		return false
 	}
-	return s.RunningCount == s.ContainerCount && s.ExitedCount == 0 && s.UnhealthyCount == 0 && s.StartingCount == 0
+	return s.RunningCount == s.ContainerCount && s.ExitedCount == 0 && s.UnhealthyCount == 0 && s.StartingCount == 0 && s.FlappingCount == 0
 }
 
 // IsHealthy reports whether all tracked service containers are running and healthy.
@@ -61,7 +67,7 @@ func (s ProjectRuntimeState) IsHealthy() bool {
 	if s.ContainerCount == 0 {
 		return false
 	}
-	return s.RunningCount == s.ContainerCount && s.ExitedCount == 0 && s.UnhealthyCount == 0
+	return s.RunningCount == s.ContainerCount && s.ExitedCount == 0 && s.UnhealthyCount == 0 && s.FlappingCount == 0
 }
 
 // NewComposeExecutor creates a new executor.
@@ -228,7 +234,11 @@ func (e *ComposeExecutor) ApplyImages(
 		}
 	}
 	composeFileName := filepath.Base(composeFullPath)
-	projectName := composeProjectName(appID)
+	projectName := strings.TrimSpace(opts.Project)
+	if projectName == "" {
+		projectName = e.projectFor(appID)
+	}
+	e.RememberProject(appID, projectName)
 
 	// Prepare env var override files if needed (must use composeDir as base)
 	if len(envVars) > 0 {
@@ -339,7 +349,7 @@ func (e *ComposeExecutor) RestartService(ctx context.Context, appID, composePath
 	if service == "" {
 		return "", fmt.Errorf("service name is required for restart")
 	}
-	projectName := composeProjectName(appID)
+	projectName := e.projectFor(appID)
 	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
 	if err != nil {
 		return "", err
@@ -387,7 +397,7 @@ func (e *ComposeExecutor) HTTPReload(ctx context.Context, reloadURL string) erro
 // Images that no remaining container references are removed.
 // Named volumes are removed only when pruneVolumes is true.
 func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string, envVars map[string]string, pruneVolumes bool) (string, error) {
-	projectName := composeProjectName(appID)
+	projectName := e.projectFor(appID)
 	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
 	if err != nil {
 		return "", fmt.Errorf("resolve app dir failed: %w", err)
@@ -539,82 +549,53 @@ func (e *ComposeExecutor) removeUnusedImages(ctx context.Context, appID string, 
 	return strings.Join(outputs, "\n")
 }
 
-// ProjectHealth returns runtime health for one app's compose project.
-func (e *ComposeExecutor) ProjectHealth(ctx context.Context, appID string) (ProjectRuntimeState, error) {
+// RememberProject records the compose project name for an app id.
+func (e *ComposeExecutor) RememberProject(appID, project string) {
+	appID = strings.TrimSpace(appID)
+	project = strings.TrimSpace(project)
+	if e == nil || appID == "" || project == "" {
+		return
+	}
+	e.projectsMu.Lock()
+	defer e.projectsMu.Unlock()
+	if e.projects == nil {
+		e.projects = map[string]string{}
+	}
+	e.projects[appID] = project
+}
+
+func (e *ComposeExecutor) projectFor(appID string) string {
+	if e != nil {
+		e.projectsMu.Lock()
+		project := ""
+		if e.projects != nil {
+			project = e.projects[appID]
+		}
+		e.projectsMu.Unlock()
+		if project != "" {
+			return project
+		}
+	}
+	return composeProjectName(appID)
+}
+
+// ProjectHealth returns runtime health for one compose project.
+// project is the compose project name, not the app id.
+func (e *ComposeExecutor) ProjectHealth(ctx context.Context, project string) (ProjectRuntimeState, error) {
 	snap, err := e.SnapshotProjects(ctx)
 	if err != nil {
 		return ProjectRuntimeState{}, err
 	}
-	return snap[ProjectNameForApp(appID)], nil
+	return snap[strings.TrimSpace(project)], nil
 }
 
 // SnapshotProjects captures compose runtime status from Docker for all projects.
 func (e *ComposeExecutor) SnapshotProjects(ctx context.Context) (map[string]ProjectRuntimeState, error) {
-	output, err := e.runCommand(
-		ctx,
-		"docker",
-		[]string{
-			"ps",
-			"-a",
-			"--format",
-			`{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.oneoff"}}|{{.Status}}|{{.Names}}`,
-		},
-		e.runtimeWorkDir(),
-		nil,
-		nil,
-	)
+	obs, err := e.observeContainers(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("docker ps failed: %w", err)
+		return nil, err
 	}
-
-	snapshot := make(map[string]ProjectRuntimeState)
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) < 3 {
-			continue
-		}
-
-		projectName := strings.TrimSpace(parts[0])
-		oneOff := strings.TrimSpace(parts[1])
-		status := strings.TrimSpace(parts[2])
-		name := ""
-		if len(parts) == 4 {
-			name = strings.TrimSpace(parts[3])
-		}
-		if projectName == "" || strings.EqualFold(oneOff, "true") || oneOff == "1" {
-			continue
-		}
-
-		state := snapshot[projectName]
-		state.ContainerCount++
-		running := dockerStatusIsRunning(status)
-		if running {
-			state.RunningCount++
-		} else {
-			state.ExitedCount++
-		}
-		lowerStatus := strings.ToLower(status)
-		unhealthy := strings.Contains(lowerStatus, "(unhealthy)")
-		starting := strings.Contains(lowerStatus, "(health: starting)") || strings.Contains(lowerStatus, "(starting)")
-		if unhealthy {
-			state.UnhealthyCount++
-		}
-		if starting {
-			state.StartingCount++
-		}
-		if name != "" && (unhealthy || starting || !running) {
-			state.NotReady = append(state.NotReady, name)
-		}
-		snapshot[projectName] = state
-	}
-
-	return snapshot, nil
+	return foldObservations(obs, time.Now()), nil
 }
 
 func (e *ComposeExecutor) prepareRepo(ctx context.Context, appDir, repoDir, repoURL, branch, commitHash, repoAuthMethod string, repoSecret []byte) (string, error) {
@@ -1378,6 +1359,127 @@ func (e *ComposeExecutor) InspectProjectContainers(ctx context.Context, projectN
 // ProjectNameForApp returns the deterministic compose project name for an app ID.
 func ProjectNameForApp(appID string) string {
 	return composeProjectName(appID)
+}
+
+func (e *ComposeExecutor) observeContainers(ctx context.Context) ([]containerObs, error) {
+	output, err := e.runCommand(
+		ctx,
+		"docker",
+		[]string{
+			"ps", "-a", "--no-trunc",
+			"--format",
+			`{{.ID}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.oneoff"}}|{{.Image}}|{{.Status}}|{{.Names}}`,
+		},
+		e.runtimeWorkDir(),
+		nil,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("docker ps failed: %w", err)
+	}
+	var obs []containerObs
+	ids := make([]string, 0)
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 7)
+		if len(parts) < 6 {
+			continue
+		}
+		c := containerObs{
+			ID:       strings.TrimSpace(parts[0]),
+			Project:  strings.TrimSpace(parts[1]),
+			Service:  strings.TrimSpace(parts[2]),
+			OneOff:   strings.EqualFold(strings.TrimSpace(parts[3]), "true") || strings.TrimSpace(parts[3]) == "1",
+			Image:    strings.TrimSpace(parts[4]),
+			PSStatus: strings.TrimSpace(parts[5]),
+		}
+		if len(parts) == 7 {
+			c.Name = strings.TrimSpace(parts[6])
+		}
+		c.Running = dockerStatusIsRunning(c.PSStatus)
+		if strings.HasPrefix(strings.ToLower(c.PSStatus), "exited (0)") {
+			c.State = "exited"
+			c.ExitCode = 0
+		}
+		if c.Project == "" {
+			continue
+		}
+		obs = append(obs, c)
+		if c.ID != "" {
+			ids = append(ids, c.ID)
+		}
+	}
+	e.enrichObservations(ctx, ids, obs)
+	return obs, nil
+}
+
+func (e *ComposeExecutor) enrichObservations(ctx context.Context, ids []string, obs []containerObs) {
+	if len(ids) == 0 {
+		return
+	}
+	args := []string{
+		"inspect", "--format",
+		`{{.Id}}|{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}|{{.State.StartedAt}}|{{.HostConfig.RestartPolicy.Name}}|{{index .Config.Labels "com.docker.compose.depends_on"}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}|{{.Image}}`,
+	}
+	args = append(args, ids...)
+	output, err := e.runCommand(ctx, "docker", args, e.runtimeWorkDir(), nil, nil)
+	if err != nil {
+		return
+	}
+	byID := map[string]int{}
+	for i := range obs {
+		byID[containerKey(obs[i].ID)] = i
+	}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 10)
+		if len(parts) < 5 {
+			continue
+		}
+		idx, ok := byID[containerKey(parts[0])]
+		if !ok {
+			continue
+		}
+		obs[idx].HasInspect = true
+		obs[idx].State = strings.TrimSpace(parts[1])
+		if n, convErr := strconv.Atoi(strings.TrimSpace(parts[2])); convErr == nil {
+			obs[idx].ExitCode = n
+		}
+		if n, convErr := strconv.Atoi(strings.TrimSpace(parts[3])); convErr == nil {
+			obs[idx].RestartCount = n
+		}
+		if t, convErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(parts[4])); convErr == nil {
+			obs[idx].StartedAt = t
+		}
+		if len(parts) > 5 {
+			obs[idx].RestartPolicy = strings.TrimSpace(parts[5])
+		}
+		if len(parts) > 6 {
+			obs[idx].DependsOn = strings.TrimSpace(parts[6])
+		}
+		if len(parts) > 7 {
+			obs[idx].Health = strings.TrimSpace(parts[7])
+		}
+		if len(parts) > 8 {
+			obs[idx].RepoDigest = strings.TrimSpace(parts[8])
+		}
+		if len(parts) > 9 {
+			obs[idx].ImageID = strings.TrimSpace(parts[9])
+		}
+		obs[idx].Running = obs[idx].State == "running" || dockerStatusIsRunning(obs[idx].PSStatus)
+	}
+}
+
+func containerKey(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.TrimPrefix(id, "sha256:")
+	return id
 }
 
 func dockerStatusIsRunning(status string) bool {
