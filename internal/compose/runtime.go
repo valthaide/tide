@@ -205,7 +205,11 @@ func foldObservations(obs []containerObs, now time.Time) map[string]ProjectRunti
 		}
 		switch {
 		case isOneshot && !c.Running && c.ExitCode == 0 && (c.State == "exited" || strings.HasPrefix(strings.ToLower(c.PSStatus), "exited (0)")):
-			// finished one-shot; do not count it as a container that must stay up
+			service := c.Service
+			if service == "" {
+				service = name
+			}
+			state.Oneshot = service + " completed exit 0"
 		case isOneshot && !c.Running && c.HasInspect && c.ExitCode != 0:
 			state.ContainerCount++
 			state.UnhealthyCount++
@@ -216,11 +220,19 @@ func foldObservations(obs []containerObs, now time.Time) map[string]ProjectRunti
 					service = name
 				}
 				state.Failure = fmt.Sprintf("oneshot_failed: %s exit %d", service, c.ExitCode)
+				state.Oneshot = fmt.Sprintf("%s exit %d", service, c.ExitCode)
 			}
 		case isOneshot && (c.Running || c.State == "created" || c.State == "restarting"):
 			state.ContainerCount++
 			state.StartingCount++
 			state.NotReady = append(state.NotReady, name)
+			service := c.Service
+			if service == "" {
+				service = name
+			}
+			if state.Oneshot == "" {
+				state.Oneshot = service + " running"
+			}
 		case flapping(c, now):
 			state.ContainerCount++
 			state.FlappingCount++

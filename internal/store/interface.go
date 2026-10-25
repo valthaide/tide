@@ -44,6 +44,8 @@ type Store interface {
 	UpdateAppSyncProgress(ctx context.Context, id string, lastSyncAt time.Time, syncOutput string) error
 	Ping(ctx context.Context) error
 	Close()
+	InsertAppRevision(ctx context.Context, rev api.Revision) error
+	ListAppRevisions(ctx context.Context, appID string, limit int) ([]api.Revision, error)
 }
 
 // AppCredential stores encrypted app-level credentials.

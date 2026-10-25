@@ -109,6 +109,19 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 
+	if _, err := db.Exec(`
+	CREATE TABLE IF NOT EXISTS app_revisions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		app_id TEXT NOT NULL,
+		git_sha TEXT NOT NULL,
+		vars_json TEXT NOT NULL DEFAULT '',
+		fleet_sha TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL
+	);
+	`); err != nil {
+		return nil, fmt.Errorf("failed to create app_revisions table: %w", err)
+	}
+
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (
 		app_id TEXT PRIMARY KEY,

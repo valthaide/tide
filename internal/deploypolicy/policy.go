@@ -38,6 +38,17 @@ type Policy struct {
 	// Project is the compose project name. Empty keeps the name derived from the app id.
 	// Set it to the existing project to adopt its containers and volumes.
 	Project string `json:"project,omitempty" yaml:"project"`
+	// SyncTimeout overrides the controller sync timeout for this app. Empty uses the controller default.
+	SyncTimeout string `json:"sync_timeout,omitempty" yaml:"sync_timeout"`
+	// PullTimeout is how long a pull may go without output before it is cancelled.
+	PullTimeout string `json:"pull_timeout,omitempty" yaml:"pull_timeout"`
+	// OneshotTimeout is how long one-shot services may run before they are stopped.
+	OneshotTimeout string `json:"oneshot_timeout,omitempty" yaml:"oneshot_timeout"`
+	// RequireDigest rejects images that are not pinned with @sha256. Default false.
+	RequireDigest bool `json:"require_digest,omitempty" yaml:"require_digest"`
+	// PublicVars names variables that may appear in status and metrics.
+	// Keys ending in _TAG or _IMAGE are public unless they look like secrets.
+	PublicVars []string `json:"public_vars,omitempty" yaml:"public_vars"`
 }
 
 // Normalize trims fields and defaults.

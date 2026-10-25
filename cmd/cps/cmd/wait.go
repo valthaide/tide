@@ -10,8 +10,11 @@ import (
 )
 
 var (
-	waitTimeout  time.Duration
-	waitInterval time.Duration
+	waitTimeout   time.Duration
+	waitInterval  time.Duration
+	waitDigest    string
+	waitRevision  string
+	waitVarChecks []string
 )
 
 var waitCmd = &cobra.Command{
@@ -36,6 +39,14 @@ var waitAppCmd = &cobra.Command{
 			}
 			containers, cerr := listContainers(client, app.ID)
 			ready, reason := appReady(*app, containers, cerr)
+			if ready {
+				if reason = waitMatches(*app); reason != "" {
+					ready = false
+				}
+			}
+			if app.Status == "failed" || strings.Contains(app.Status, "rolled_back") {
+				return fmt.Errorf("%s %s: %s", app.Name, app.Status, app.LastSyncError)
+			}
 			if ready {
 				fmt.Printf("%s is ready\n", app.Name)
 				return nil
@@ -80,9 +91,36 @@ func appReady(app api.App, containers []api.Container, containersErr error) (boo
 	return true, ""
 }
 
+func waitMatches(app api.App) string {
+	if waitRevision != "" && app.LastSyncedCommit != waitRevision && !strings.HasPrefix(app.LastSyncedCommit, waitRevision) {
+		return "revision mismatch"
+	}
+	if waitDigest != "" {
+		found := false
+		for _, img := range app.Images {
+			if img.Digest == waitDigest || strings.Contains(img.Image, waitDigest) || strings.Contains(img.Digest, waitDigest) {
+				found = true
+			}
+		}
+		if !found {
+			return "digest mismatch"
+		}
+	}
+	for _, pair := range waitVarChecks {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok || app.PublicVars[key] != value {
+			return "vars mismatch " + pair
+		}
+	}
+	return ""
+}
+
 func init() {
 	waitAppCmd.Flags().DurationVar(&waitTimeout, "timeout", 5*time.Minute, "Maximum wait time")
 	waitAppCmd.Flags().DurationVar(&waitInterval, "interval", 3*time.Second, "Poll interval")
+	waitAppCmd.Flags().StringVar(&waitDigest, "digest", "", "Require a running image digest")
+	waitAppCmd.Flags().StringVar(&waitRevision, "revision", "", "Require the synced git revision")
+	waitAppCmd.Flags().StringArrayVar(&waitVarChecks, "vars", nil, "Require a public variable KEY=value")
 	waitCmd.AddCommand(waitAppCmd)
 	rootCmd.AddCommand(waitCmd)
 }

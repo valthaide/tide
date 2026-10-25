@@ -183,6 +183,48 @@ var (
 		Name:      "app_image_info",
 		Help:      "Running compose image and digest (value always 1).",
 	}, []string{"app", "service", "image", "digest"})
+
+	policyViolation = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_policy_violation",
+		Help:      "Compose policy violation (1=present).",
+	}, []string{"app", "rule"})
+
+	imageDrift = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_image_drift",
+		Help:      "Running digest differs from the pinned digest (1=drift).",
+	}, []string{"app", "service"})
+
+	fleetRevisionInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "fleet_revision_info",
+		Help:      "Fleet checkout revision (value always 1).",
+	}, []string{"sha"})
+
+	appVarsInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_vars_info",
+		Help:      "Public fleet variables (value always 1). Secrets are never exported.",
+	}, []string{"app", "name", "value"})
+
+	SyncQueueLength = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "sync_queue_length",
+		Help:      "Apps waiting to sync.",
+	})
+
+	SyncRunning = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "sync_running",
+		Help:      "Apps currently syncing.",
+	})
+
+	PullRunning = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "pull_running",
+		Help:      "Image pulls currently running.",
+	})
 )
 
 // ImageSample is one running service image reported by the reconciler.
@@ -215,6 +257,71 @@ func SetAppImages(samples []ImageSample) {
 	}
 }
 
+func SetPolicyViolation(app, rule string, value float64) {
+	app = strings.TrimSpace(app)
+	rule = strings.TrimSpace(rule)
+	if app == "" || rule == "" {
+		return
+	}
+	policyViolation.WithLabelValues(app, rule).Set(value)
+}
+
+func SetImageDrift(samples []ImageSample) {
+	imageMu.Lock()
+	defer imageMu.Unlock()
+	imageDrift.Reset()
+	for _, sample := range samples {
+		if sample.App == "" || sample.Service == "" {
+			continue
+		}
+		imageDrift.WithLabelValues(sample.App, sample.Service).Set(1)
+	}
+}
+
+var fleetMu sync.Mutex
+var fleetSHA string
+
+func SetFleetRevision(sha string) {
+	sha = strings.TrimSpace(sha)
+	fleetMu.Lock()
+	fleetSHA = sha
+	fleetMu.Unlock()
+	fleetRevisionInfo.Reset()
+	if sha != "" {
+		fleetRevisionInfo.WithLabelValues(sha).Set(1)
+	}
+}
+
+func FleetSHA() string {
+	fleetMu.Lock()
+	defer fleetMu.Unlock()
+	return fleetSHA
+}
+
+func SetPublicVars(samples []VarSample) {
+	imageMu.Lock()
+	defer imageMu.Unlock()
+	appVarsInfo.Reset()
+	for _, sample := range samples {
+		if sample.App == "" || sample.Name == "" {
+			continue
+		}
+		appVarsInfo.WithLabelValues(sample.App, sample.Name, sample.Value).Set(1)
+	}
+}
+
+func SetSyncActivity(queue, running int) {
+	SyncQueueLength.Set(float64(queue))
+	SyncRunning.Set(float64(running))
+}
+
+// VarSample is one public variable exported to metrics.
+type VarSample struct {
+	App   string
+	Name  string
+	Value string
+}
+
 // Register registers process counters/histograms and an apps collector.
 func Register(registry prometheus.Registerer, lister AppLister) error {
 	collectors := []prometheus.Collector{
@@ -242,6 +349,13 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		envHashApplied,
 		syncErrorInfo,
 		appImageInfo,
+		policyViolation,
+		imageDrift,
+		fleetRevisionInfo,
+		appVarsInfo,
+		SyncQueueLength,
+		SyncRunning,
+		PullRunning,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {

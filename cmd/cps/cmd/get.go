@@ -24,6 +24,18 @@ var getAppsCmd = &cobra.Command{
 		if outputFormat() == "json" {
 			return printJSON(apps)
 		}
+		if outputFormat() == "wide" {
+			printAppsTable(apps)
+			for _, app := range apps {
+				if app.Oneshot != "" {
+					fmt.Printf("  %s oneshot %s\n", app.Name, app.Oneshot)
+				}
+				for _, img := range app.Images {
+					fmt.Printf("  %s %s %s %s\n", app.Name, img.Service, img.Image, orDash(img.Digest))
+				}
+			}
+			return nil
+		}
 		printAppsTable(apps)
 		return nil
 	},

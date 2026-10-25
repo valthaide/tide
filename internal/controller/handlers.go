@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/valthaide/conops-private/internal/cigate"
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/conops-private/internal/fleetcheck"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/syncerr"
@@ -197,7 +199,7 @@ func (h *Handler) RegisterApp(w http.ResponseWriter, r *http.Request) {
 // ListApps handles GET /api/v1/apps
 func (h *Handler) ListApps(w http.ResponseWriter, r *http.Request) {
 	apps := h.Registry.List()
-	h.attachRunningImages(r.Context(), apps)
+	h.decorate(r.Context(), apps)
 	json.NewEncoder(w).Encode(api.APIResponse{
 		Data: apps,
 	})
@@ -236,6 +238,90 @@ func (h *Handler) attachRunningImages(ctx context.Context, apps []*api.App) {
 	}
 }
 
+func (h *Handler) decorate(ctx context.Context, apps []*api.App) {
+	h.attachRunningImages(ctx, apps)
+	h.attachOneshot(ctx, apps)
+	for _, app := range apps {
+		annotatePublic(app)
+	}
+}
+
+func annotatePublic(app *api.App) {
+	if app == nil {
+		return
+	}
+	policy := app.Policy()
+	public := map[string]string{}
+	var tags []string
+	for key, value := range policy.Vars {
+		if !fleetcheck.PublicVar(key, policy.PublicVars) {
+			continue
+		}
+		public[key] = value
+		upper := strings.ToUpper(key)
+		if strings.HasSuffix(upper, "_TAG") || strings.HasSuffix(upper, "_IMAGE") {
+			tags = append(tags, key+"="+value)
+		}
+	}
+	if len(public) > 0 {
+		app.PublicVars = public
+	}
+	if len(tags) > 0 {
+		sortStrings(tags)
+		app.Tags = strings.Join(tags, ",")
+	}
+}
+
+func sortStrings(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
+}
+
+func (h *Handler) attachOneshot(ctx context.Context, apps []*api.App) {
+	type snapper interface {
+		SnapshotProjects(ctx context.Context) (map[string]compose.ProjectRuntimeState, error)
+	}
+	source, ok := h.Inspector.(snapper)
+	if !ok || source == nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	states, err := source.SnapshotProjects(sctx)
+	if err != nil {
+		return
+	}
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		app.Oneshot = states[app.ComposeProject()].Oneshot
+	}
+}
+
+func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, err := h.Registry.Get(id); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	revs, err := h.Registry.ListRevisions(id, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(api.APIResponse{Data: revs})
+}
+
 // GetApp handles GET /api/v1/apps/{id}
 func (h *Handler) GetApp(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -243,6 +329,19 @@ func (h *Handler) GetApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
+	}
+	h.decorate(r.Context(), []*api.App{app})
+	if lister, ok := h.Inspector.(interface {
+		ProjectVolumes(ctx context.Context, project string) ([]compose.VolumeInfo, error)
+	}); ok && lister != nil {
+		vctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		vols, volErr := lister.ProjectVolumes(vctx, app.ComposeProject())
+		cancel()
+		if volErr == nil {
+			for _, vol := range vols {
+				app.Volumes = append(app.Volumes, api.VolumeRef{Name: vol.Name, Containers: vol.Containers})
+			}
+		}
 	}
 
 	json.NewEncoder(w).Encode(api.APIResponse{

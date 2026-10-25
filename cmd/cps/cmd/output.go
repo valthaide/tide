@@ -104,7 +104,7 @@ func suspendedValue(app api.App) string {
 
 func printAppsTable(apps []api.App) {
 	color := colorEnabled()
-	headers := []string{"NAME", "READY", "STATUS", "SUSPENDED", "DRIFT", "REVISION", "LAST SYNC", "MESSAGE", "IMAGES"}
+	headers := []string{"NAME", "READY", "STATUS", "SUSPENDED", "DRIFT", "REVISION", "LAST SYNC", "MESSAGE", "IMAGES", "TAGS"}
 	rows := make([][]string, 0, len(apps))
 	for _, app := range apps {
 		rev := shortCommit(app.LastSyncedCommit)
@@ -124,6 +124,7 @@ func printAppsTable(apps []api.App) {
 			relativeTime(app.LastSyncAt),
 			messageFor(app),
 			imagesValue(app),
+			orDash(app.Tags),
 		})
 	}
 	printAlignedTable(headers, rows,

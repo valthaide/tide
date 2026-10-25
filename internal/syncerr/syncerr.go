@@ -24,6 +24,11 @@ const (
 	CodeRegistryAuth   = "registry_auth"
 	CodePullFailed     = "pull_failed"
 	CodeOneshotFailed  = "oneshot_failed"
+	CodeOneshotTimeout = "oneshot_timeout"
+	CodeValidation     = "validation_failed"
+	CodePortConflict   = "port_conflict"
+	CodeVolumeMissing  = "volume_missing"
+	CodeDigestRequired = "digest_required"
 	CodeUnsetVar       = "unset_var"
 	CodeDockerAPI      = "docker_api_incompatible"
 	CodeUnknown        = "unknown"
@@ -189,6 +194,18 @@ func Classify(err error) *Error {
 		return New(CodePullFailed, StagePull, msg)
 	case strings.Contains(lower, "oneshot_failed"):
 		return New(CodeOneshotFailed, StageCompose, msg)
+	case strings.Contains(lower, "oneshot_timeout"):
+		return New(CodeOneshotTimeout, StageCompose, msg)
+	case strings.Contains(lower, "project_conflict") || strings.Contains(lower, "project_invalid") || strings.Contains(lower, "name_conflict") || strings.Contains(lower, "validation_failed"):
+		return New(CodeValidation, StageValidate, msg)
+	case strings.Contains(lower, "port_conflict"):
+		return New(CodePortConflict, StageValidate, msg)
+	case strings.Contains(lower, "volume_missing"):
+		return New(CodeVolumeMissing, StageValidate, msg)
+	case strings.Contains(lower, "digest_required"):
+		return New(CodeDigestRequired, StageValidate, msg)
+	case strings.Contains(lower, "policy_violation"):
+		return New(CodeValidation, StageValidate, msg)
 	case strings.Contains(lower, "unset_var"):
 		return New(CodeUnsetVar, StageValidate, msg)
 	case strings.Contains(lower, "docker_api_incompatible") ||

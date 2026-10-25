@@ -22,6 +22,9 @@ var rootCmd = &cobra.Command{
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		if coded, ok := err.(interface{ ExitCode() int }); ok && coded.ExitCode() != 0 {
+			os.Exit(coded.ExitCode())
+		}
 		os.Exit(1)
 	}
 }
@@ -35,7 +38,7 @@ func init() {
 	rootCmd.PersistentFlags().String("config", "", "Path to cps config file (default ~/.conops/config)")
 	rootCmd.PersistentFlags().Bool("insecure", false, "Skip TLS certificate verification")
 	rootCmd.PersistentFlags().String("certificate-authority", "", "Path to CA certificate for HTTPS")
-	rootCmd.PersistentFlags().StringP("output", "o", "table", "Output format: table|json")
+	rootCmd.PersistentFlags().StringP("output", "o", "table", "Output format: table|wide|json")
 	_ = viper.BindPFlag("url", rootCmd.PersistentFlags().Lookup("url"))
 	_ = viper.BindPFlag("token", rootCmd.PersistentFlags().Lookup("token"))
 	_ = viper.BindPFlag("context", rootCmd.PersistentFlags().Lookup("context"))

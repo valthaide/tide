@@ -623,6 +623,26 @@ func (r *Registry) UpdateSyncProgress(id string, lastSyncAt time.Time, syncOutpu
 	return r.store.UpdateAppSyncProgress(context.Background(), id, lastSyncAt, syncOutput)
 }
 
+func (r *Registry) RecordRevision(id, gitSHA, varsJSON, fleetSHA string) error {
+	if r == nil || r.store == nil || strings.TrimSpace(id) == "" || strings.TrimSpace(gitSHA) == "" {
+		return nil
+	}
+	return r.store.InsertAppRevision(context.Background(), api.Revision{
+		AppID:     id,
+		GitSHA:    gitSHA,
+		VarsJSON:  varsJSON,
+		FleetSHA:  fleetSHA,
+		CreatedAt: time.Now(),
+	})
+}
+
+func (r *Registry) ListRevisions(id string, limit int) ([]api.Revision, error) {
+	if r == nil || r.store == nil {
+		return nil, fmt.Errorf("app not found")
+	}
+	return r.store.ListAppRevisions(context.Background(), id, limit)
+}
+
 func zeroBytes(value []byte) {
 	for i := range value {
 		value[i] = 0

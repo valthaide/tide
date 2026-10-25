@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.0-rc1
+
+### Features
+- **Host checks before pull.** Duplicate compose project names fail both apps with `validation_failed: project_conflict` and do not pull. A published port owned by another app or a foreign container is `port_conflict`. An explicit `project` may contain `_` and `-`. Empty, uppercase, and names longer than 63 characters are rejected.
+- **Fair sync and a separate pull limit.** Apps are started in rotating name order. `CONOPS_PULL_PARALLEL`, when set, limits only `compose pull`. Unset keeps the v1.0.17 behaviour: pulls share `CONOPS_SYNC_PARALLEL`.
+- **Pull idle timeout.** `pull_timeout` (default: the app sync timeout) cancels a pull only after that long with no output. `up` and health stay on the wall-clock `sync_timeout`.
+- **Digest pin.** `repo:tag@sha256:…` is accepted. A missing or mismatched manifest is `pull_failed: not_found|digest_mismatch`. `require_digest: true` rejects an image without `@sha256:` before pull. A pin that is already local skips pull. Drift is the gauge `conops_app_image_drift`, not a new status.
+- **One-shot order.** After `up -d`, ConOps waits for `service_completed_successfully` services before the health timeout. `oneshot_timeout` defaults to 10m and then stops that container. Label `com.conops.oneshot=rerun` recreates only that service. Non-zero exit stays `oneshot_failed: <service> exit N`.
+- **Volumes and binds.** `docker compose down` does not pass `--volumes` unless `prune_volumes: true`. A missing external volume is `volume_missing` before pull. `CONOPS_ALLOWED_BIND_PREFIXES` restricts absolute binds; empty allows every path, as in v1.0.17.
+- **Status.** `cps get apps` adds TAGS for public vars (`public_vars`, plus keys ending in `_TAG` or `_IMAGE`). `cps get apps -o wide` adds per-service digest. `cps wait app` accepts `--digest`, `--revision`, and `--vars KEY=value`. `GET /api/v1/apps/{id}/history` and `cps history app` show the last successful revisions.
+- **`cps validate`.** Checks a host file with no controller and no docker daemon. `--with-compose` runs `docker compose config`. Exit 0 is ok, 1 is a validation error, 2 is an internal error.
+
+### Upgrade from v1.0.17
+- New fleet fields are optional: `schema`, `sync_timeout`, `pull_timeout`, `oneshot_timeout`, `require_digest`, `public_vars`. Omitted fields keep v1.0.17 behaviour.
+- `CONOPS_FLEET_STRICT` defaults to `warn`. Unknown YAML fields are logged and the file is still applied. `enforce` rejects the file and does not touch running containers.
+- `CONOPS_POLICY_MODE` defaults to `off`. `container_name` is unchanged until `warn` or `enforce`.
+- Revision history is a new `app_revisions` table. Columns of `apps` are unchanged, so the controller binary can be rolled back to v1.0.17. The old binary ignores the new table.
+
 ## v1.0.17
 
 ### Fixes

@@ -15,6 +15,7 @@ import (
 	"github.com/valthaide/conops-private/internal/cigate"
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/conops-private/internal/fleetcheck"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/syncerr"
 )
@@ -47,6 +48,7 @@ type ReconcilerConfig struct {
 	SyncTimeout   time.Duration
 	RetryErrors   bool
 	MaxConcurrent int
+	PullParallel  int
 }
 
 // LoadReconcilerConfigFromEnv loads reconciler config from environment variables.
@@ -90,11 +92,21 @@ func LoadReconcilerConfigFromEnv() (ReconcilerConfig, error) {
 		maxConcurrent = n
 	}
 
+	pullParallel := 0
+	if value := strings.TrimSpace(os.Getenv("CONOPS_PULL_PARALLEL")); value != "" {
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_PULL_PARALLEL: %s", value)
+		}
+		pullParallel = n
+	}
+
 	return ReconcilerConfig{
 		Interval:      interval,
 		SyncTimeout:   timeout,
 		RetryErrors:   retryErrors,
 		MaxConcurrent: maxConcurrent,
+		PullParallel:  pullParallel,
 	}, nil
 }
 
@@ -143,6 +155,8 @@ type Reconciler struct {
 	mu               sync.Mutex
 	scheduling       bool
 	sem              chan struct{}
+	pullSem          chan struct{}
+	dispatchCursor   int
 	inFlight         map[string]struct{}
 	nudge            chan struct{}
 	retryMu          sync.Mutex
@@ -244,10 +258,31 @@ func (r *Reconciler) dispatch() {
 	}
 
 	apps := r.Registry.List()
+	sort.SliceStable(apps, func(i, j int) bool {
+		return apps[i].Name < apps[j].Name
+	})
+	if n := len(apps); n > 1 {
+		r.mu.Lock()
+		start := r.dispatchCursor % n
+		r.dispatchCursor++
+		r.mu.Unlock()
+		if start > 0 {
+			rotated := make([]*App, 0, n)
+			rotated = append(rotated, apps[start:]...)
+			rotated = append(rotated, apps[:start]...)
+			apps = rotated
+		}
+	}
+	blocked := r.blockedApps(apps)
 	r.noteProjects(apps)
 	r.publishRunningImages(apps)
+	r.publishPublicVars(apps)
 	for _, app := range apps {
 		if app.Suspended {
+			continue
+		}
+		if msg, ok := blocked[app.Name]; ok {
+			r.declareOnce(app, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, msg))
 			continue
 		}
 		if app.Status == "syncing" {
@@ -319,6 +354,16 @@ func (r *Reconciler) dispatch() {
 			}
 		}()
 	}
+	queue := 0
+	for _, app := range apps {
+		if app != nil && app.Status == "pending" && !r.inFlightApp(app.ID) {
+			queue++
+		}
+	}
+	r.mu.Lock()
+	running := len(r.inFlight)
+	r.mu.Unlock()
+	metrics.SetSyncActivity(queue, running)
 }
 
 func (r *Reconciler) inFlightApp(id string) bool {
@@ -510,13 +555,50 @@ func (r *Reconciler) syncApp(app *App) error {
 		return se
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), r.Config.SyncTimeout)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	policy := app.Policy()
+	syncTimeout := r.Config.SyncTimeout
+	if policy.SyncTimeout != "" {
+		parsed, issue := fleetcheck.ParseDuration(policy.SyncTimeout)
+		if issue != nil {
+			se := syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issue.Message)
+			r.declareOnce(app, se)
+			return nil
+		}
+		syncTimeout = parsed
+	}
+	pullIdle := syncTimeout
+	if policy.PullTimeout != "" {
+		parsed, issue := fleetcheck.ParseDuration(policy.PullTimeout)
+		if issue != nil {
+			se := syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issue.Message)
+			r.declareOnce(app, se)
+			return nil
+		}
+		pullIdle = parsed
+	}
+	oneshotTimeout := 10 * time.Minute
+	if policy.OneshotTimeout != "" {
+		parsed, issue := fleetcheck.ParseDuration(policy.OneshotTimeout)
+		if issue != nil {
+			se := syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issue.Message)
+			r.declareOnce(app, se)
+			return nil
+		}
+		oneshotTimeout = parsed
+	}
+
 	opts := compose.ApplyOptions{
-		Vars:      app.Policy().Vars,
-		BuildMode: app.Policy().EffectiveBuild(),
-		Project:   app.ComposeProject(),
+		Vars:           policy.Vars,
+		BuildMode:      policy.EffectiveBuild(),
+		Project:        app.ComposeProject(),
+		RequireDigest:  policy.RequireDigest,
+		PullIdle:       pullIdle,
+		OneshotTimeout: oneshotTimeout,
+		SyncTimeout:    syncTimeout,
+		BindPrefixes:   bindPrefixes(),
 	}
 	if target != strings.TrimSpace(app.LastSeenCommit) {
 		opts.Vars = deploypolicy.DecodeVars(app.LastHealthyVars)
@@ -612,6 +694,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	r.recordAppliedWatchHash(app)
 	if syncErr == "" {
 		r.clearTransient(app.ID)
+		_ = r.Registry.RecordRevision(app.ID, target, deploypolicy.EncodeVars(opts.Vars), metrics.FleetSHA())
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
 		metrics.ObserveReconcileSuccess()
 		metrics.SetLastSyncTimestamp(app.Name)
@@ -919,6 +1002,148 @@ func (r *Reconciler) publishRunningImages(apps []*App) {
 		})
 	}
 	metrics.SetAppImages(samples)
+	r.publishImageDrift(apps, images)
+}
+
+func (r *Reconciler) publishImageDrift(apps []*App, images []compose.RunningImage) {
+	type digestSource interface {
+		ExpectedDigests(project string) map[string]string
+	}
+	source, ok := r.Executor.(digestSource)
+	if !ok {
+		return
+	}
+	byProject := map[string]string{}
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		name := app.Name
+		if name == "" {
+			name = app.ID
+		}
+		byProject[app.ComposeProject()] = name
+	}
+	var drift []metrics.ImageSample
+	for _, img := range images {
+		expected := source.ExpectedDigests(img.Project)[img.Service]
+		running := strings.TrimSpace(img.Digest)
+		if expected == "" || running == "" || running == "unknown" {
+			continue
+		}
+		if expected == running || strings.HasSuffix(running, expected) || strings.HasSuffix(expected, running) {
+			continue
+		}
+		appName := byProject[img.Project]
+		if appName == "" {
+			continue
+		}
+		drift = append(drift, metrics.ImageSample{App: appName, Service: img.Service})
+	}
+	metrics.SetImageDrift(drift)
+}
+
+func (r *Reconciler) publishPublicVars(apps []*App) {
+	var samples []metrics.VarSample
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		policy := app.Policy()
+		for key, value := range policy.Vars {
+			if !fleetcheck.PublicVar(key, policy.PublicVars) {
+				continue
+			}
+			name := app.Name
+			if name == "" {
+				name = app.ID
+			}
+			samples = append(samples, metrics.VarSample{App: name, Name: key, Value: value})
+		}
+	}
+	metrics.SetPublicVars(samples)
+}
+
+func (r *Reconciler) blockedApps(apps []*App) map[string]string {
+	blocked := map[string]string{}
+	var names []fleetcheck.AppName
+	for _, app := range apps {
+		if app == nil || app.Suspended {
+			continue
+		}
+		names = append(names, fleetcheck.AppName{Name: app.Name, Project: app.ComposeProject()})
+		if issue := fleetcheck.CheckProject(app.Policy().Project); issue != nil {
+			blocked[app.Name] = issue.Message
+		}
+	}
+	for _, issue := range fleetcheck.ProjectConflicts(names) {
+		if _, exists := blocked[issue.App]; !exists {
+			blocked[issue.App] = issue.Message
+		}
+	}
+	return blocked
+}
+
+func (r *Reconciler) declareOnce(app *App, se *syncerr.Error) {
+	if app == nil || se == nil {
+		return
+	}
+	if app.Status == "failed" && app.LastSyncError == se.Message {
+		return
+	}
+	_ = r.Registry.UpdateSyncResultErr(app.ID, "failed", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
+	app.Status = "failed"
+	app.LastSyncError = se.Message
+	app.LastSyncErrorCode = se.Code
+	if r.Logger != nil {
+		r.Logger.Error("App sync failed", "app", app.Name, "reason", se.Message)
+	}
+}
+
+func (r *Reconciler) EnablePullLimit(n int) {
+	if n < 1 {
+		return
+	}
+	r.pullSem = make(chan struct{}, n)
+}
+
+func (r *Reconciler) Acquire(ctx context.Context) error {
+	if r == nil || r.pullSem == nil {
+		return nil
+	}
+	select {
+	case r.pullSem <- struct{}{}:
+		metrics.PullRunning.Inc()
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *Reconciler) Release() {
+	if r == nil || r.pullSem == nil {
+		return
+	}
+	select {
+	case <-r.pullSem:
+		metrics.PullRunning.Dec()
+	default:
+	}
+}
+
+func bindPrefixes() []string {
+	raw := strings.TrimSpace(os.Getenv("CONOPS_ALLOWED_BIND_PREFIXES"))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func declaredFailure(se *syncerr.Error) bool {
@@ -926,7 +1151,9 @@ func declaredFailure(se *syncerr.Error) bool {
 		return false
 	}
 	switch se.GetCode() {
-	case syncerr.CodeBuildForbidden, syncerr.CodeRegistryAuth, syncerr.CodePullFailed, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI:
+	case syncerr.CodeBuildForbidden, syncerr.CodeRegistryAuth, syncerr.CodePullFailed, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI,
+		syncerr.CodeValidation, syncerr.CodePortConflict, syncerr.CodeVolumeMissing, syncerr.CodeDigestRequired,
+		syncerr.CodeOneshotFailed, syncerr.CodeOneshotTimeout:
 		return true
 	default:
 		return false

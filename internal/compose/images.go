@@ -9,8 +9,11 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/conops-private/internal/fleetcheck"
+	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/syncerr"
 )
@@ -26,6 +29,26 @@ type ApplyOptions struct {
 	NoBuild bool
 	// Project is the compose project name. Empty derives one from the app id.
 	Project string
+	// RequireDigest rejects compose images that are not pinned with @sha256.
+	RequireDigest bool
+	// PullIdle cancels a pull that produces no output for this long.
+	// Zero keeps the caller's deadline.
+	PullIdle time.Duration
+	// OneshotTimeout bounds one-shot services. Zero uses 10 minutes.
+	OneshotTimeout time.Duration
+	// SyncTimeout is the wall clock for up and one-shot wait. Zero uses the caller context.
+	// Pull uses PullIdle instead, so a long pull with progress is not cut off here.
+	SyncTimeout time.Duration
+	// BindPrefixes, when non-empty, reject absolute bind mounts outside the list.
+	BindPrefixes []string
+	// ForeignPorts maps a published host port to the app or container that owns it.
+	ForeignPorts map[int]string
+}
+
+// SlotGate limits how many image pulls run at once.
+type SlotGate interface {
+	Acquire(ctx context.Context) error
+	Release()
 }
 
 // RunningImage is one compose service container that is actually running.
@@ -41,6 +64,7 @@ type imagePrep struct {
 	cleanup func()
 	noBuild bool
 	images  []string
+	rerun   []string
 }
 
 func (p imagePrep) clean() {
@@ -177,7 +201,20 @@ func PullFailedImage(output string, known []string) string {
 }
 
 func pullFailedError(output string, images []string) error {
-	return syncerr.New(syncerr.CodePullFailed, syncerr.StagePull, "pull_failed: "+PullFailedImage(output, images))
+	ref := PullFailedImage(output, images)
+	lower := strings.ToLower(output)
+	kind := ""
+	switch {
+	case strings.Contains(lower, "digest") && strings.Contains(lower, "mismatch"):
+		kind = "digest_mismatch"
+	case strings.Contains(lower, "not found") || strings.Contains(lower, "manifest unknown"):
+		kind = "not_found"
+	}
+	msg := "pull_failed: " + ref
+	if kind != "" {
+		msg = "pull_failed: " + kind + " " + ref
+	}
+	return syncerr.New(syncerr.CodePullFailed, syncerr.StagePull, msg)
 }
 
 func unsetVarError(names []string) error {
@@ -245,6 +282,48 @@ func (e *ComposeExecutor) prepareImageSync(
 		return imagePrep{}, fmt.Errorf("compose config failed: %w", configErr)
 	}
 	images := imagesFromConfig(configJSON)
+	sum, sumErr := fleetcheck.SummarizeCompose(configJSON)
+	if sumErr != nil {
+		return imagePrep{}, fmt.Errorf("compose config parse failed: %w", sumErr)
+	}
+	if opts.RequireDigest {
+		if issues := fleetcheck.DigestRequired(sum.Images); len(issues) > 0 {
+			appendLogLine(syncLog, issues[0].Message)
+			return imagePrep{}, syncerr.New(syncerr.CodeDigestRequired, syncerr.StageValidate, issues[0].Message)
+		}
+	}
+	if issues := fleetcheck.BindViolations(sum.BindSources, opts.BindPrefixes); len(issues) > 0 {
+		appendLogLine(syncLog, issues[0].Message)
+		return imagePrep{}, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issues[0].Message)
+	}
+	if err := e.claimPorts(projectName, sum.Published, opts.ForeignPorts); err != nil {
+		appendLogLine(syncLog, err.Error())
+		return imagePrep{}, err
+	}
+	for _, vol := range sum.ExternalVols {
+		if !e.volumeExists(ctx, vol) {
+			msg := "volume_missing: " + vol
+			appendLogLine(syncLog, msg)
+			return imagePrep{}, syncerr.New(syncerr.CodeVolumeMissing, syncerr.StageValidate, msg)
+		}
+	}
+	if len(sum.ContainerName) > 0 {
+		switch policyMode() {
+		case "enforce":
+			msg := "policy_violation: container_name " + strings.Join(sum.ContainerName, ",")
+			appendLogLine(syncLog, msg)
+			metrics.SetPolicyViolation(projectName, "container_name", 1)
+			return imagePrep{}, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, msg)
+		case "warn":
+			metrics.SetPolicyViolation(projectName, "container_name", 1)
+			if e.Logger != nil {
+				e.Logger.Warn("compose sets container_name", "project", projectName, "services", strings.Join(sum.ContainerName, ","))
+			}
+		default:
+			metrics.SetPolicyViolation(projectName, "container_name", 0)
+		}
+	}
+	e.rememberDigests(projectName, sum.Images)
 	if mode == deploypolicy.BuildForbidden && !opts.NoBuild {
 		services, parseErr := ServicesWithBuild(configJSON)
 		if parseErr != nil {
@@ -258,7 +337,7 @@ func (e *ComposeExecutor) prepareImageSync(
 	}
 	appendLogLine(syncLog, "ok")
 
-	prep := imagePrep{env: copyVars(opts.Vars), noBuild: noBuild, images: images, cleanup: func() {}}
+	prep := imagePrep{env: copyVars(opts.Vars), noBuild: noBuild, images: images, rerun: sum.Rerun, cleanup: func() {}}
 	creds, configured, credErr := RegistryCredsFromEnv()
 	if credErr != nil || (configured && (creds.Host == "" || creds.Username == "" || creds.Password == "")) {
 		appendLogSection(syncLog, "Registry login")

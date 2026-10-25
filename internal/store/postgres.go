@@ -108,6 +108,18 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS rejected_vars TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if _, err := s.pool.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS app_revisions (
+		id BIGSERIAL PRIMARY KEY,
+		app_id TEXT NOT NULL,
+		git_sha TEXT NOT NULL,
+		vars_json TEXT NOT NULL DEFAULT '',
+		fleet_sha TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL
+	);
+	`); err != nil {
+		return err
+	}
 
 	credentialsQuery := `
 	CREATE TABLE IF NOT EXISTS app_credentials (

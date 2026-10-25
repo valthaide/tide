@@ -55,6 +55,29 @@ type App struct {
 	RejectedVars string `json:"rejected_vars,omitempty"`
 	// Images are the containers actually running for this app. Filled on read, not stored.
 	Images []ImageRef `json:"images,omitempty"`
+	// Volumes are named volumes for this app. Filled on read, not stored.
+	Volumes []VolumeRef `json:"volumes,omitempty"`
+	// PublicVars are fleet variables safe to show. Filled on read, not stored.
+	PublicVars map[string]string `json:"public_vars,omitempty"`
+	// Tags is the public _TAG and _IMAGE values, for table output.
+	Tags string `json:"tags,omitempty"`
+	// Oneshot is the latest one-shot status, such as "migrate completed exit 0".
+	Oneshot string `json:"oneshot,omitempty"`
+}
+
+// VolumeRef is one named volume used by an app.
+type VolumeRef struct {
+	Name       string `json:"name"`
+	Containers string `json:"containers,omitempty"`
+}
+
+// Revision is one successful sync kept for history. It is not an apps column.
+type Revision struct {
+	AppID     string    `json:"-"`
+	GitSHA    string    `json:"git_sha"`
+	VarsJSON  string    `json:"vars_json,omitempty"`
+	FleetSHA  string    `json:"fleet_sha,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // ImageRef is one running compose service image.

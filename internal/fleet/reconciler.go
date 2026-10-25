@@ -149,6 +149,17 @@ func (r *Reconciler) loadDesired(ctx context.Context) (*HostDocument, error) {
 	if err != nil {
 		return nil, err
 	}
+	unknown, unknownErr := UnknownFields(data)
+	if unknownErr != nil {
+		return nil, unknownErr
+	}
+	mode := StrictMode(os.Getenv("CONOPS_FLEET_STRICT"))
+	if len(unknown) > 0 && mode == "enforce" {
+		return nil, fmt.Errorf("unknown_field: %s", strings.Join(unknown, ","))
+	}
+	if len(unknown) > 0 && r.Logger != nil {
+		r.Logger.Warn("Unknown fleet fields ignored", "fields", strings.Join(unknown, ","))
+	}
 	doc, err := ParseHostDocument(data)
 	if err != nil {
 		return nil, err
@@ -186,6 +197,7 @@ func (r *Reconciler) checkoutFleet(ctx context.Context) (string, error) {
 	if tipErr != nil {
 		return "", tipErr
 	}
+	metrics.SetFleetRevision(tip.SHA)
 	if head, headErr := localGitHEAD(repoDir); headErr == nil && strings.EqualFold(head, tip.SHA) {
 		return repoDir, nil
 	}
@@ -485,6 +497,11 @@ func policyJSONFromSpec(spec AppSpec, hostBuild string) string {
 		Build:                  build,
 		Vars:                   spec.Vars,
 		Project:                spec.Project,
+		SyncTimeout:            spec.SyncTimeout,
+		PullTimeout:            spec.PullTimeout,
+		OneshotTimeout:         spec.OneshotTimeout,
+		RequireDigest:          spec.RequireDigest,
+		PublicVars:             spec.PublicVars,
 	}
 	for _, w := range spec.WatchFiles {
 		p.WatchFiles = append(p.WatchFiles, deploypolicy.WatchFile{

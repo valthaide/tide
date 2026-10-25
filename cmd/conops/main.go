@@ -137,8 +137,12 @@ func main() {
 			logger.Error("Failed to load reconciler config", "error", loadErr)
 			os.Exit(1)
 		}
-		logger.Info("Reconciler config", "max_concurrent", reconcilerCfg.MaxConcurrent, "interval", reconcilerCfg.Interval.String(), "sync_timeout", reconcilerCfg.SyncTimeout.String())
+		logger.Info("Reconciler config", "max_concurrent", reconcilerCfg.MaxConcurrent, "pull_parallel", reconcilerCfg.PullParallel, "interval", reconcilerCfg.Interval.String(), "sync_timeout", reconcilerCfg.SyncTimeout.String())
 		reconciler = controller.NewReconciler(registry, executor, logger, reconcilerCfg)
+		if reconcilerCfg.PullParallel > 0 {
+			reconciler.EnablePullLimit(reconcilerCfg.PullParallel)
+			executor.PullGate = reconciler
+		}
 		go reconciler.Run(ctx)
 
 		fleetCfg, fleetErr := fleet.LoadConfigFromEnv(dataDir)
@@ -225,6 +229,7 @@ func main() {
 					r.Post("/", appHandler.RegisterApp)
 					r.Get("/", appHandler.ListApps)
 					r.Get("/{id}", appHandler.GetApp)
+					r.Get("/{id}/history", appHandler.ListHistory)
 					r.Get("/{id}/containers", appHandler.ListAppContainers)
 					r.Patch("/{id}", appHandler.UpdateApp)
 					r.Post("/{id}/sync", appHandler.ForceSyncApp)

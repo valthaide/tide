@@ -15,9 +15,10 @@ import (
 
 // HostDocument describes apps that should run on one host.
 type HostDocument struct {
-	Host  string    `yaml:"host"`
-	Build string    `yaml:"build"`
-	Apps  []AppSpec `yaml:"apps"`
+	Schema int       `yaml:"schema"`
+	Host   string    `yaml:"host"`
+	Build  string    `yaml:"build"`
+	Apps   []AppSpec `yaml:"apps"`
 }
 
 // AppSpec is a desired application registration from fleet git.
@@ -38,6 +39,11 @@ type AppSpec struct {
 	Build                  string            `yaml:"build"`
 	Vars                   map[string]string `yaml:"vars"`
 	Project                string            `yaml:"project"`
+	SyncTimeout            string            `yaml:"sync_timeout"`
+	PullTimeout            string            `yaml:"pull_timeout"`
+	OneshotTimeout         string            `yaml:"oneshot_timeout"`
+	RequireDigest          bool              `yaml:"require_digest"`
+	PublicVars             []string          `yaml:"public_vars"`
 }
 
 // WatchFileSpec is a path watched for content changes after sync.

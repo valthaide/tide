@@ -10,12 +10,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"github.com/valthaide/conops-private/internal/fleetcheck"
 	"github.com/valthaide/conops-private/internal/fsperm"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/redact"
@@ -37,6 +40,11 @@ type ComposeExecutor struct {
 
 	projectsMu sync.Mutex
 	projects   map[string]string
+	portsMu    sync.Mutex
+	portOwner  map[int]string
+	digestMu   sync.Mutex
+	expected   map[string]map[string]string
+	PullGate   SlotGate
 }
 
 // ProjectRuntimeState summarizes runtime state for one compose project.
@@ -52,6 +60,8 @@ type ProjectRuntimeState struct {
 	NotReady []string
 	// Failure is a specific reason, such as "oneshot_failed: init exit 1" or "restarting: php 4 restarts".
 	Failure string
+	// Oneshot is a short status such as "migrate completed exit 0".
+	Oneshot string
 }
 
 // Ready reports whether every service container is running and past healthcheck start.
@@ -278,33 +288,67 @@ func (e *ComposeExecutor) ApplyImages(
 
 	// Pull images. Login, when configured, lives only in prep.env for this pull.
 	appendLogSection(&syncLog, "Docker image pull")
-	e.Logger.Info("Pulling images", "app_id", appID)
+	if e.pinnedDigestsLocal(ctx, prep.images) {
+		appendLogLine(&syncLog, "pinned digests already local; pull skipped")
+		if e.Logger != nil {
+			e.Logger.Info("Pull skipped; pinned digests are local", "app_id", appID)
+		}
+	} else {
+		if e.Logger != nil {
+			e.Logger.Info("Pulling images", "app_id", appID)
+		}
+		pullArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
+		if len(overrideArgs) > 0 {
+			pullArgs = append(pullArgs, overrideArgs...)
+		}
+		pullArgs = append(pullArgs, "pull")
 
-	pullArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
-	// Add override file args if any (must come after -f base)
-	if len(overrideArgs) > 0 {
-		pullArgs = append(pullArgs, overrideArgs...)
-	}
-	pullArgs = append(pullArgs, "pull")
-
-	pullOut, err := e.runCommandWithTranscript(
-		ctx,
-		&syncLog,
-		"docker",
-		pullArgs,
-		composeDir,
-		prep.env,
-		onProgress,
-	)
-	if err != nil {
-		prep.clean()
-		return redact.String(strings.TrimSpace(syncLog.String())), pullFailedError(pullOut+"\n"+err.Error(), prep.images)
+		pullCtx, pullCancel, bumpPull := idleContext(ctx, opts.PullIdle)
+		if e.PullGate != nil {
+			if err := e.PullGate.Acquire(pullCtx); err != nil {
+				pullCancel()
+				return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeTimeout, syncerr.StagePull, "timeout: pull "+strings.Join(prep.images, ",")+" after "+opts.PullIdle.String())
+			}
+		}
+		pullOut, err := e.runCommandWithTranscript(
+			pullCtx,
+			&syncLog,
+			"docker",
+			pullArgs,
+			composeDir,
+			prep.env,
+			func(chunk string) {
+				bumpPull()
+				if onProgress != nil {
+					onProgress(chunk)
+				}
+			},
+		)
+		if e.PullGate != nil {
+			e.PullGate.Release()
+		}
+		pullCancel()
+		if err != nil {
+			prep.clean()
+			if pullCtx.Err() != nil && ctx.Err() == nil {
+				msg := "timeout: pull " + strings.Join(prep.images, ",") + " after " + opts.PullIdle.String()
+				return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeTimeout, syncerr.StagePull, msg)
+			}
+			return redact.String(strings.TrimSpace(syncLog.String())), pullFailedError(pullOut+"\n"+err.Error(), prep.images)
+		}
 	}
 	// Drop the docker config before up. Images are already local.
 	prep.clean()
 	prep.cleanup = func() {}
 	if prep.env != nil {
 		delete(prep.env, "DOCKER_CONFIG")
+	}
+
+	upCtx := ctx
+	if opts.SyncTimeout > 0 {
+		var upCancel context.CancelFunc
+		upCtx, upCancel = context.WithTimeout(context.Background(), opts.SyncTimeout)
+		defer upCancel()
 	}
 
 	// Up detached
@@ -326,7 +370,7 @@ func (e *ComposeExecutor) ApplyImages(
 	}
 
 	_, err = e.runCommandWithTranscript(
-		ctx,
+		upCtx,
 		&syncLog,
 		"docker",
 		upArgs,
@@ -335,10 +379,25 @@ func (e *ComposeExecutor) ApplyImages(
 		onProgress,
 	)
 	if err != nil {
-		if reason := e.oneshotFailure(ctx, projectName); reason != "" {
+		if reason := e.oneshotFailure(upCtx, projectName); reason != "" {
 			return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeOneshotFailed, syncerr.StageCompose, reason)
 		}
 		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("up failed: %w", err)
+	}
+
+	if len(prep.rerun) > 0 {
+		reArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
+		if len(overrideArgs) > 0 {
+			reArgs = append(reArgs, overrideArgs...)
+		}
+		reArgs = append(reArgs, "up", "-d", "--no-deps", "--force-recreate")
+		reArgs = append(reArgs, prep.rerun...)
+		if _, rerunErr := e.runCommandWithTranscript(upCtx, &syncLog, "docker", reArgs, composeDir, prep.env, onProgress); rerunErr != nil && e.Logger != nil {
+			e.Logger.Warn("one-shot recreate failed", "project", projectName, "error", rerunErr)
+		}
+	}
+	if err := e.waitOneshots(upCtx, projectName, opts.OneshotTimeout); err != nil {
+		return redact.String(strings.TrimSpace(syncLog.String())), err
 	}
 
 	appendLogSection(&syncLog, "Sync completed")
@@ -1372,7 +1431,7 @@ func (e *ComposeExecutor) oneshotFailure(ctx context.Context, project string) st
 	}
 	reason := foldObservations(obs, time.Now())[project].Failure
 	if strings.HasPrefix(reason, "oneshot_failed:") {
-		return reason
+		return withPreviousRevision(obs, project, reason)
 	}
 	return ""
 }
@@ -1557,4 +1616,274 @@ func truncateOutput(value string) string {
 		return value
 	}
 	return value[:maxLen] + "...(truncated)"
+}
+
+func idleContext(parent context.Context, idle time.Duration) (context.Context, context.CancelFunc, func()) {
+	if idle <= 0 {
+		if parent == nil {
+			parent = context.Background()
+		}
+		return parent, func() {}, func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(idle, cancel)
+	var mu sync.Mutex
+	return ctx, func() {
+			timer.Stop()
+			cancel()
+		}, func() {
+			mu.Lock()
+			timer.Reset(idle)
+			mu.Unlock()
+		}
+}
+
+func (e *ComposeExecutor) claimPorts(app string, ports []int, foreign map[int]string) error {
+	live := e.liveForeignPorts(app)
+	e.portsMu.Lock()
+	defer e.portsMu.Unlock()
+	if e.portOwner == nil {
+		e.portOwner = map[int]string{}
+	}
+	for _, port := range ports {
+		if owner := foreign[port]; owner != "" && owner != app {
+			return syncerr.New(syncerr.CodePortConflict, syncerr.StageValidate, fleetcheck.PortConflict(app, port, owner).Message)
+		}
+		if owner := live[port]; owner != "" && owner != app {
+			return syncerr.New(syncerr.CodePortConflict, syncerr.StageValidate, fleetcheck.PortConflict(app, port, owner).Message)
+		}
+		if owner := e.portOwner[port]; owner != "" && owner != app {
+			return syncerr.New(syncerr.CodePortConflict, syncerr.StageValidate, fleetcheck.PortConflict(app, port, owner).Message)
+		}
+	}
+	for port, owner := range e.portOwner {
+		if owner == app {
+			delete(e.portOwner, port)
+		}
+	}
+	for _, port := range ports {
+		e.portOwner[port] = app
+	}
+	return nil
+}
+
+func (e *ComposeExecutor) liveForeignPorts(self string) map[int]string {
+	out := map[int]string{}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	raw, err := e.runCommand(ctx, "docker", []string{"ps", "--format", `{{.Label "com.docker.compose.project"}}|{{.Names}}|{{.Ports}}`}, e.runtimeWorkDir(), nil, nil)
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		owner := strings.TrimSpace(parts[0])
+		if owner == "" {
+			owner = strings.TrimSpace(parts[1])
+		}
+		if owner == "" || owner == self {
+			continue
+		}
+		for _, port := range hostPorts(parts[2]) {
+			out[port] = owner
+		}
+	}
+	return out
+}
+
+func hostPorts(field string) []int {
+	var ports []int
+	for _, match := range regexp.MustCompile(`:(\d+)->`).FindAllStringSubmatch(field, -1) {
+		if len(match) == 2 {
+			n, err := strconv.Atoi(match[1])
+			if err == nil && n > 0 {
+				ports = append(ports, n)
+			}
+		}
+	}
+	return ports
+}
+
+func (e *ComposeExecutor) volumeExists(ctx context.Context, name string) bool {
+	_, err := e.runCommand(ctx, "docker", []string{"volume", "inspect", name}, e.runtimeWorkDir(), nil, nil)
+	return err == nil
+}
+
+func (e *ComposeExecutor) waitOneshots(ctx context.Context, project string, timeout time.Duration) error {
+	obs, err := e.observeContainers(ctx)
+	if err != nil {
+		return err
+	}
+	if runningOneshot(filterProject(obs, project)) == "" && !oneshotPending(obs, project) {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		obs, err = e.observeContainers(ctx)
+		if err != nil {
+			return err
+		}
+		mine := filterProject(obs, project)
+		state := foldObservations(mine, time.Now())[project]
+		if strings.HasPrefix(state.Failure, "oneshot_failed:") {
+			return syncerr.New(syncerr.CodeOneshotFailed, syncerr.StageCompose, withPreviousRevision(mine, project, state.Failure))
+		}
+		pending := runningOneshot(mine)
+		if pending == "" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			e.stopServiceContainer(ctx, project, pending)
+			return syncerr.New(syncerr.CodeOneshotTimeout, syncerr.StageCompose, "oneshot_timeout: "+pending)
+		}
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func filterProject(obs []containerObs, project string) []containerObs {
+	var mine []containerObs
+	for _, c := range obs {
+		if c.Project == project {
+			mine = append(mine, c)
+		}
+	}
+	return mine
+}
+
+func oneshotPending(obs []containerObs, project string) bool {
+	return runningOneshot(filterProject(obs, project)) != ""
+}
+
+func runningOneshot(obs []containerObs) string {
+	oneshot := oneshotServices(obs)
+	for _, c := range obs {
+		if _, ok := oneshot[c.Service]; !ok || !c.Running {
+			continue
+		}
+		return c.Service
+	}
+	return ""
+}
+
+func withPreviousRevision(obs []containerObs, project, reason string) string {
+	if strings.Contains(reason, "previous revision still running") {
+		return reason
+	}
+	oneshot := oneshotServices(obs)
+	for _, c := range obs {
+		if c.Project != "" && c.Project != project {
+			continue
+		}
+		if _, ok := oneshot[c.Service]; ok || !c.Running {
+			continue
+		}
+		return reason + "; previous revision still running"
+	}
+	return reason
+}
+
+func (e *ComposeExecutor) stopServiceContainer(ctx context.Context, project, service string) {
+	obs, err := e.observeContainers(ctx)
+	if err != nil {
+		return
+	}
+	for _, c := range obs {
+		if c.Project == project && c.Service == service && c.Name != "" {
+			_, _ = e.runCommand(ctx, "docker", []string{"stop", c.Name}, e.runtimeWorkDir(), nil, nil)
+		}
+	}
+}
+
+func (e *ComposeExecutor) pinnedDigestsLocal(ctx context.Context, images []string) bool {
+	if len(images) == 0 {
+		return false
+	}
+	for _, image := range images {
+		if !strings.Contains(image, "@sha256:") {
+			return false
+		}
+		if _, err := e.runCommand(ctx, "docker", []string{"image", "inspect", image}, e.runtimeWorkDir(), nil, nil); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *ComposeExecutor) rememberDigests(project string, images map[string]string) {
+	if e == nil {
+		return
+	}
+	kept := map[string]string{}
+	for svc, ref := range images {
+		if digest := fleetcheck.ImageDigest(ref); digest != "" {
+			kept[svc] = digest
+		}
+	}
+	e.digestMu.Lock()
+	defer e.digestMu.Unlock()
+	if e.expected == nil {
+		e.expected = map[string]map[string]string{}
+	}
+	e.expected[project] = kept
+}
+
+// ExpectedDigests returns pinned digests from the last compose config for a project.
+func (e *ComposeExecutor) ExpectedDigests(project string) map[string]string {
+	if e == nil {
+		return nil
+	}
+	e.digestMu.Lock()
+	defer e.digestMu.Unlock()
+	src := e.expected[project]
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// ProjectVolumes lists named volumes labeled for a compose project.
+func (e *ComposeExecutor) ProjectVolumes(ctx context.Context, project string) ([]VolumeInfo, error) {
+	raw, err := e.runCommand(ctx, "docker", []string{"volume", "ls", "--filter", "label=com.docker.compose.project=" + project, "--format", "{{.Name}}"}, e.runtimeWorkDir(), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out []VolumeInfo
+	for _, line := range strings.Split(raw, "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		out = append(out, VolumeInfo{Name: name})
+	}
+	return out, nil
+}
+
+// VolumeInfo is one named volume belonging to a compose project.
+type VolumeInfo struct {
+	Name       string
+	Containers string
+}
+
+func policyMode() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_POLICY_MODE"))) {
+	case "warn":
+		return "warn"
+	case "enforce":
+		return "enforce"
+	default:
+		return "off"
+	}
 }
