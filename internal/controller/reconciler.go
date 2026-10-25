@@ -1470,11 +1470,23 @@ func truncateOutput(value string) string {
 }
 
 func revisionImages(r *Reconciler, app *App) string {
+	if r == nil || app == nil || r.Executor == nil {
+		return ""
+	}
+	type refSource interface {
+		ExpectedRefs(project string) map[string]string
+	}
+	if source, ok := r.Executor.(refSource); ok {
+		raw, err := json.Marshal(source.ExpectedRefs(app.ComposeProject()))
+		if err == nil && len(raw) > 0 && string(raw) != "null" && string(raw) != "{}" {
+			return string(raw)
+		}
+	}
 	type digestSource interface {
 		ExpectedDigests(project string) map[string]string
 	}
 	source, ok := r.Executor.(digestSource)
-	if !ok || r == nil || app == nil {
+	if !ok {
 		return ""
 	}
 	raw, err := json.Marshal(source.ExpectedDigests(app.ComposeProject()))

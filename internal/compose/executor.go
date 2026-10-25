@@ -45,6 +45,7 @@ type ComposeExecutor struct {
 	portOwner  map[int]string
 	digestMu   sync.Mutex
 	expected   map[string]map[string]string
+	refs       map[string]map[string]string
 	PullGate   SlotGate
 }
 
@@ -1936,7 +1937,13 @@ func (e *ComposeExecutor) rememberDigests(project string, images map[string]stri
 		return
 	}
 	kept := map[string]string{}
+	full := map[string]string{}
 	for svc, ref := range images {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		full[svc] = ref
 		if digest := fleetcheck.ImageDigest(ref); digest != "" {
 			kept[svc] = digest
 		}
@@ -1946,7 +1953,11 @@ func (e *ComposeExecutor) rememberDigests(project string, images map[string]stri
 	if e.expected == nil {
 		e.expected = map[string]map[string]string{}
 	}
+	if e.refs == nil {
+		e.refs = map[string]map[string]string{}
+	}
 	e.expected[project] = kept
+	e.refs[project] = full
 }
 
 // ExpectedDigests returns pinned digests from the last compose config for a project.
@@ -1957,6 +1968,21 @@ func (e *ComposeExecutor) ExpectedDigests(project string) map[string]string {
 	e.digestMu.Lock()
 	defer e.digestMu.Unlock()
 	src := e.expected[project]
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// ExpectedRefs returns the image references from the last compose config.
+func (e *ComposeExecutor) ExpectedRefs(project string) map[string]string {
+	if e == nil {
+		return nil
+	}
+	e.digestMu.Lock()
+	defer e.digestMu.Unlock()
+	src := e.refs[project]
 	out := make(map[string]string, len(src))
 	for k, v := range src {
 		out[k] = v

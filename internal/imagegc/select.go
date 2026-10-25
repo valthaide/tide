@@ -51,17 +51,29 @@ func owned(image Image, ownRepos map[string]struct{}) bool {
 
 func protects(image Image, protected map[string]struct{}) bool {
 	for _, digest := range image.Digests {
-		if _, ok := protected[digest]; ok {
+		if protectedRef(digest, protected) {
 			return true
 		}
 	}
 	for _, tag := range image.Tags {
-		if _, ok := protected[tag]; ok {
+		if protectedRef(tag, protected) {
 			return true
 		}
 	}
 	if _, ok := protected[image.ID]; ok {
 		return true
+	}
+	return false
+}
+
+func protectedRef(ref string, protected map[string]struct{}) bool {
+	if _, ok := protected[ref]; ok {
+		return true
+	}
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		if _, ok := protected[ref[i+1:]]; ok {
+			return true
+		}
 	}
 	return false
 }

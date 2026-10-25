@@ -150,13 +150,16 @@ func protectedImageSets(reg *Registry) (map[string]struct{}, map[string]struct{}
 			if json.Unmarshal([]byte(rev.ImagesJSON), &images) != nil {
 				continue
 			}
-			for _, digest := range images {
-				digest = strings.TrimSpace(digest)
-				if digest == "" {
+			for _, ref := range images {
+				ref = strings.TrimSpace(ref)
+				if ref == "" {
 					continue
 				}
-				protected[digest] = struct{}{}
-				if repo := imageRepo(digest); repo != "" {
+				protected[ref] = struct{}{}
+				if i := strings.LastIndex(ref, "@"); i >= 0 {
+					protected[ref[i+1:]] = struct{}{}
+				}
+				if repo := imageRepo(ref); repo != "" {
 					own[repo] = struct{}{}
 				}
 			}
