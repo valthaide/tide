@@ -115,6 +115,27 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		git_sha TEXT NOT NULL,
 		vars_json TEXT NOT NULL DEFAULT '',
 		fleet_sha TEXT NOT NULL DEFAULT '',
+		images_json TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL
+	);
+	`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE app_revisions ADD COLUMN IF NOT EXISTS images_json TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS deploy_events (
+		id BIGSERIAL PRIMARY KEY,
+		app_id TEXT NOT NULL,
+		app_name TEXT NOT NULL DEFAULT '',
+		project TEXT NOT NULL DEFAULT '',
+		git_sha TEXT NOT NULL DEFAULT '',
+		fleet_sha TEXT NOT NULL DEFAULT '',
+		vars_json TEXT NOT NULL DEFAULT '',
+		images_json TEXT NOT NULL DEFAULT '',
+		result TEXT NOT NULL DEFAULT '',
+		trigger_name TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMPTZ NOT NULL
 	);
 	`); err != nil {

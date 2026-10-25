@@ -235,6 +235,9 @@ func (h *Handler) attachRunningImages(ctx context.Context, apps []*api.App) {
 			continue
 		}
 		app.Images = byProject[app.ComposeProject()]
+		for i := range app.Images {
+			app.Images[i].Tag = imageTag(app.Images[i].Image)
+		}
 	}
 }
 
@@ -270,6 +273,8 @@ func annotatePublic(app *api.App) {
 		sortStrings(tags)
 		app.Tags = strings.Join(tags, ",")
 	}
+	app.FleetRevision = metrics.FleetSHA()
+	app.Schema = 1
 }
 
 func sortStrings(values []string) {
@@ -278,6 +283,17 @@ func sortStrings(values []string) {
 			values[j], values[j-1] = values[j-1], values[j]
 		}
 	}
+}
+
+func imageTag(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	if i := strings.LastIndex(ref, ":"); i > 0 && !strings.Contains(ref[i:], "/") {
+		return ref[i+1:]
+	}
+	return ""
 }
 
 func (h *Handler) attachOneshot(ctx context.Context, apps []*api.App) {
@@ -299,6 +315,8 @@ func (h *Handler) attachOneshot(ctx context.Context, apps []*api.App) {
 			continue
 		}
 		app.Oneshot = states[app.ComposeProject()].Oneshot
+		app.FleetRevision = metrics.FleetSHA()
+		app.Schema = 1
 	}
 }
 
@@ -315,7 +333,7 @@ func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	revs, err := h.Registry.ListRevisions(id, limit)
+	revs, err := h.Registry.ListDeploys(id, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -325,6 +343,16 @@ func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
 		revs[i].VarsJSON = deploypolicy.EncodeVars(fleetcheck.PublicVars(deploypolicy.DecodeVars(revs[i].VarsJSON), listed))
 	}
 	json.NewEncoder(w).Encode(api.APIResponse{Data: revs})
+}
+
+func (h *Handler) ImageGC(w http.ResponseWriter, r *http.Request) {
+	dry := r.URL.Query().Get("dry_run") == "true" || r.URL.Query().Get("dry_run") == "1"
+	images, err := RunImageGC(h.Registry, h.Inspector, dry)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(api.APIResponse{Data: images})
 }
 
 // GetApp handles GET /api/v1/apps/{id}
@@ -385,9 +413,13 @@ func (h *Handler) DeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	message := "App deleted successfully. Named volumes were kept. To remove them, set prune_volumes: true, wait until it is applied, then delete. Volumes labeled com.conops.keep are never removed."
+	if app.Policy().PruneVolumes {
+		message = "App deleted successfully. Named volumes without com.conops.keep were removed. External volumes and com.conops.keep volumes were kept."
+	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(api.APIResponse{
-		Message: "App deleted successfully",
+		Message: message,
 	})
 }
 

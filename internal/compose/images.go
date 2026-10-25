@@ -41,6 +41,10 @@ type ApplyOptions struct {
 	SyncTimeout time.Duration
 	// BindPrefixes, when non-empty, reject absolute bind mounts outside the list.
 	BindPrefixes []string
+	// AllowedRegistries, when non-empty, rejects images from other registries.
+	AllowedRegistries []string
+	// PolicyExceptions are honored only while CONOPS_POLICY_MODE=warn.
+	PolicyExceptions []deploypolicy.PolicyException
 	// ForeignPorts maps a published host port to the app or container that owns it.
 	ForeignPorts map[int]string
 }
@@ -292,6 +296,22 @@ func (e *ComposeExecutor) prepareImageSync(
 			return imagePrep{}, syncerr.New(syncerr.CodeDigestRequired, syncerr.StageValidate, issues[0].Message)
 		}
 	}
+	if denied := fleetcheck.DeniedImages(sum.Images, opts.AllowedRegistries); len(denied) > 0 {
+		msg := "registry_not_allowed: " + denied[0]
+		appendLogLine(syncLog, msg)
+		return imagePrep{}, syncerr.New(syncerr.CodeRegistryDenied, syncerr.StageValidate, msg)
+	}
+	if hit, ok := policyViolation(sum, opts.PolicyExceptions); ok {
+		msg := "policy_violation: " + hit.Service + " " + hit.Rule
+		appendLogLine(syncLog, msg)
+		metrics.SetPolicyViolation(projectName, hit.Rule, 1)
+		if policyMode() == "enforce" {
+			return imagePrep{}, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, msg)
+		}
+		if policyMode() == "warn" && e.Logger != nil {
+			e.Logger.Warn("compose policy", "project", projectName, "service", hit.Service, "rule", hit.Rule)
+		}
+	}
 	if issues := fleetcheck.BindViolations(sum.BindSources, opts.BindPrefixes); len(issues) > 0 {
 		appendLogLine(syncLog, issues[0].Message)
 		return imagePrep{}, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issues[0].Message)
@@ -445,4 +465,24 @@ func digestLabel(repoDigest, imageID string) string {
 		return "unknown"
 	}
 	return imageID
+}
+
+func policyViolation(sum fleetcheck.Summary, exceptions []deploypolicy.PolicyException) (fleetcheck.PolicyHit, bool) {
+	mode := policyMode()
+	if mode == "off" {
+		return fleetcheck.PolicyHit{}, false
+	}
+	var allowed []fleetcheck.PolicyException
+	if mode == "warn" {
+		for _, item := range exceptions {
+			allowed = append(allowed, fleetcheck.PolicyException{Service: item.Service, Rule: item.Rule})
+		}
+	}
+	for _, hit := range fleetcheck.SecurityHits(sum) {
+		if mode == "warn" && fleetcheck.Excepted(hit, allowed) {
+			continue
+		}
+		return hit, true
+	}
+	return fleetcheck.PolicyHit{}, false
 }

@@ -238,6 +238,7 @@ func main() {
 					r.Post("/{id}/resume", appHandler.ResumeApp)
 					r.Delete("/{id}", appHandler.DeleteApp)
 				})
+				r.Post("/gc", appHandler.ImageGC)
 				r.Get("/operations/{id}", appHandler.GetOperation)
 			}
 		})

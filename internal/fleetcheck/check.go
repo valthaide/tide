@@ -118,6 +118,20 @@ type Summary struct {
 	BindSources   []string
 	Rerun         []string
 	Build         []string
+	Security      []ServiceSecurity
+}
+
+// ServiceSecurity is the compose settings checked by the host policy.
+type ServiceSecurity struct {
+	Name        string
+	Privileged  bool
+	NetworkMode string
+	Pid         string
+	Ipc         string
+	CapAdd      []string
+	Devices     []string
+	SecurityOpt []string
+	Binds       []string
 }
 
 // SummarizeCompose reads compose config JSON.
@@ -127,6 +141,13 @@ func SummarizeCompose(raw []byte) (Summary, error) {
 			Image         string            `json:"image"`
 			Build         json.RawMessage   `json:"build"`
 			ContainerName string            `json:"container_name"`
+			Privileged    bool              `json:"privileged"`
+			NetworkMode   string            `json:"network_mode"`
+			Pid           string            `json:"pid"`
+			Ipc           string            `json:"ipc"`
+			CapAdd        []string          `json:"cap_add"`
+			Devices       []any             `json:"devices"`
+			SecurityOpt   []string          `json:"security_opt"`
 			Ports         []composePort     `json:"ports"`
 			Volumes       []composeVolume   `json:"volumes"`
 			Labels        map[string]string `json:"labels"`
@@ -155,11 +176,27 @@ func SummarizeCompose(raw []byte) (Summary, error) {
 				sum.Published = append(sum.Published, port)
 			}
 		}
+		sec := ServiceSecurity{
+			Name:        name,
+			Privileged:  svc.Privileged,
+			NetworkMode: svc.NetworkMode,
+			Pid:         svc.Pid,
+			Ipc:         svc.Ipc,
+			CapAdd:      svc.CapAdd,
+			SecurityOpt: svc.SecurityOpt,
+		}
+		for _, dev := range svc.Devices {
+			if s, ok := dev.(string); ok && strings.TrimSpace(s) != "" {
+				sec.Devices = append(sec.Devices, s)
+			}
+		}
 		for _, v := range svc.Volumes {
 			if strings.EqualFold(v.Type, "bind") && strings.TrimSpace(v.Source) != "" {
 				sum.BindSources = append(sum.BindSources, v.Source)
+				sec.Binds = append(sec.Binds, v.Source)
 			}
 		}
+		sum.Security = append(sum.Security, sec)
 		if strings.EqualFold(strings.TrimSpace(svc.Labels["com.conops.oneshot"]), "rerun") {
 			sum.Rerun = append(sum.Rerun, name)
 		}

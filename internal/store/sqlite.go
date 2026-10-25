@@ -116,10 +116,31 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 		git_sha TEXT NOT NULL,
 		vars_json TEXT NOT NULL DEFAULT '',
 		fleet_sha TEXT NOT NULL DEFAULT '',
+		images_json TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL
 	);
 	`); err != nil {
 		return nil, fmt.Errorf("failed to create app_revisions table: %w", err)
+	}
+	if err := addSQLiteColumnIfMissing(db, "app_revisions", "images_json TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`
+	CREATE TABLE IF NOT EXISTS deploy_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		app_id TEXT NOT NULL,
+		app_name TEXT NOT NULL DEFAULT '',
+		project TEXT NOT NULL DEFAULT '',
+		git_sha TEXT NOT NULL DEFAULT '',
+		fleet_sha TEXT NOT NULL DEFAULT '',
+		vars_json TEXT NOT NULL DEFAULT '',
+		images_json TEXT NOT NULL DEFAULT '',
+		result TEXT NOT NULL DEFAULT '',
+		trigger_name TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL
+	);
+	`); err != nil {
+		return nil, fmt.Errorf("failed to create deploy_events table: %w", err)
 	}
 
 	credentialsQuery := `

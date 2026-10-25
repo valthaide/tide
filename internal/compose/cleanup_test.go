@@ -4,17 +4,13 @@ import "testing"
 
 func TestComposeDownArgs(t *testing.T) {
 	keep := composeDownArgs("proj", "compose.yaml", false)
-	if len(keep) == 0 || keep[len(keep)-1] != "--remove-orphans" {
-		t.Fatalf("without volumes: %v", keep)
-	}
-	for _, a := range keep {
-		if a == "--volumes" || a == "-v" || a == "--rmi" {
-			t.Fatalf("unexpected flag %q in %v", a, keep)
-		}
-	}
 	prune := composeDownArgs("proj", "compose.yaml", true)
-	if prune[len(prune)-1] != "--volumes" {
-		t.Fatalf("with volumes: %v", prune)
+	for _, args := range [][]string{keep, prune} {
+		for _, a := range args {
+			if a == "--volumes" || a == "-v" || a == "--rmi" {
+				t.Fatalf("down must not drop volumes: %v", args)
+			}
+		}
 	}
 }
 

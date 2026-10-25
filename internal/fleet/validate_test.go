@@ -7,6 +7,8 @@ import (
 	"github.com/valthaide/conops-private/internal/fleetcheck"
 )
 
+func boolPtr(v bool) *bool { return &v }
+
 func TestValidateRejectsProjectConflict(t *testing.T) {
 	raw := []byte("host: h\napps:\n  - name: a\n    repo_url: https://example.test/a.git\n    project: shared\n  - name: b\n    repo_url: https://example.test/b.git\n    project: shared\n")
 	report, err := Validate(raw, ValidateOptions{})
@@ -47,7 +49,7 @@ func TestConfigIssuesBuildAndSuspendedPorts(t *testing.T) {
 		Published: []int{8080},
 	}
 	ports := map[int]string{}
-	issues := configIssues(AppSpec{Name: "a", Build: "forbidden", RequireDigest: true}, "", sum, ports)
+	issues := configIssues(AppSpec{Name: "a", Build: "forbidden", RequireDigest: boolPtr(true)}, "", sum, ports)
 	if len(issues) != 2 {
 		t.Fatalf("%+v", issues)
 	}

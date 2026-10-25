@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/cigate"
 	"github.com/valthaide/conops-private/internal/compose"
 	"github.com/valthaide/conops-private/internal/deploypolicy"
@@ -164,6 +165,7 @@ type Reconciler struct {
 	wg               sync.WaitGroup
 	watchHashErrSeen map[string]string    // appID -> last error text (rate-limit logs)
 	ciWaitSince      map[string]time.Time // appID -> when CI wait started
+	lastGC           time.Time
 }
 
 // NewReconciler creates a new reconciler.
@@ -364,6 +366,7 @@ func (r *Reconciler) dispatch() {
 	running := len(r.inFlight)
 	r.mu.Unlock()
 	metrics.SetSyncActivity(queue, running)
+	r.maybeGC()
 }
 
 func (r *Reconciler) inFlightApp(id string) bool {
@@ -445,6 +448,19 @@ func (r *Reconciler) envFileDriftReason(app *App) string {
 			}
 		}
 		return ""
+	}
+	extra, missing := fleetEnvHash(app.Policy().EnvFiles)
+	if missing != "" {
+		se := syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageValidate, "env_file_missing: "+missing)
+		r.declareOnce(app, se)
+		return ""
+	}
+	if extra != "" {
+		if hash == "" {
+			hash = extra
+		} else {
+			hash = hash + "+" + extra
+		}
 	}
 	if hash == "" {
 		metrics.SetEnvDrift(app.Name, false)
@@ -591,20 +607,30 @@ func (r *Reconciler) syncApp(app *App) error {
 	}
 
 	opts := compose.ApplyOptions{
-		Vars:           policy.Vars,
-		BuildMode:      policy.EffectiveBuild(),
-		Project:        app.ComposeProject(),
-		RequireDigest:  policy.RequireDigest,
-		PullIdle:       pullIdle,
-		OneshotTimeout: oneshotTimeout,
-		SyncTimeout:    syncTimeout,
-		BindPrefixes:   bindPrefixes(),
+		Vars:              policy.Vars,
+		BuildMode:         policy.EffectiveBuild(),
+		Project:           app.ComposeProject(),
+		RequireDigest:     policy.RequireDigest,
+		PullIdle:          pullIdle,
+		OneshotTimeout:    oneshotTimeout,
+		SyncTimeout:       syncTimeout,
+		BindPrefixes:      bindPrefixes(),
+		AllowedRegistries: policy.AllowedRegistries,
+		PolicyExceptions:  policy.PolicyExceptions,
 	}
 	if target != strings.TrimSpace(app.LastSeenCommit) {
 		opts.Vars = deploypolicy.DecodeVars(app.LastHealthyVars)
 		opts.NoBuild = true
 		opts.BuildMode = deploypolicy.BuildForbidden
 	}
+	fileVars, missing := readEnvFiles(policy.EnvFiles)
+	if missing != "" {
+		se := syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageValidate, "env_file_missing: "+missing)
+		r.declareOnce(app, se)
+		return nil
+	}
+	fleetVars := opts.Vars
+	opts.Vars = mergeInterpolation(fileVars, fleetVars, app.Name, app.ComposeProject())
 
 	progress := newSyncProgressReporter(r.Registry, r.Logger, app.ID, syncProgressFlushInterval)
 	output, err := r.applyRuntime(ctx, app, envVars, repoSecret, target, opts, progress.Update)
@@ -645,10 +671,11 @@ func (r *Reconciler) syncApp(app *App) error {
 		if transientFailure(se) {
 			// Keep the attempted vars as rejected so the next loop does not
 			// treat the same fleet vars as a new revision and skip the backoff.
-			_ = r.Registry.UpdateRollback(app.ID, app.LastHealthyCommit, app.RejectedCommit, app.LastHealthyVars, deploypolicy.EncodeVars(opts.Vars))
+			_ = r.Registry.UpdateRollback(app.ID, app.LastHealthyCommit, app.RejectedCommit, app.LastHealthyVars, deploypolicy.EncodeVars(fleetVars))
 		}
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
 		if declaredFailure(se) {
+			r.noteDeploy(app, "failed", target, deploypolicy.EncodeVars(policy.Vars), "", deployTrigger(app, target))
 			return nil
 		}
 		return se
@@ -683,18 +710,19 @@ func (r *Reconciler) syncApp(app *App) error {
 		r.Logger.Warn("Failed to update app status", "app_id", app.ID, "error", err)
 	}
 	if r.Logger != nil && syncErr == "" {
-		r.Logger.Info("Applied", "app", app.Name, "revision", revisionLabel(target, opts.Vars), "duration", time.Since(syncStartedAt).Round(time.Millisecond).String())
+		r.Logger.Info("Applied", "app", app.Name, "revision", revisionLabel(target, fleetVars), "duration", time.Since(syncStartedAt).Round(time.Millisecond).String())
 	}
 	rejectedVars := ""
 	if rejected != "" {
 		rejectedVars = app.RejectedVars
 	}
-	_ = r.Registry.UpdateRollback(app.ID, target, rejected, deploypolicy.EncodeVars(opts.Vars), rejectedVars)
+	_ = r.Registry.UpdateRollback(app.ID, target, rejected, deploypolicy.EncodeVars(fleetVars), rejectedVars)
 	r.recordAppliedEnvHash(app)
 	r.recordAppliedWatchHash(app)
 	if syncErr == "" {
 		r.clearTransient(app.ID)
-		_ = r.Registry.RecordRevision(app.ID, target, deploypolicy.EncodeVars(opts.Vars), metrics.FleetSHA())
+		_ = r.Registry.RecordRevision(app.ID, target, deploypolicy.EncodeVars(policy.Vars), metrics.FleetSHA(), revisionImages(r, app))
+		r.noteDeploy(app, "applied", target, deploypolicy.EncodeVars(policy.Vars), revisionImages(r, app), deployTrigger(app, target))
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
 		metrics.ObserveReconcileSuccess()
 		metrics.SetLastSyncTimestamp(app.Name)
@@ -890,10 +918,13 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 			} else {
 				rbCtx, cancel := context.WithTimeout(context.Background(), r.Config.SyncTimeout)
 				rbOut, rbErr := r.applyRuntime(rbCtx, app, envVars, repoSecret, prev, compose.ApplyOptions{
-					Vars:      prevVars,
-					BuildMode: deploypolicy.BuildForbidden,
-					NoBuild:   true,
-					Project:   app.ComposeProject(),
+					Vars:              mergeInterpolation(fileVarsOf(app), prevVars, app.Name, app.ComposeProject()),
+					BuildMode:         deploypolicy.BuildForbidden,
+					NoBuild:           true,
+					Project:           app.ComposeProject(),
+					RequireDigest:     app.Policy().RequireDigest,
+					AllowedRegistries: app.Policy().AllowedRegistries,
+					SyncTimeout:       r.Config.SyncTimeout,
 				}, nil)
 				cancel()
 				if strings.TrimSpace(rbOut) != "" {
@@ -905,10 +936,14 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 					msg = fmt.Sprintf("%s; rollback to %s is not healthy: %v", msg, label, err)
 				} else {
 					msg = fmt.Sprintf("%s; rolled back to %s", healthErr.Error(), label)
+					if migrationWarning(output) {
+						msg += "; migration may have been partially applied"
+					}
 					se := syncerr.New(syncerr.CodeUnhealthy, syncerr.StageHealth, msg)
 					now := time.Now()
-					_ = r.Registry.UpdateSyncResult(app.ID, "synced", now, prev, app.LastSyncedCommitMessage, output, syncerr.Encode(se))
+					_ = r.Registry.UpdateSyncResult(app.ID, "rolled_back", now, prev, app.LastSyncedCommitMessage, output, syncerr.Encode(se))
 					_ = r.Registry.UpdateRollback(app.ID, prev, failedRevision, app.LastHealthyVars, failedVars)
+					r.noteDeploy(app, "rolled_back", prev, app.LastHealthyVars, revisionImages(r, app), "reconcile")
 					r.recordAppliedEnvHash(app)
 					r.recordAppliedWatchHash(app)
 					metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
@@ -1153,7 +1188,7 @@ func declaredFailure(se *syncerr.Error) bool {
 	switch se.GetCode() {
 	case syncerr.CodeBuildForbidden, syncerr.CodeRegistryAuth, syncerr.CodePullFailed, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI,
 		syncerr.CodeValidation, syncerr.CodePortConflict, syncerr.CodeVolumeMissing, syncerr.CodeDigestRequired,
-		syncerr.CodeOneshotFailed, syncerr.CodeOneshotTimeout:
+		syncerr.CodeOneshotFailed, syncerr.CodeOneshotTimeout, syncerr.CodeRegistryDenied:
 		return true
 	default:
 		return false
@@ -1432,4 +1467,54 @@ func truncateOutput(value string) string {
 		return trimmed
 	}
 	return trimmed[:maxLen] + "...(truncated)"
+}
+
+func revisionImages(r *Reconciler, app *App) string {
+	type digestSource interface {
+		ExpectedDigests(project string) map[string]string
+	}
+	source, ok := r.Executor.(digestSource)
+	if !ok || r == nil || app == nil {
+		return ""
+	}
+	raw, err := json.Marshal(source.ExpectedDigests(app.ComposeProject()))
+	if err != nil || len(raw) == 0 || string(raw) == "null" || string(raw) == "{}" {
+		return ""
+	}
+	return string(raw)
+}
+
+func (r *Reconciler) noteDeploy(app *App, result, gitSHA, varsJSON, images, trigger string) {
+	if r == nil || app == nil {
+		return
+	}
+	public := deploypolicy.EncodeVars(fleetcheck.PublicVars(deploypolicy.DecodeVars(varsJSON), app.Policy().PublicVars))
+	_ = r.Registry.RecordDeploy(api.DeployEvent{
+		AppID:    app.ID,
+		App:      app.Name,
+		Project:  app.ComposeProject(),
+		GitSHA:   gitSHA,
+		FleetSHA: metrics.FleetSHA(),
+		VarsJSON: public,
+		Images:   images,
+		Result:   result,
+		Trigger:  trigger,
+	})
+	metrics.DeploysTotal.WithLabelValues(app.Name, deployResult(result)).Inc()
+}
+
+func deployTrigger(app *App, target string) string {
+	if app != nil && target != "" && target != strings.TrimSpace(app.LastSeenCommit) {
+		return "git"
+	}
+	return "fleet"
+}
+
+func deployResult(result string) string {
+	switch result {
+	case "applied", "rolled_back":
+		return result
+	default:
+		return "failed"
+	}
 }

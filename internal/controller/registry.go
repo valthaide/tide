@@ -623,17 +623,35 @@ func (r *Registry) UpdateSyncProgress(id string, lastSyncAt time.Time, syncOutpu
 	return r.store.UpdateAppSyncProgress(context.Background(), id, lastSyncAt, syncOutput)
 }
 
-func (r *Registry) RecordRevision(id, gitSHA, varsJSON, fleetSHA string) error {
+func (r *Registry) RecordRevision(id, gitSHA, varsJSON, fleetSHA, imagesJSON string) error {
 	if r == nil || r.store == nil || strings.TrimSpace(id) == "" || strings.TrimSpace(gitSHA) == "" {
 		return nil
 	}
 	return r.store.InsertAppRevision(context.Background(), api.Revision{
-		AppID:     id,
-		GitSHA:    gitSHA,
-		VarsJSON:  varsJSON,
-		FleetSHA:  fleetSHA,
-		CreatedAt: time.Now(),
+		AppID:      id,
+		GitSHA:     gitSHA,
+		VarsJSON:   varsJSON,
+		FleetSHA:   fleetSHA,
+		ImagesJSON: imagesJSON,
+		CreatedAt:  time.Now(),
 	})
+}
+
+func (r *Registry) RecordDeploy(event api.DeployEvent) error {
+	if r == nil || r.store == nil || strings.TrimSpace(event.AppID) == "" {
+		return nil
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now()
+	}
+	return r.store.InsertDeployEvent(context.Background(), event)
+}
+
+func (r *Registry) ListDeploys(id string, limit int) ([]api.DeployEvent, error) {
+	if r == nil || r.store == nil {
+		return nil, fmt.Errorf("app not found")
+	}
+	return r.store.ListDeployEvents(context.Background(), id, limit)
 }
 
 func (r *Registry) ListRevisions(id string, limit int) ([]api.Revision, error) {

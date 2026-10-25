@@ -46,7 +46,7 @@ func UnknownFields(data []byte) ([]string, error) {
 					return nil, fmt.Errorf("unknown_field: schema %d is newer than %d", n, supportedSchema)
 				}
 			}
-		case "host", "build":
+		case "host", "build", "require_digest", "allowed_registries":
 		case "apps":
 			unknown = append(unknown, unknownAppFields(val)...)
 		default:
@@ -66,7 +66,8 @@ func unknownAppFields(seq *yaml.Node) []string {
 		"prune_volumes": {}, "health_timeout": {}, "require_pipeline_success": {},
 		"watch_files": {}, "build": {}, "vars": {}, "project": {},
 		"sync_timeout": {}, "pull_timeout": {}, "oneshot_timeout": {},
-		"require_digest": {}, "public_vars": {},
+		"require_digest": {}, "public_vars": {}, "allowed_registries": {},
+		"env_files": {}, "policy_exceptions": {},
 	}
 	var out []string
 	for i, app := range seq.Content {

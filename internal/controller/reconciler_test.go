@@ -362,7 +362,7 @@ func TestRollbackRestoresVars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != "synced" || !strings.Contains(got.LastSyncError, "rolled back to") || !strings.Contains(got.LastSyncError, "APP_TAG=1") {
+	if got.Status != "rolled_back" || !strings.Contains(got.LastSyncError, "rolled back to") || !strings.Contains(got.LastSyncError, "APP_TAG=1") {
 		t.Fatalf("status=%s err=%s", got.Status, got.LastSyncError)
 	}
 }
@@ -542,7 +542,7 @@ func TestRollbackUnhealthyRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != "synced" || got.LastSyncedCommit != "aaaaaaaa" || got.RejectedCommit != "bbbbbbbb" {
+	if got.Status != "rolled_back" || got.LastSyncedCommit != "aaaaaaaa" || got.RejectedCommit != "bbbbbbbb" {
 		t.Fatalf("after rollback: status=%s synced=%s rejected=%s err=%s", got.Status, got.LastSyncedCommit, got.RejectedCommit, got.LastSyncError)
 	}
 	if !strings.Contains(got.LastSyncError, "bbbbbbbb") {

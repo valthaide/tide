@@ -22,7 +22,7 @@ func (s *PostgresStore) InsertAppRevision(ctx context.Context, rev api.Revision)
 	if created.IsZero() {
 		created = time.Now()
 	}
-	if _, err := s.pool.Exec(ctx, `INSERT INTO app_revisions (app_id, git_sha, vars_json, fleet_sha, created_at) VALUES ($1, $2, $3, $4, $5)`, rev.AppID, rev.GitSHA, rev.VarsJSON, rev.FleetSHA, created); err != nil {
+	if _, err := s.pool.Exec(ctx, `INSERT INTO app_revisions (app_id, git_sha, vars_json, fleet_sha, images_json, created_at) VALUES ($1, $2, $3, $4, $5, $6)`, rev.AppID, rev.GitSHA, rev.VarsJSON, rev.FleetSHA, rev.ImagesJSON, created); err != nil {
 		return err
 	}
 	_, err = s.pool.Exec(ctx, `DELETE FROM app_revisions WHERE app_id = $1 AND id NOT IN (SELECT id FROM app_revisions WHERE app_id = $1 ORDER BY id DESC LIMIT 5)`, rev.AppID)
@@ -33,7 +33,7 @@ func (s *PostgresStore) ListAppRevisions(ctx context.Context, appID string, limi
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.pool.Query(ctx, `SELECT git_sha, vars_json, fleet_sha, created_at FROM app_revisions WHERE app_id = $1 ORDER BY id DESC LIMIT $2`, appID, limit)
+	rows, err := s.pool.Query(ctx, `SELECT git_sha, vars_json, fleet_sha, images_json, created_at FROM app_revisions WHERE app_id = $1 ORDER BY id DESC LIMIT $2`, appID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -41,11 +41,44 @@ func (s *PostgresStore) ListAppRevisions(ctx context.Context, appID string, limi
 	out := []api.Revision{}
 	for rows.Next() {
 		var rev api.Revision
-		if err := rows.Scan(&rev.GitSHA, &rev.VarsJSON, &rev.FleetSHA, &rev.CreatedAt); err != nil {
+		if err := rows.Scan(&rev.GitSHA, &rev.VarsJSON, &rev.FleetSHA, &rev.ImagesJSON, &rev.CreatedAt); err != nil {
 			return nil, err
 		}
 		rev.AppID = appID
 		out = append(out, rev)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) InsertDeployEvent(ctx context.Context, event api.DeployEvent) error {
+	created := event.CreatedAt
+	if created.IsZero() {
+		created = time.Now()
+	}
+	if _, err := s.pool.Exec(ctx, `INSERT INTO deploy_events (app_id, app_name, project, git_sha, fleet_sha, vars_json, images_json, result, trigger_name, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, event.AppID, event.App, event.Project, event.GitSHA, event.FleetSHA, event.VarsJSON, event.Images, event.Result, event.Trigger, created); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM deploy_events WHERE app_id = $1 AND id NOT IN (SELECT id FROM deploy_events WHERE app_id = $1 ORDER BY id DESC LIMIT 50)`, event.AppID)
+	return err
+}
+
+func (s *PostgresStore) ListDeployEvents(ctx context.Context, appID string, limit int) ([]api.DeployEvent, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.pool.Query(ctx, `SELECT app_name, project, git_sha, fleet_sha, vars_json, images_json, result, trigger_name, created_at FROM deploy_events WHERE app_id = $1 ORDER BY id DESC LIMIT $2`, appID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []api.DeployEvent{}
+	for rows.Next() {
+		var event api.DeployEvent
+		if err := rows.Scan(&event.App, &event.Project, &event.GitSHA, &event.FleetSHA, &event.VarsJSON, &event.Images, &event.Result, &event.Trigger, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		event.AppID = appID
+		out = append(out, event)
 	}
 	return out, rows.Err()
 }

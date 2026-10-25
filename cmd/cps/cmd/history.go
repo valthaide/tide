@@ -40,7 +40,7 @@ var historyAppCmd = &cobra.Command{
 			return err
 		}
 		var apiResp struct {
-			Data []api.Revision `json:"data"`
+			Data []api.DeployEvent `json:"data"`
 		}
 		if err := json.Unmarshal(body, &apiResp); err != nil {
 			return fmt.Errorf("decode history: %w", err)
@@ -53,7 +53,7 @@ var historyAppCmd = &cobra.Command{
 			return nil
 		}
 		for _, rev := range apiResp.Data {
-			fmt.Printf("%s %s %s\n", rev.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), rev.GitSHA, rev.FleetSHA)
+			fmt.Printf("%s %s %s %s\n", rev.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), rev.Result, rev.GitSHA, rev.Images)
 		}
 		return nil
 	},

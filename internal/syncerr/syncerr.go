@@ -29,6 +29,7 @@ const (
 	CodePortConflict   = "port_conflict"
 	CodeVolumeMissing  = "volume_missing"
 	CodeDigestRequired = "digest_required"
+	CodeRegistryDenied = "registry_not_allowed"
 	CodeUnsetVar       = "unset_var"
 	CodeDockerAPI      = "docker_api_incompatible"
 	CodeUnknown        = "unknown"
@@ -204,6 +205,8 @@ func Classify(err error) *Error {
 		return New(CodeVolumeMissing, StageValidate, msg)
 	case strings.Contains(lower, "digest_required"):
 		return New(CodeDigestRequired, StageValidate, msg)
+	case strings.Contains(lower, "registry_not_allowed"):
+		return New(CodeRegistryDenied, StageValidate, msg)
 	case strings.Contains(lower, "policy_violation"):
 		return New(CodeValidation, StageValidate, msg)
 	case strings.Contains(lower, "unset_var"):

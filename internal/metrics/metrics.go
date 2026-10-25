@@ -225,6 +225,18 @@ var (
 		Name:      "pull_running",
 		Help:      "Image pulls currently running.",
 	})
+
+	DeploysTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "deploys_total",
+		Help:      "Deploy results recorded for an app.",
+	}, []string{"app", "result"})
+
+	ImageGCRemoved = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "image_gc_removed_total",
+		Help:      "Images removed by ConOps image GC.",
+	})
 )
 
 // ImageSample is one running service image reported by the reconciler.
@@ -356,6 +368,8 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		SyncQueueLength,
 		SyncRunning,
 		PullRunning,
+		DeploysTotal,
+		ImageGCRemoved,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {

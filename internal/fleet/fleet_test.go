@@ -84,7 +84,7 @@ apps:
 	if !doc.Apps[0].PruneVolumes || doc.Apps[0].HealthTimeout != "45s" {
 		t.Fatalf("%+v", doc.Apps[0])
 	}
-	app := &api.App{DeployPolicyJSON: policyJSONFromSpec(doc.Apps[0], "")}
+	app := &api.App{DeployPolicyJSON: policyJSONFromSpec(doc.Apps[0], doc)}
 	if d := app.HealthTimeoutDuration(); d.String() != "45s" {
 		t.Fatalf("timeout %s", d)
 	}
@@ -107,7 +107,7 @@ apps:
 	if doc.Apps[0].Project != "crm-backend" {
 		t.Fatalf("project %q", doc.Apps[0].Project)
 	}
-	app := &api.App{ID: "11111111-2222-3333-4444-555555555555", DeployPolicyJSON: policyJSONFromSpec(doc.Apps[0], "")}
+	app := &api.App{ID: "11111111-2222-3333-4444-555555555555", DeployPolicyJSON: policyJSONFromSpec(doc.Apps[0], doc)}
 	if app.ComposeProject() != "crm-backend" {
 		t.Fatalf("compose project %s", app.ComposeProject())
 	}
@@ -134,12 +134,12 @@ apps:
 	if doc.Build != "forbidden" || doc.Apps[0].Build != "allowed" || doc.Apps[0].Vars["APP_TAG"] != "1.2.3" {
 		t.Fatalf("%+v", doc)
 	}
-	raw := policyJSONFromSpec(doc.Apps[0], doc.Build)
+	raw := policyJSONFromSpec(doc.Apps[0], doc)
 	policy := deploypolicy.Decode(raw)
 	if policy.Build != "allowed" || policy.Vars["APP_TAG"] != "1.2.3" {
 		t.Fatalf("policy %+v", policy)
 	}
-	inherited := policyJSONFromSpec(AppSpec{Name: "php"}, "forbidden")
+	inherited := policyJSONFromSpec(AppSpec{Name: "php"}, &HostDocument{Build: "forbidden"})
 	if deploypolicy.Decode(inherited).EffectiveBuild() != "forbidden" {
 		t.Fatalf("inherited: %s", inherited)
 	}

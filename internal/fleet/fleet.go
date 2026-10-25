@@ -15,10 +15,12 @@ import (
 
 // HostDocument describes apps that should run on one host.
 type HostDocument struct {
-	Schema int       `yaml:"schema"`
-	Host   string    `yaml:"host"`
-	Build  string    `yaml:"build"`
-	Apps   []AppSpec `yaml:"apps"`
+	Schema            int       `yaml:"schema"`
+	Host              string    `yaml:"host"`
+	Build             string    `yaml:"build"`
+	RequireDigest     *bool     `yaml:"require_digest"`
+	AllowedRegistries []string  `yaml:"allowed_registries"`
+	Apps              []AppSpec `yaml:"apps"`
 }
 
 // AppSpec is a desired application registration from fleet git.
@@ -42,8 +44,18 @@ type AppSpec struct {
 	SyncTimeout            string            `yaml:"sync_timeout"`
 	PullTimeout            string            `yaml:"pull_timeout"`
 	OneshotTimeout         string            `yaml:"oneshot_timeout"`
-	RequireDigest          bool              `yaml:"require_digest"`
+	RequireDigest          *bool             `yaml:"require_digest"`
 	PublicVars             []string          `yaml:"public_vars"`
+	AllowedRegistries      []string          `yaml:"allowed_registries"`
+	EnvFiles               []string          `yaml:"env_files"`
+	PolicyExceptions       []PolicyException `yaml:"policy_exceptions"`
+}
+
+// PolicyException allows one compose rule for one service while policy mode is warn.
+type PolicyException struct {
+	Service string `yaml:"service"`
+	Rule    string `yaml:"rule"`
+	Reason  string `yaml:"reason"`
 }
 
 // WatchFileSpec is a path watched for content changes after sync.

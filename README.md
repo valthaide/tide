@@ -46,8 +46,13 @@ Metrics: `http://127.0.0.1:8081/metrics` · Health: `/healthz`
 | `CONOPS_SYNC_PARALLEL` | Лимит параллельных sync (default 2). `CONOPS_MAX_CONCURRENT_SYNCS` — старое имя, если новое не задано |
 | `CONOPS_PULL_PARALLEL` | Лимит только на `compose pull`. Пусто — отдельного лимита нет, как в v1.0.17 |
 | `CONOPS_FLEET_STRICT` | `warn` (default) или `enforce` для неизвестных полей fleet |
-| `CONOPS_POLICY_MODE` | `off` (default), `warn` или `enforce` для `container_name` |
+| `CONOPS_POLICY_MODE` | `off` (default), `warn` или `enforce` для `container_name`, `privileged`, `docker.sock`, host-сети |
 | `CONOPS_ALLOWED_BIND_PREFIXES` | Абсолютные bind-пути через запятую. Пусто разрешает все |
+| `CONOPS_IMAGE_GC` | `on` включает очистку своих неиспользуемых образов. По умолчанию выключено |
+| `CONOPS_IMAGE_GC_KEEP` | Сколько последних ревизий не трогать (default 3) |
+| `CONOPS_IMAGE_GC_MIN_AGE` | Минимальный возраст образа (default 72h) |
+| `CONOPS_IMAGE_GC_DRY_RUN` | `true` — только список, без удаления |
+| `CONOPS_IMAGE_GC_DISK_PCT` | Внеочередная очистка, когда занято не меньше этого процента |
 | `CONOPS_BUILD` | `allowed` (default) или `forbidden`. Вместе с `build:` в fleet |
 | `REGISTRY_HOST` / `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | Вход в registry на время `compose pull` (задаёт puppet) |
 | `CONOPS_WEBHOOK_SECRET` | Включает `POST /api/v1/hooks/git` |
@@ -114,7 +119,7 @@ apps:
 
 В compose приложения: `image: registry.example/php:${APP_TAG}`. Смена тега — одна строка `APP_TAG` в fleet. `cps get apps` показывает образ и дайджест, которые реально запущены. Пин с дайджестом: `image: registry.example/php:${APP_TAG}@sha256:…`. `require_digest: true` требует `@sha256:` у каждого сервиса.
 
-Необязательные поля приложения, пустые значения оставляют поведение v1.0.17: `sync_timeout`, `pull_timeout`, `oneshot_timeout` (по умолчанию 10m), `public_vars`. Повтор разового сервиса — только метка `com.conops.oneshot=rerun`. Проверка файла без контроллера: `cps validate --fleet-file hosts/host.yaml`. История успешных синхронизаций: `cps history app NAME`.
+Необязательные поля приложения, пустые значения оставляют поведение v1.0.17: `sync_timeout`, `pull_timeout`, `oneshot_timeout` (по умолчанию 10m), `public_vars`, `env_files`, `allowed_registries`, `policy_exceptions`. На хосте те же `require_digest` и `allowed_registries` действуют, если у приложения своё значение не задано. Повтор разового сервиса — только метка `com.conops.oneshot=rerun`. Том с меткой `com.conops.keep=true` не удаляется. Проверка файла без контроллера: `cps validate --fleet-file hosts/host.yaml`. Журнал деплоев: `cps history app NAME`. Очистка образов: `cps gc --dry-run`.
 
 ## Лицензия
 

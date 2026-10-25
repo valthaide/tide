@@ -46,6 +46,8 @@ type Store interface {
 	Close()
 	InsertAppRevision(ctx context.Context, rev api.Revision) error
 	ListAppRevisions(ctx context.Context, appID string, limit int) ([]api.Revision, error)
+	InsertDeployEvent(ctx context.Context, event api.DeployEvent) error
+	ListDeployEvents(ctx context.Context, appID string, limit int) ([]api.DeployEvent, error)
 }
 
 // AppCredential stores encrypted app-level credentials.

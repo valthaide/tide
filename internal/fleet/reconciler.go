@@ -305,7 +305,7 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 			continue
 		}
 		desiredNames[spec.Name] = struct{}{}
-		if err := r.upsertApp(spec, doc.Build); err != nil {
+		if err := r.upsertApp(spec, doc); err != nil {
 			return fmt.Errorf("upsert app %q: %w", spec.Name, err)
 		}
 	}
@@ -331,7 +331,7 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 	return nil
 }
 
-func (r *Reconciler) upsertApp(spec AppSpec, hostBuild string) error {
+func (r *Reconciler) upsertApp(spec AppSpec, doc *HostDocument) error {
 	method := repoauth.NormalizeMethod(spec.RepoAuthMethod)
 	if method == "" {
 		method = repoauth.MethodPublic
@@ -359,7 +359,7 @@ func (r *Reconciler) upsertApp(spec AppSpec, hostBuild string) error {
 		if err := r.Apps.SetRevision(app.ID, spec.Revision); err != nil {
 			return err
 		}
-		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec, hostBuild)); err != nil {
+		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec, doc)); err != nil {
 			return err
 		}
 		if spec.Suspended {
@@ -397,7 +397,7 @@ func (r *Reconciler) upsertApp(spec AppSpec, hostBuild string) error {
 		if err := r.Apps.SetRevision(app.ID, spec.Revision); err != nil {
 			return err
 		}
-		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec, hostBuild)); err != nil {
+		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec, doc)); err != nil {
 			return err
 		}
 		if spec.Suspended {
@@ -413,7 +413,7 @@ func (r *Reconciler) upsertApp(spec AppSpec, hostBuild string) error {
 		return err
 	}
 	varsChanged := !deploypolicy.VarsEqual(existing.Policy().Vars, spec.Vars)
-	if err := r.Apps.UpdateDeployPolicy(existing.ID, policyJSONFromSpec(spec, hostBuild)); err != nil {
+	if err := r.Apps.UpdateDeployPolicy(existing.ID, policyJSONFromSpec(spec, doc)); err != nil {
 		return err
 	}
 	if varsChanged {
@@ -485,10 +485,22 @@ func rememberProject(cleaner RuntimeCleaner, app *api.App) {
 	namer.RememberProject(app.ID, app.ComposeProject())
 }
 
-func policyJSONFromSpec(spec AppSpec, hostBuild string) string {
+func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
+	hostBuild := ""
+	var hostDigest *bool
+	var hostRegs []string
+	if doc != nil {
+		hostBuild = doc.Build
+		hostDigest = doc.RequireDigest
+		hostRegs = doc.AllowedRegistries
+	}
 	build := spec.Build
 	if build == "" {
 		build = deploypolicy.NormalizeBuild(hostBuild)
+	}
+	regs := spec.AllowedRegistries
+	if len(regs) == 0 {
+		regs = hostRegs
 	}
 	p := deploypolicy.Policy{
 		RequirePipelineSuccess: spec.RequirePipelineSuccess,
@@ -500,8 +512,17 @@ func policyJSONFromSpec(spec AppSpec, hostBuild string) string {
 		SyncTimeout:            spec.SyncTimeout,
 		PullTimeout:            spec.PullTimeout,
 		OneshotTimeout:         spec.OneshotTimeout,
-		RequireDigest:          spec.RequireDigest,
+		RequireDigest:          effectiveBool(spec.RequireDigest, hostDigest),
 		PublicVars:             spec.PublicVars,
+		AllowedRegistries:      regs,
+		EnvFiles:               spec.EnvFiles,
+	}
+	for _, ex := range spec.PolicyExceptions {
+		p.PolicyExceptions = append(p.PolicyExceptions, deploypolicy.PolicyException{
+			Service: ex.Service,
+			Rule:    ex.Rule,
+			Reason:  ex.Reason,
+		})
 	}
 	for _, w := range spec.WatchFiles {
 		p.WatchFiles = append(p.WatchFiles, deploypolicy.WatchFile{
@@ -513,6 +534,16 @@ func policyJSONFromSpec(spec AppSpec, hostBuild string) string {
 		})
 	}
 	return deploypolicy.Encode(p)
+}
+
+func effectiveBool(app, host *bool) bool {
+	if app != nil {
+		return *app
+	}
+	if host != nil {
+		return *host
+	}
+	return false
 }
 
 func (r *Reconciler) resolveAppSecret(spec AppSpec, method string) (string, error) {

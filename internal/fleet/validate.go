@@ -111,7 +111,7 @@ func configIssues(app AppSpec, hostBuild string, sum fleetcheck.Summary, ports m
 			issues = append(issues, fleetcheck.Issue{App: app.Name, Rule: "build_forbidden", Message: "build_forbidden: " + strings.Join(sum.Build, ",")})
 		}
 	}
-	if app.RequireDigest {
+	if app.RequireDigest != nil && *app.RequireDigest {
 		for _, issue := range fleetcheck.DigestRequired(sum.Images) {
 			issue.App = app.Name
 			issues = append(issues, issue)

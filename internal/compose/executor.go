@@ -2,6 +2,7 @@ package compose
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -536,6 +537,15 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 	if rmOut := e.removeUnusedImages(ctx, appID, imageRefs); strings.TrimSpace(rmOut) != "" {
 		outputs = append(outputs, rmOut)
 	}
+	if pruneVolumes {
+		removed, kept := e.pruneProjectVolumes(ctx, projectName)
+		if len(kept) > 0 && e.Logger != nil {
+			e.Logger.Info("Named volumes kept", "app_id", appID, "volumes", strings.Join(kept, ","))
+		}
+		if len(removed) > 0 && e.Logger != nil {
+			e.Logger.Info("Named volumes removed", "app_id", appID, "volumes", strings.Join(removed, ","))
+		}
+	}
 
 	if !downAttempted && len(containerIDs) == 0 && e.Logger != nil {
 		e.Logger.Info("No running resources found for app", "app_id", appID, "project", projectName)
@@ -560,6 +570,51 @@ func (e *ComposeExecutor) projectVolumeNames(ctx context.Context, projectName st
 		return nil
 	}
 	return uniqueImageRefs(out)
+}
+
+func (e *ComposeExecutor) pruneProjectVolumes(ctx context.Context, projectName string) (removed, kept []string) {
+	for _, name := range e.projectVolumeNames(ctx, projectName) {
+		if e.volumeKept(ctx, name) {
+			kept = append(kept, name)
+			continue
+		}
+		if _, err := e.runCommand(ctx, "docker", []string{"volume", "rm", name}, e.runtimeWorkDir(), nil, nil); err != nil {
+			kept = append(kept, name)
+			continue
+		}
+		removed = append(removed, name)
+	}
+	return removed, kept
+}
+
+func (e *ComposeExecutor) volumeKept(ctx context.Context, name string) bool {
+	raw, err := e.runCommand(ctx, "docker", []string{"volume", "inspect", name}, e.runtimeWorkDir(), nil, nil)
+	if err != nil {
+		return true
+	}
+	return volumeInspectKept(raw)
+}
+
+func (e *ComposeExecutor) RemoveImage(ctx context.Context, id string) error {
+	_, err := e.runCommand(ctx, "docker", []string{"rmi", id}, e.runtimeWorkDir(), nil, nil)
+	return err
+}
+
+func volumeInspectKept(raw string) bool {
+	var docs []struct {
+		Labels map[string]string `json:"Labels"`
+	}
+	if err := json.Unmarshal([]byte(extractJSON(raw)), &docs); err != nil || len(docs) == 0 {
+		return true
+	}
+	labels := docs[0].Labels
+	if strings.EqualFold(strings.TrimSpace(labels["com.conops.keep"]), "true") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(labels["com.docker.compose.volume.external"]), "true") {
+		return true
+	}
+	return false
 }
 
 func (e *ComposeExecutor) projectImageRefs(ctx context.Context, projectName string) []string {

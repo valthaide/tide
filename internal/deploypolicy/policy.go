@@ -47,8 +47,20 @@ type Policy struct {
 	// RequireDigest rejects images that are not pinned with @sha256. Default false.
 	RequireDigest bool `json:"require_digest,omitempty" yaml:"require_digest"`
 	// PublicVars names variables that may appear in status and metrics.
-	// Keys ending in _TAG or _IMAGE are public unless they look like secrets.
 	PublicVars []string `json:"public_vars,omitempty" yaml:"public_vars"`
+	// AllowedRegistries, when non-empty, rejects images from other registries.
+	AllowedRegistries []string `json:"allowed_registries,omitempty" yaml:"allowed_registries"`
+	// EnvFiles are host files outside git. Their values interpolate compose and are not logged.
+	EnvFiles []string `json:"env_files,omitempty" yaml:"env_files"`
+	// PolicyExceptions name service rules that warn mode may allow.
+	PolicyExceptions []PolicyException `json:"policy_exceptions,omitempty" yaml:"policy_exceptions"`
+}
+
+// PolicyException is one allowed compose policy rule for one service.
+type PolicyException struct {
+	Service string `json:"service" yaml:"service"`
+	Rule    string `json:"rule" yaml:"rule"`
+	Reason  string `json:"reason,omitempty" yaml:"reason"`
 }
 
 // Normalize trims fields and defaults.

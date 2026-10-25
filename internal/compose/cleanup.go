@@ -7,9 +7,6 @@ import "strings"
 // removed by compose itself: the caller deletes refs that no other container uses.
 func composeDownArgs(projectName, composeFileName string, pruneVolumes bool) []string {
 	args := []string{"compose", "-p", projectName, "-f", composeFileName, "down", "--remove-orphans"}
-	if pruneVolumes {
-		args = append(args, "--volumes")
-	}
 	return args
 }
 

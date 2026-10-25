@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.0-rc3
+
+### Features
+- **Slot lifecycle.** Removing an app keeps named volumes unless `prune_volumes: true` was already applied. `compose down` never passes `--volumes`. Volumes labeled `com.conops.keep=true`, and external volumes, are not removed. Adding the app again with the same `project` adopts the volumes. The delete response explains the two-step removal.
+- **Registries and digests.** Host or app `require_digest` rejects an image without `@sha256:` before pull. `allowed_registries`, when set, rejects other registries with `registry_not_allowed`. Empty means every registry is allowed.
+- **Healthy revisions and rollback status.** The last 5 healthy revisions keep git SHA, fleet SHA, public vars, and pinned digests. A failed health check still rolls back to the previous healthy revision and sets status `rolled_back`, so `cps wait` stops immediately. A one-shot change adds a migration warning. There is no manual `cps rollback`.
+- **Image GC.** `CONOPS_IMAGE_GC=on` removes only unused images that belong to ConOps apps, are older than `CONOPS_IMAGE_GC_MIN_AGE` (default 72h), and are not in the last `CONOPS_IMAGE_GC_KEEP` revisions (default 3). It never runs `prune -a`. `CONOPS_IMAGE_GC_DRY_RUN=true` and `cps gc --dry-run` list them. `CONOPS_IMAGE_GC_DISK_PCT` can run GC early. Default is off.
+- **Compose policy.** `CONOPS_POLICY_MODE=warn|enforce` checks `privileged`, host network, host pid/ipc, `cap_add`, devices, unconfined, `docker.sock`, and a bind of `/`. `off` (default) does not. Exceptions in `policy_exceptions` apply only in `warn`.
+- **Deploy journal.** Each applied, failed, or rolled-back deploy is stored. `cps history` shows result, git SHA, and images. Metric `conops_deploys_total`.
+- **Host env files.** Fleet `env_files` are read for compose interpolation, lose to `vars`, and are redacted. A missing file is `env_file_missing` before changes. A content change is a new sync. `SLOT`, `PROJECT`, `CONOPS_APP_NAME`, and `CONOPS_PROJECT` are set automatically.
+- **Status JSON.** Each app includes `schema: 1`, `fleet_revision`, and image `tag` plus `digest`. `cps version` prints both versions.
+
+### Upgrade from v1.0.17
+- New fields are optional. GC, policy, registry allow list, and `require_digest` stay off when unset.
+- New tables only: `app_revisions` and `deploy_events`. `apps` columns are unchanged, so the v1.0.17 controller can open the database.
+
 ## v1.1.0-rc2
 
 ### Fixes

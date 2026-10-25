@@ -63,6 +63,10 @@ type App struct {
 	Tags string `json:"tags,omitempty"`
 	// Oneshot is the latest one-shot status, such as "migrate completed exit 0".
 	Oneshot string `json:"oneshot,omitempty"`
+	// FleetRevision is the fleet checkout SHA observed by this controller.
+	FleetRevision string `json:"fleet_revision,omitempty"`
+	// Schema is the additive app document version.
+	Schema int `json:"schema,omitempty"`
 }
 
 // VolumeRef is one named volume used by an app.
@@ -73,10 +77,25 @@ type VolumeRef struct {
 
 // Revision is one successful sync kept for history. It is not an apps column.
 type Revision struct {
+	AppID      string    `json:"-"`
+	GitSHA     string    `json:"git_sha"`
+	VarsJSON   string    `json:"vars_json,omitempty"`
+	FleetSHA   string    `json:"fleet_sha,omitempty"`
+	ImagesJSON string    `json:"images,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// DeployEvent is one applied, failed, or rolled-back deploy. It is not an apps column.
+type DeployEvent struct {
 	AppID     string    `json:"-"`
-	GitSHA    string    `json:"git_sha"`
-	VarsJSON  string    `json:"vars_json,omitempty"`
+	App       string    `json:"app,omitempty"`
+	Project   string    `json:"project,omitempty"`
+	GitSHA    string    `json:"git_sha,omitempty"`
 	FleetSHA  string    `json:"fleet_sha,omitempty"`
+	VarsJSON  string    `json:"vars_json,omitempty"`
+	Images    string    `json:"images,omitempty"`
+	Result    string    `json:"result"`
+	Trigger   string    `json:"trigger,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -84,6 +103,7 @@ type Revision struct {
 type ImageRef struct {
 	Service string `json:"service"`
 	Image   string `json:"image"`
+	Tag     string `json:"tag,omitempty"`
 	Digest  string `json:"digest"`
 }
 
