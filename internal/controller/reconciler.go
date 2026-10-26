@@ -340,6 +340,9 @@ func (r *Reconciler) dispatch() {
 		if r.inFlightApp(app.ID) {
 			continue
 		}
+		if r.inTransientPause(app) {
+			continue
+		}
 		appCopy := app
 		if !r.tryStart(appCopy.ID) {
 			if r.Logger != nil {
@@ -766,13 +769,30 @@ func transientBackoff(attempt int) time.Duration {
 }
 
 func (r *Reconciler) transientReady(app *App) bool {
-	if app == nil || !transientFailure(&syncerr.Error{Code: app.LastSyncErrorCode}) {
+	if app == nil || !transientFailure(appTransientError(app)) {
 		return false
 	}
 	r.retryMu.Lock()
 	defer r.retryMu.Unlock()
 	st := r.retryAfter[app.ID]
 	return st.next.IsZero() || !time.Now().Before(st.next)
+}
+
+func (r *Reconciler) inTransientPause(app *App) bool {
+	if app == nil || !transientFailure(appTransientError(app)) {
+		return false
+	}
+	r.retryMu.Lock()
+	defer r.retryMu.Unlock()
+	st := r.retryAfter[app.ID]
+	return !st.next.IsZero() && time.Now().Before(st.next)
+}
+
+func appTransientError(app *App) *syncerr.Error {
+	if app == nil {
+		return nil
+	}
+	return &syncerr.Error{Code: app.LastSyncErrorCode, Message: app.LastSyncError}
 }
 
 func (r *Reconciler) scheduleTransient(appID string) (int, time.Duration) {
@@ -991,7 +1011,7 @@ func (r *Reconciler) varsDriftReason(app *App) string {
 	}
 	// A failed pull of these same vars is not a new revision. Retry only when
 	// the transient backoff elapses. A different tag still queues at once.
-	if transientFailure(&syncerr.Error{Code: app.LastSyncErrorCode}) {
+	if transientFailure(appTransientError(app)) {
 		if len(rejected) > 0 && deploypolicy.VarsEqual(desired, rejected) {
 			return ""
 		}

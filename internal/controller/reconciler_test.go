@@ -488,9 +488,51 @@ func TestPullFailedDoesNotBypassBackoffViaVars(t *testing.T) {
 	}
 }
 
+func TestPolicyViolationPauseBlocksRetry(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "hello", RepoURL: "https://example.com/hello.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "aaaaaaaa", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	se := syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, "policy_violation: web privileged")
+	if err := reg.UpdateSyncResultErr(app.ID, "failed", time.Now(), "", "", "", se); err != nil {
+		t.Fatal(err)
+	}
+	vars := map[string]string{"APP_TAG": "1"}
+	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{Vars: vars})); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateRollback(app.ID, "", "", "", deploypolicy.EncodeVars(vars)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &fakeRuntime{}
+	r := testReconciler(t, reg, rt, ReconcilerConfig{Interval: time.Hour, SyncTimeout: time.Minute, MaxConcurrent: 1})
+	r.scheduleTransient(got.ID)
+	if reason := r.varsDriftReason(got); reason != "" {
+		t.Fatalf("policy_violation must not requeue as vars drift, got %q", reason)
+	}
+	if !r.inTransientPause(got) {
+		t.Fatal("policy_violation should stay in the backoff pause")
+	}
+	r.dispatch()
+	r.wg.Wait()
+	if len(rt.applyCalls) != 0 {
+		t.Fatalf("sync ran during policy backoff: %v", rt.applyCalls)
+	}
+}
+
 func TestTransientBackoffGrows(t *testing.T) {
 	if transientBackoff(1) != 15*time.Second || transientBackoff(2) != 30*time.Second || transientBackoff(3) != time.Minute {
 		t.Fatalf("backoff %s %s %s", transientBackoff(1), transientBackoff(2), transientBackoff(3))
+	}
+	if transientBackoff(4) != 2*time.Minute || transientBackoff(5) != 4*time.Minute {
+		t.Fatalf("later backoff %s %s", transientBackoff(4), transientBackoff(5))
 	}
 	if transientBackoff(20) != 5*time.Minute {
 		t.Fatalf("cap %s", transientBackoff(20))

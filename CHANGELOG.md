@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.0-rc5
+
+### Fixes
+- **Policy pause.** `policy_violation` in `enforce` now waits like `digest_required`: 15s, 30s, 1m, 2m, 4m, then 5m. A vars difference does not skip the pause. The same message is not written to `cps history` again.
+
 ## v1.1.0-rc4
 
 ### Fixes
