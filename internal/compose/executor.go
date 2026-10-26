@@ -333,14 +333,11 @@ func (e *ComposeExecutor) ApplyImages(
 				}
 			},
 		)
+		idleFired := pullCtx.Err() != nil
 		pullRelease()
 		if err != nil {
 			prep.clean()
-			if pullCtx.Err() != nil && callerCtx.Err() == nil {
-				msg := "timeout: pull " + strings.Join(prep.images, ",") + " after " + opts.PullIdle.String()
-				return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeTimeout, syncerr.StagePull, msg)
-			}
-			return redact.String(strings.TrimSpace(syncLog.String())), pullFailedError(pullOut+"\n"+err.Error(), prep.images)
+			return redact.String(strings.TrimSpace(syncLog.String())), classifyPullError(err, pullOut, idleFired, opts.PullIdle, prep.images)
 		}
 	}
 	// Drop the docker config before up. Images are already local.
@@ -350,6 +347,47 @@ func (e *ComposeExecutor) ApplyImages(
 		delete(prep.env, "DOCKER_CONFIG")
 	}
 
+	shotTimeout := opts.OneshotTimeout
+	if shotTimeout <= 0 {
+		shotTimeout = 10 * time.Minute
+	}
+	if len(prep.oneshots) > 0 {
+		shotCtx, shotCancel := context.WithTimeout(context.Background(), shotTimeout)
+		oneArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
+		if len(overrideArgs) > 0 {
+			oneArgs = append(oneArgs, overrideArgs...)
+		}
+		oneArgs = append(oneArgs, "up", "-d")
+		if !prep.noBuild {
+			oneArgs = append(oneArgs, "--build")
+		}
+		oneArgs = append(oneArgs, prep.oneshots...)
+		appendLogSection(&syncLog, "One-shot")
+		appendLogLine(&syncLog, "starting one-shot services before the rest of the stack")
+		_, oneErr := e.runCommandWithTranscript(shotCtx, &syncLog, "docker", oneArgs, composeDir, prep.env, onProgress)
+		if oneErr != nil {
+			shotCancel()
+			if reason := e.oneshotFailure(context.Background(), projectName); reason != "" {
+				return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeOneshotFailed, syncerr.StageCompose, reason)
+			}
+			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("up failed: %w", oneErr)
+		}
+		if len(prep.rerun) > 0 {
+			reArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
+			if len(overrideArgs) > 0 {
+				reArgs = append(reArgs, overrideArgs...)
+			}
+			reArgs = append(reArgs, "up", "-d", "--no-deps", "--force-recreate")
+			reArgs = append(reArgs, prep.rerun...)
+			_, _ = e.runCommandWithTranscript(shotCtx, &syncLog, "docker", reArgs, composeDir, prep.env, onProgress)
+		}
+		waitErr := e.waitOneshots(shotCtx, projectName, shotTimeout, prep.oneshots)
+		shotCancel()
+		if waitErr != nil {
+			return redact.String(strings.TrimSpace(syncLog.String())), waitErr
+		}
+	}
+
 	upCtx := ctx
 	if opts.SyncTimeout > 0 {
 		var upCancel context.CancelFunc
@@ -357,7 +395,7 @@ func (e *ComposeExecutor) ApplyImages(
 		defer upCancel()
 	}
 
-	// Up detached
+	// Up detached. Dependents are started only after one-shot services exit 0.
 	appendLogSection(&syncLog, "Compose apply")
 	if prep.noBuild {
 		appendLogLine(&syncLog, "starting pulled images without build")
@@ -389,27 +427,6 @@ func (e *ComposeExecutor) ApplyImages(
 			return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeOneshotFailed, syncerr.StageCompose, reason)
 		}
 		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("up failed: %w", err)
-	}
-
-	if len(prep.rerun) > 0 {
-		reArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
-		if len(overrideArgs) > 0 {
-			reArgs = append(reArgs, overrideArgs...)
-		}
-		reArgs = append(reArgs, "up", "-d", "--no-deps", "--force-recreate")
-		reArgs = append(reArgs, prep.rerun...)
-		if _, rerunErr := e.runCommandWithTranscript(upCtx, &syncLog, "docker", reArgs, composeDir, prep.env, onProgress); rerunErr != nil && e.Logger != nil {
-			e.Logger.Warn("one-shot recreate failed", "project", projectName, "error", rerunErr)
-		}
-	}
-	shotTimeout := opts.OneshotTimeout
-	if shotTimeout <= 0 {
-		shotTimeout = 10 * time.Minute
-	}
-	shotCtx, shotCancel := context.WithTimeout(context.Background(), shotTimeout)
-	defer shotCancel()
-	if err := e.waitOneshots(shotCtx, projectName, shotTimeout); err != nil {
-		return redact.String(strings.TrimSpace(syncLog.String())), err
 	}
 
 	appendLogSection(&syncLog, "Sync completed")
@@ -1819,32 +1836,53 @@ func (e *ComposeExecutor) volumeExists(ctx context.Context, name string) bool {
 	return err == nil
 }
 
-func (e *ComposeExecutor) waitOneshots(ctx context.Context, project string, timeout time.Duration) error {
-	obs, err := e.observeContainers(ctx)
-	if err != nil {
-		return err
-	}
-	if runningOneshot(filterProject(obs, project)) == "" && !oneshotPending(obs, project) {
-		return nil
-	}
+func (e *ComposeExecutor) waitOneshots(ctx context.Context, project string, timeout time.Duration, names []string) error {
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		obs, err = e.observeContainers(ctx)
+		obs, err := e.observeContainers(ctx)
 		if err != nil {
+			if len(names) > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				pending := names[0]
+				e.stopServiceContainer(context.Background(), project, pending)
+				return syncerr.New(syncerr.CodeOneshotTimeout, syncerr.StageCompose, "oneshot_timeout: "+pending)
+			}
 			return err
 		}
 		mine := filterProject(obs, project)
-		state := foldObservations(mine, time.Now())[project]
-		if strings.HasPrefix(state.Failure, "oneshot_failed:") {
-			return syncerr.New(syncerr.CodeOneshotFailed, syncerr.StageCompose, withPreviousRevision(mine, project, state.Failure))
+		if len(names) == 0 {
+			state := foldObservations(mine, time.Now())[project]
+			if strings.HasPrefix(state.Failure, "oneshot_failed:") {
+				return syncerr.New(syncerr.CodeOneshotFailed, syncerr.StageCompose, withPreviousRevision(mine, project, state.Failure))
+			}
+			if runningOneshot(mine) == "" {
+				return nil
+			}
+		} else {
+			pending, failed := namedOneshotState(mine, names)
+			if failed != "" {
+				return syncerr.New(syncerr.CodeOneshotFailed, syncerr.StageCompose, withPreviousRevision(mine, project, failed))
+			}
+			if pending == "" {
+				return nil
+			}
+			if time.Now().After(deadline) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				e.stopServiceContainer(context.Background(), project, pending)
+				return syncerr.New(syncerr.CodeOneshotTimeout, syncerr.StageCompose, "oneshot_timeout: "+pending)
+			}
+			timer := time.NewTimer(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				e.stopServiceContainer(context.Background(), project, pending)
+				return syncerr.New(syncerr.CodeOneshotTimeout, syncerr.StageCompose, "oneshot_timeout: "+pending)
+			case <-timer.C:
+			}
+			continue
 		}
 		pending := runningOneshot(mine)
-		if pending == "" {
-			return nil
-		}
 		if time.Now().After(deadline) {
 			e.stopServiceContainer(ctx, project, pending)
 			return syncerr.New(syncerr.CodeOneshotTimeout, syncerr.StageCompose, "oneshot_timeout: "+pending)
@@ -1861,6 +1899,28 @@ func (e *ComposeExecutor) waitOneshots(ctx context.Context, project string, time
 		case <-timer.C:
 		}
 	}
+}
+
+func namedOneshotState(obs []containerObs, names []string) (pending, failed string) {
+	byService := map[string]containerObs{}
+	for _, c := range obs {
+		byService[c.Service] = c
+	}
+	for _, name := range names {
+		c, ok := byService[name]
+		if !ok || c.Running || c.State == "created" || c.State == "restarting" {
+			return name, ""
+		}
+		exited := c.State == "exited" || strings.HasPrefix(strings.ToLower(c.PSStatus), "exited")
+		if exited && c.ExitCode == 0 {
+			continue
+		}
+		if c.HasInspect && c.ExitCode != 0 {
+			return "", fmt.Sprintf("oneshot_failed: %s exit %d", name, c.ExitCode)
+		}
+		return name, ""
+	}
+	return "", ""
 }
 
 func filterProject(obs []containerObs, project string) []containerObs {

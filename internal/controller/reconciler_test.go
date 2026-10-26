@@ -498,6 +498,12 @@ func TestTransientBackoffGrows(t *testing.T) {
 	if !transientFailure(syncerr.New(syncerr.CodePullFailed, syncerr.StagePull, "pull_failed: img")) {
 		t.Fatal("pull_failed should retry")
 	}
+	if !transientFailure(syncerr.New(syncerr.CodeDigestRequired, syncerr.StageValidate, "digest_required: web")) {
+		t.Fatal("digest_required should retry")
+	}
+	if !transientFailure(syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, "policy_violation: web privileged")) {
+		t.Fatal("policy violation should retry")
+	}
 	if transientFailure(syncerr.New(syncerr.CodeBuildForbidden, syncerr.StageValidate, "build_forbidden: web")) {
 		t.Fatal("build_forbidden is not transient")
 	}

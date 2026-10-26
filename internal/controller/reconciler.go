@@ -352,7 +352,7 @@ func (r *Reconciler) dispatch() {
 			defer r.wg.Done()
 			defer r.finishSync(appCopy.ID)
 			if err := r.syncApp(appCopy); err != nil && r.Logger != nil {
-				r.Logger.Error("App sync failed", "app_id", appCopy.ID, "error", err)
+				r.Logger.Error("App sync failed", "app_id", appCopy.ID, "error", redactAppText(appCopy, err.Error()))
 			}
 		}()
 	}
@@ -652,7 +652,7 @@ func (r *Reconciler) syncApp(app *App) error {
 				if attempt > 1 {
 					r.Logger.Info("Retrying transient failure", "app", app.Name, "reason", se.Message, "attempt", attempt, "next", wait.String())
 				} else {
-					r.Logger.Error("App sync failed", "app", app.Name, "reason", se.Message)
+					r.Logger.Error("App sync failed", "app", app.Name, "reason", redactAppText(app, se.Message))
 				}
 			} else {
 				r.Logger.Error("Sync apply failed", "app_id", app.ID, "commit", target, "code", se.Code, "stage", se.Stage, "output", truncateOutput(output))
@@ -675,7 +675,9 @@ func (r *Reconciler) syncApp(app *App) error {
 		}
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
 		if declaredFailure(se) {
-			r.noteDeploy(app, "failed", target, deploypolicy.EncodeVars(policy.Vars), "", deployTrigger(app, target))
+			if strings.TrimSpace(app.LastSyncError) != strings.TrimSpace(se.Message) {
+				r.noteDeploy(app, "failed", target, deploypolicy.EncodeVars(policy.Vars), "", deployTrigger(app, target))
+			}
 			return nil
 		}
 		return se
@@ -710,7 +712,7 @@ func (r *Reconciler) syncApp(app *App) error {
 		r.Logger.Warn("Failed to update app status", "app_id", app.ID, "error", err)
 	}
 	if r.Logger != nil && syncErr == "" {
-		r.Logger.Info("Applied", "app", app.Name, "revision", revisionLabel(target, fleetVars), "duration", time.Since(syncStartedAt).Round(time.Millisecond).String())
+		r.Logger.Info("Applied", "app", app.Name, "revision", revisionLabel(target, fleetVars, policy.PublicVars), "duration", time.Since(syncStartedAt).Round(time.Millisecond).String())
 	}
 	rejectedVars := ""
 	if rejected != "" {
@@ -740,8 +742,10 @@ func transientFailure(se *syncerr.Error) bool {
 		return false
 	}
 	switch se.GetCode() {
-	case syncerr.CodePullFailed, syncerr.CodeRegistryAuth:
+	case syncerr.CodePullFailed, syncerr.CodeRegistryAuth, syncerr.CodeDigestRequired, syncerr.CodeRegistryDenied, syncerr.CodeOneshotFailed, syncerr.CodeOneshotTimeout:
 		return true
+	case syncerr.CodeValidation:
+		return strings.Contains(strings.ToLower(se.Message), "policy_violation")
 	default:
 		return false
 	}
@@ -901,11 +905,11 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 	prev := strings.TrimSpace(app.LastHealthyCommit)
 	prevVars := deploypolicy.DecodeVars(app.LastHealthyVars)
 	failedVars := deploypolicy.EncodeVars(app.Policy().Vars)
-	label := revisionLabel(prev, prevVars)
+	label := revisionLabel(prev, prevVars, app.Policy().PublicVars)
 	varsDiffer := !deploypolicy.VarsEqual(prevVars, app.Policy().Vars)
 	if prev != "" && (prev != failedRevision || varsDiffer) {
 		if r.Logger != nil {
-			r.Logger.Warn("Revision failed health timeout; rolling back", "app", app.Name, "failed", failedRevision, "rollback", label, "error", healthErr)
+			r.Logger.Warn("Revision failed health timeout; rolling back", "app", app.Name, "failed", failedRevision, "rollback", label, "error", redactAppText(app, healthErr.Error()))
 		}
 		repoSecret, err := r.Registry.GetRepoSecret(app.ID)
 		if err != nil {
@@ -1131,7 +1135,7 @@ func (r *Reconciler) declareOnce(app *App, se *syncerr.Error) {
 	app.LastSyncError = se.Message
 	app.LastSyncErrorCode = se.Code
 	if r.Logger != nil {
-		r.Logger.Error("App sync failed", "app", app.Name, "reason", se.Message)
+		r.Logger.Error("App sync failed", "app", app.Name, "reason", redactAppText(app, se.Message))
 	}
 }
 
@@ -1195,9 +1199,9 @@ func declaredFailure(se *syncerr.Error) bool {
 	}
 }
 
-func revisionLabel(commit string, vars map[string]string) string {
+func revisionLabel(commit string, vars map[string]string, listed []string) string {
 	var parts []string
-	if label := deploypolicy.VarsLabel(vars); label != "" {
+	if label := deploypolicy.VarsLabel(fleetcheck.PublicVars(vars, listed)); label != "" {
 		parts = append(parts, label)
 	}
 	commit = strings.TrimSpace(commit)
@@ -1529,4 +1533,16 @@ func deployResult(result string) string {
 	default:
 		return "failed"
 	}
+}
+
+func redactAppText(app *App, text string) string {
+	if app == nil || text == "" {
+		return text
+	}
+	policy := app.Policy()
+	listed := policy.PublicVars
+	text = fleetcheck.RedactText(text, policy.Vars, listed)
+	text = fleetcheck.RedactText(text, deploypolicy.DecodeVars(app.LastHealthyVars), listed)
+	text = fleetcheck.RedactText(text, deploypolicy.DecodeVars(app.RejectedVars), listed)
+	return text
 }

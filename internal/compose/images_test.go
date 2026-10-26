@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMissingInterpolations(t *testing.T) {
@@ -131,5 +132,24 @@ exit 0
 	}
 	if strings.Contains(err.Error(), password) {
 		t.Fatalf("password in error: %v", err)
+	}
+}
+
+func TestClassifyPullErrorPrefersNotFound(t *testing.T) {
+	err := classifyPullError(context.DeadlineExceeded, "manifest for app:missing not found", true, time.Minute, []string{"app:missing"})
+	if err == nil || !strings.Contains(err.Error(), "pull_failed: not_found") {
+		t.Fatal(err)
+	}
+	err = classifyPullError(context.DeadlineExceeded, "", true, time.Minute, []string{"app:slow"})
+	if err == nil || !strings.Contains(err.Error(), "timeout: pull") {
+		t.Fatal(err)
+	}
+}
+
+func TestOneshotServiceNames(t *testing.T) {
+	raw := []byte(`{"services":{"php":{"depends_on":{"migrate":{"condition":"service_completed_successfully"}}},"migrate":{"image":"app"}}}`)
+	got := OneshotServiceNames(raw)
+	if len(got) != 1 || got[0] != "migrate" {
+		t.Fatalf("%v", got)
 	}
 }

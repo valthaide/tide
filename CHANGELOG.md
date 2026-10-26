@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.0-rc4
+
+### Fixes
+- **Private vars.** Values that are not public stay out of the API (`last_healthy_vars`, `rejected_vars`, `last_sync_error`), `cps`, controller logs (`Applied`, sync failure, rollback), and `conops_app_last_sync_error`. The same public-var filter as `GetApp` is used. Compose still receives the real values.
+- **Pull errors.** A missing tag or digest is `pull_failed: not_found` or `pull_failed: digest_mismatch` as soon as the registry answers. `timeout: pull` is only a pull that stays silent until `pull_timeout`. `pull_failed` still backs off from 15s to 5m.
+- **Repeated config failures.** `digest_required`, `registry_not_allowed`, `oneshot_failed`, `oneshot_timeout`, and `policy_violation` use the same pause. The same message is written to `cps history` and `conops_deploys_total` once.
+- **One-shot order.** Services required with `service_completed_successfully` are started, and must exit 0, before the rest of the stack is recreated. A failure or `oneshot_timeout` leaves the previous revision running.
+
 ## v1.1.0-rc3
 
 ### Features

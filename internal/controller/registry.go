@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/credentials"
+	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/conops-private/internal/fleetcheck"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/redact"
 	"github.com/valthaide/conops-private/internal/repoauth"
@@ -179,6 +181,19 @@ func (r *Registry) List() []*api.App {
 	return apps
 }
 
+func redactSnapshotError(app *api.App) string {
+	if app == nil {
+		return ""
+	}
+	policy := app.Policy()
+	listed := policy.PublicVars
+	text := app.LastSyncError
+	text = fleetcheck.RedactText(text, policy.Vars, listed)
+	text = fleetcheck.RedactText(text, deploypolicy.DecodeVars(app.LastHealthyVars), listed)
+	text = fleetcheck.RedactText(text, deploypolicy.DecodeVars(app.RejectedVars), listed)
+	return text
+}
+
 // ListAppSnapshots returns app state for Prometheus gauge collectors.
 func (r *Registry) ListAppSnapshots() []metrics.AppSnapshot {
 	apps := r.List()
@@ -187,13 +202,14 @@ func (r *Registry) ListAppSnapshots() []metrics.AppSnapshot {
 		if app == nil {
 			continue
 		}
+		errText := redactSnapshotError(app)
 		out = append(out, metrics.AppSnapshot{
 			ID:                 app.ID,
 			Name:               app.Name,
 			Status:             app.Status,
 			Suspended:          app.Suspended,
 			LastSyncAt:         app.LastSyncAt,
-			LastSyncError:      app.LastSyncError,
+			LastSyncError:      errText,
 			LastSyncErrorCode:  app.LastSyncErrorCode,
 			LastSyncErrorStage: app.LastSyncErrorStage,
 			LastSeenCommit:     app.LastSeenCommit,

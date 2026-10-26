@@ -64,11 +64,12 @@ type RunningImage struct {
 }
 
 type imagePrep struct {
-	env     map[string]string
-	cleanup func()
-	noBuild bool
-	images  []string
-	rerun   []string
+	env      map[string]string
+	cleanup  func()
+	noBuild  bool
+	images   []string
+	rerun    []string
+	oneshots []string
 }
 
 func (p imagePrep) clean() {
@@ -115,6 +116,42 @@ func ServicesWithBuild(configJSON []byte) ([]string, error) {
 	}
 	sortStrings(names)
 	return names, nil
+}
+
+// OneshotServiceNames returns services other services wait for with
+// service_completed_successfully.
+func OneshotServiceNames(configJSON []byte) []string {
+	var doc struct {
+		Services map[string]struct {
+			DependsOn json.RawMessage `json:"depends_on"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(configJSON, &doc); err != nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, svc := range doc.Services {
+		if len(bytes.TrimSpace(svc.DependsOn)) == 0 {
+			continue
+		}
+		var deps map[string]struct {
+			Condition string `json:"condition"`
+		}
+		if err := json.Unmarshal(svc.DependsOn, &deps); err != nil {
+			continue
+		}
+		for name, dep := range deps {
+			if strings.TrimSpace(dep.Condition) == "service_completed_successfully" && strings.TrimSpace(name) != "" {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sortStrings(names)
+	return names
 }
 
 func imagesFromConfig(configJSON []byte) []string {
@@ -209,9 +246,9 @@ func pullFailedError(output string, images []string) error {
 	lower := strings.ToLower(output)
 	kind := ""
 	switch {
-	case strings.Contains(lower, "digest") && strings.Contains(lower, "mismatch"):
+	case strings.Contains(lower, "digest mismatch") || strings.Contains(lower, "unexpected commit digest") || strings.Contains(lower, "content digest"):
 		kind = "digest_mismatch"
-	case strings.Contains(lower, "not found") || strings.Contains(lower, "manifest unknown"):
+	case strings.Contains(lower, "not found") || strings.Contains(lower, "manifest unknown") || strings.Contains(lower, "name unknown") || strings.Contains(lower, "no such manifest"):
 		kind = "not_found"
 	}
 	msg := "pull_failed: " + ref
@@ -219,6 +256,23 @@ func pullFailedError(output string, images []string) error {
 		msg = "pull_failed: " + kind + " " + ref
 	}
 	return syncerr.New(syncerr.CodePullFailed, syncerr.StagePull, msg)
+}
+
+// classifyPullError reports a registry miss as pull_failed even when the idle
+// timer has also fired. timeout is only a pull that produced neither a
+// not_found nor a digest_mismatch.
+func classifyPullError(cmdErr error, output string, idleFired bool, idle time.Duration, images []string) error {
+	if cmdErr == nil {
+		return nil
+	}
+	failed := pullFailedError(output+"\n"+cmdErr.Error(), images)
+	if strings.Contains(failed.Error(), "not_found") || strings.Contains(failed.Error(), "digest_mismatch") {
+		return failed
+	}
+	if idleFired {
+		return syncerr.New(syncerr.CodeTimeout, syncerr.StagePull, "timeout: pull "+strings.Join(images, ",")+" after "+idle.String())
+	}
+	return failed
 }
 
 func unsetVarError(names []string) error {
@@ -357,7 +411,7 @@ func (e *ComposeExecutor) prepareImageSync(
 	}
 	appendLogLine(syncLog, "ok")
 
-	prep := imagePrep{env: copyVars(opts.Vars), noBuild: noBuild, images: images, rerun: sum.Rerun, cleanup: func() {}}
+	prep := imagePrep{env: copyVars(opts.Vars), noBuild: noBuild, images: images, rerun: sum.Rerun, oneshots: OneshotServiceNames(configJSON), cleanup: func() {}}
 	creds, configured, credErr := RegistryCredsFromEnv()
 	if credErr != nil || (configured && (creds.Host == "" || creds.Username == "" || creds.Password == "")) {
 		appendLogSection(syncLog, "Registry login")

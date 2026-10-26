@@ -1,6 +1,9 @@
 package fleetcheck
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCheckProjectAllowsUnderscore(t *testing.T) {
 	if CheckProject("") != nil || CheckProject("crm_backend") != nil || CheckProject("crm-backend") != nil {
@@ -76,5 +79,9 @@ func TestPublicVarHidesSecrets(t *testing.T) {
 	kept := PublicVars(map[string]string{"APP_TAG": "1", "DB_PASSWORD": "secret", "COLOR": "blue"}, []string{"COLOR"})
 	if kept["APP_TAG"] != "1" || kept["COLOR"] != "blue" || kept["DB_PASSWORD"] != "" {
 		t.Fatalf("%v", kept)
+	}
+	got := RedactText("rolled back to APP_TAG=1, DB_PASSWORD=secret", map[string]string{"APP_TAG": "1", "DB_PASSWORD": "secret"}, nil)
+	if strings.Contains(got, "secret") || !strings.Contains(got, "DB_PASSWORD=***") {
+		t.Fatal(got)
 	}
 }

@@ -367,3 +367,30 @@ func secretKey(key string) bool {
 	}
 	return false
 }
+
+// RedactText hides values of variables that are not public.
+// Assignments KEY=value become KEY=***. Longer values are removed wherever they appear.
+func RedactText(text string, vars map[string]string, listed []string) string {
+	type pair struct {
+		key   string
+		value string
+	}
+	var items []pair
+	for key, value := range vars {
+		value = strings.TrimSpace(value)
+		if value == "" || PublicVar(key, listed) {
+			continue
+		}
+		items = append(items, pair{key: key, value: value})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return len(items[i].value) > len(items[j].value)
+	})
+	for _, item := range items {
+		text = strings.ReplaceAll(text, item.key+"="+item.value, item.key+"=***")
+		if len(item.value) >= 8 {
+			text = strings.ReplaceAll(text, item.value, "***")
+		}
+	}
+	return text
+}

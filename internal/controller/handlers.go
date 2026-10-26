@@ -254,6 +254,14 @@ func annotatePublic(app *api.App) {
 		return
 	}
 	policy := app.Policy()
+	listed := policy.PublicVars
+	healthy := deploypolicy.DecodeVars(app.LastHealthyVars)
+	rejected := deploypolicy.DecodeVars(app.RejectedVars)
+	app.LastSyncError = fleetcheck.RedactText(app.LastSyncError, policy.Vars, listed)
+	app.LastSyncError = fleetcheck.RedactText(app.LastSyncError, healthy, listed)
+	app.LastSyncError = fleetcheck.RedactText(app.LastSyncError, rejected, listed)
+	app.LastHealthyVars = deploypolicy.EncodeVars(fleetcheck.PublicVars(healthy, listed))
+	app.RejectedVars = deploypolicy.EncodeVars(fleetcheck.PublicVars(rejected, listed))
 	public := map[string]string{}
 	var tags []string
 	for key, value := range policy.Vars {
