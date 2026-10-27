@@ -247,9 +247,60 @@ func TestReconcileRequeuesRuntimeDriftAndSyncs(t *testing.T) {
 	rt := &fakeRuntime{
 		snapshot: map[string]compose.ProjectRuntimeState{}, // missing → drift
 	}
-	testReconciler(t, reg, rt, ReconcilerConfig{}).reconcileOnce()
+	r := testReconciler(t, reg, rt, ReconcilerConfig{})
+	r.reconcileOnce()
+	if len(rt.applyCalls) != 0 {
+		t.Fatalf("first drift observation should wait for a second check, got %v", rt.applyCalls)
+	}
+	r.reconcileOnce()
 	if len(rt.applyCalls) != 1 {
 		t.Fatalf("drift should requeue and sync, got %v", rt.applyCalls)
+	}
+}
+
+func TestRecoverErrorWhenContainersBecomeReady(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "web", RepoURL: "https://example.com/a.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "aaaaaaaa", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	se := syncerr.New(syncerr.CodeUnhealthy, syncerr.StageHealth, "unhealthy: container php")
+	if err := reg.UpdateSyncResultErr(app.ID, "error", time.Now(), "aaaaaaaa", "bad", "", se); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateRollback(app.ID, "", "aaaaaaaa", "", deploypolicy.EncodeVars(map[string]string{"APP_TAG": "1"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{Vars: map[string]string{"APP_TAG": "1"}})); err != nil {
+		t.Fatal(err)
+	}
+	project := compose.ProjectNameForApp(app.ID)
+	// ID is assigned by the registry.
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = got.ComposeProject()
+	rt := &fakeRuntime{snapshot: map[string]compose.ProjectRuntimeState{
+		project: {ContainerCount: 1, RunningCount: 1},
+	}}
+	r := testReconciler(t, reg, rt, ReconcilerConfig{SyncTimeout: time.Minute})
+	r.reconcileOnce()
+	if len(rt.applyCalls) != 0 {
+		t.Fatalf("first healthy check must not apply, got %v", rt.applyCalls)
+	}
+	r.reconcileOnce()
+	if len(rt.applyCalls) != 0 {
+		t.Fatalf("recovery must not apply, got %v", rt.applyCalls)
+	}
+	got, err = reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "synced" || got.LastSyncError != "" || got.RejectedCommit != "" {
+		t.Fatalf("status=%s err=%s rejected=%s", got.Status, got.LastSyncError, got.RejectedCommit)
 	}
 }
 
@@ -552,10 +603,13 @@ func TestTransientBackoffGrows(t *testing.T) {
 }
 
 func TestRevisionToApplySkipsRejected(t *testing.T) {
-	if got := revisionToApply(&App{LastSeenCommit: "b", RejectedCommit: "b", LastHealthyCommit: "a"}); got != "a" {
+	if got := revisionToApply(&App{LastSeenCommit: "b", RejectedCommit: "b", LastHealthyCommit: "a"}, false); got != "a" {
 		t.Fatalf("got %q", got)
 	}
-	if got := revisionToApply(&App{LastSeenCommit: "c", RejectedCommit: "b", LastHealthyCommit: "a"}); got != "c" {
+	if got := revisionToApply(&App{LastSeenCommit: "b", RejectedCommit: "b", LastHealthyCommit: "a"}, true); got != "b" {
+		t.Fatalf("force: got %q", got)
+	}
+	if got := revisionToApply(&App{LastSeenCommit: "c", RejectedCommit: "b", LastHealthyCommit: "a"}, false); got != "c" {
 		t.Fatalf("new commit: got %q", got)
 	}
 }

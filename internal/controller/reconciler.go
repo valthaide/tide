@@ -165,6 +165,9 @@ type Reconciler struct {
 	wg               sync.WaitGroup
 	watchHashErrSeen map[string]string    // appID -> last error text (rate-limit logs)
 	ciWaitSince      map[string]time.Time // appID -> when CI wait started
+	forceApply       map[string]struct{}
+	driftStreak      map[string]int
+	recoverStreak    map[string]int
 	lastGC           time.Time
 }
 
@@ -184,6 +187,9 @@ func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger,
 		retryAfter:       map[string]transientRetry{},
 		watchHashErrSeen: make(map[string]string),
 		ciWaitSince:      make(map[string]time.Time),
+		forceApply:       map[string]struct{}{},
+		driftStreak:      map[string]int{},
+		recoverStreak:    map[string]int{},
 	}
 }
 
@@ -299,9 +305,17 @@ func (r *Reconciler) dispatch() {
 			continue
 		}
 
+		if r.maybeRecover(app, runtimeSnapshot) {
+			continue
+		}
 		if app.Status == "synced" && runtimeSnapshot != nil {
 			if reason := r.runtimeDriftReason(app.ComposeProject(), runtimeSnapshot); reason != "" {
-				r.requeuePending(app, reason)
+				if r.noteDrift(app.ID) >= 2 {
+					r.clearDrift(app.ID)
+					r.requeuePending(app, reason)
+				}
+			} else {
+				r.clearDrift(app.ID)
 			}
 		}
 		if app.Status == "synced" {
@@ -325,6 +339,8 @@ func (r *Reconciler) dispatch() {
 			// (pipeline may flip pending→success or failed→success after retry).
 			if app.LastSyncErrorCode == syncerr.CodeBlockedByCI &&
 				app.LastSeenCommit != "" && app.LastSeenCommit != app.LastSyncedCommit {
+				// fall through
+			} else if r.shouldRetryRejected(app, runtimeSnapshot) {
 				// fall through
 			} else if !r.Config.RetryErrors {
 				continue
@@ -521,10 +537,11 @@ func (r *Reconciler) syncLooksStale(app *App) bool {
 
 func (r *Reconciler) syncApp(app *App) error {
 	syncStartedAt := time.Now()
+	gen, _ := r.Registry.DesiredGeneration(app.ID)
 	if err := r.Registry.UpdateStatus(app.ID, "syncing", &syncStartedAt); err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to mark app syncing", "app_id", app.ID, "error", err)
 	}
-	target := revisionToApply(app)
+	target := revisionToApply(app, r.forcing(app.ID))
 
 	if target == strings.TrimSpace(app.LastSeenCommit) {
 		if err := r.checkPipelineGate(app); err != nil {
@@ -662,15 +679,19 @@ func (r *Reconciler) syncApp(app *App) error {
 			}
 		}
 		now := time.Now()
-		_ = r.Registry.UpdateSyncResultErr(
+		superseded, _ := r.Registry.FinishSync(
 			app.ID,
+			gen,
 			status,
 			now,
 			app.LastSyncedCommit,
 			app.LastSyncedCommitMessage,
 			output,
-			se,
+			syncerr.Encode(se),
 		)
+		if superseded && r.Logger != nil {
+			r.Logger.Info("Desired state changed during sync; queued again", "app", app.Name, "skipped", 1)
+		}
 		if transientFailure(se) {
 			// Keep the attempted vars as rejected so the next loop does not
 			// treat the same fleet vars as a new revision and skip the backoff.
@@ -687,7 +708,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	}
 
 	if err := r.confirmHealthy(ctx, app, target); err != nil {
-		return r.rollbackUnhealthy(ctx, app, target, output, err, syncStartedAt)
+		return r.rollbackUnhealthy(ctx, app, target, output, err, syncStartedAt, gen)
 	}
 
 	now := time.Now()
@@ -703,16 +724,21 @@ func (r *Reconciler) syncApp(app *App) error {
 			rejected = app.LastSeenCommit
 		}
 	}
-	if err := r.Registry.UpdateSyncResult(
+	superseded, err := r.Registry.FinishSync(
 		app.ID,
+		gen,
 		"synced",
 		now,
 		target,
 		syncedMessage,
 		output,
 		syncErr,
-	); err != nil && r.Logger != nil {
+	)
+	if err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to update app status", "app_id", app.ID, "error", err)
+	}
+	if superseded && r.Logger != nil {
+		r.Logger.Info("Desired state changed during sync; queued again", "app", app.Name, "skipped", 1)
 	}
 	if r.Logger != nil && syncErr == "" {
 		r.Logger.Info("Applied", "app", app.Name, "revision", revisionLabel(target, fleetVars, policy.PublicVars), "duration", time.Since(syncStartedAt).Round(time.Millisecond).String())
@@ -833,11 +859,14 @@ func (r *Reconciler) noteProjects(apps []*App) {
 
 // revisionToApply returns the git commit to deploy.
 // A revision that failed its health timeout is not applied again until git moves on.
-func revisionToApply(app *App) string {
+func revisionToApply(app *App, force bool) string {
 	if app == nil {
 		return ""
 	}
 	seen := strings.TrimSpace(app.LastSeenCommit)
+	if force {
+		return seen
+	}
 	rejected := strings.TrimSpace(app.RejectedCommit)
 	healthy := strings.TrimSpace(app.LastHealthyCommit)
 	if rejected != "" && seen == rejected && healthy != "" {
@@ -920,7 +949,7 @@ func healthFailure(revision string, timeout time.Duration, state compose.Project
 	return fmt.Errorf("health timeout: container %s after %s (revision %s)", names, timeout, revision)
 }
 
-func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevision, output string, healthErr error, syncStartedAt time.Time) error {
+func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevision, output string, healthErr error, syncStartedAt time.Time, gen int64) error {
 	msg := healthErr.Error()
 	prev := strings.TrimSpace(app.LastHealthyCommit)
 	prevVars := deploypolicy.DecodeVars(app.LastHealthyVars)
@@ -965,7 +994,7 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 					}
 					se := syncerr.New(syncerr.CodeUnhealthy, syncerr.StageHealth, msg)
 					now := time.Now()
-					_ = r.Registry.UpdateSyncResult(app.ID, "rolled_back", now, prev, app.LastSyncedCommitMessage, output, syncerr.Encode(se))
+					_, _ = r.Registry.FinishSync(app.ID, gen, "rolled_back", now, prev, app.LastSyncedCommitMessage, output, syncerr.Encode(se))
 					_ = r.Registry.UpdateRollback(app.ID, prev, failedRevision, app.LastHealthyVars, failedVars)
 					r.noteDeploy(app, "rolled_back", prev, app.LastHealthyVars, revisionImages(r, app), "reconcile")
 					r.recordAppliedEnvHash(app)
@@ -978,8 +1007,9 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 	}
 	se := syncerr.New(syncerr.CodeUnhealthy, syncerr.StageHealth, msg)
 	now := time.Now()
-	_ = r.Registry.UpdateSyncResultErr(app.ID, "error", now, failedRevision, app.LastSeenCommitMessage, output, se)
+	_, _ = r.Registry.FinishSync(app.ID, gen, "error", now, failedRevision, app.LastSeenCommitMessage, output, syncerr.Encode(se))
 	_ = r.Registry.UpdateRollback(app.ID, prev, failedRevision, app.LastHealthyVars, failedVars)
+	r.scheduleHealthRetry(app)
 	metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
 	return se
 }
@@ -1548,7 +1578,7 @@ func deployTrigger(app *App, target string) string {
 
 func deployResult(result string) string {
 	switch result {
-	case "applied", "rolled_back":
+	case "applied", "rolled_back", "recovered":
 		return result
 	default:
 		return "failed"

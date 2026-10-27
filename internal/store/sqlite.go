@@ -108,6 +108,16 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "rejected_vars TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	if _, err := db.Exec(`
+	CREATE TABLE IF NOT EXISTS app_control (
+		app_id TEXT PRIMARY KEY,
+		desired_generation INTEGER NOT NULL DEFAULT 0,
+		retry_attempt INTEGER NOT NULL DEFAULT 0,
+		next_retry_at DATETIME
+	);
+	`); err != nil {
+		return nil, fmt.Errorf("failed to create app_control table: %w", err)
+	}
 
 	if _, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS app_revisions (
@@ -601,6 +611,8 @@ func (s *SQLiteStore) UpdateAppCommit(ctx context.Context, id, commitHash, commi
 	if rowsAffected == 0 {
 		return fmt.Errorf("app not found")
 	}
+	_, _ = s.BumpDesiredGeneration(ctx, id)
+	_ = s.ClearRetryState(ctx, id)
 	return nil
 }
 
@@ -686,6 +698,9 @@ func (s *SQLiteStore) UpdateAppStatus(ctx context.Context, id, status string, la
 		if rowsAffected == 0 {
 			return fmt.Errorf("app not found")
 		}
+		if status == "pending" {
+			_, _ = s.BumpDesiredGeneration(ctx, id)
+		}
 		return nil
 	}
 
@@ -700,6 +715,9 @@ func (s *SQLiteStore) UpdateAppStatus(ctx context.Context, id, status string, la
 	}
 	if rowsAffected == 0 {
 		return fmt.Errorf("app not found")
+	}
+	if status == "pending" {
+		_, _ = s.BumpDesiredGeneration(ctx, id)
 	}
 	return nil
 }

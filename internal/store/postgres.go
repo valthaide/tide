@@ -109,6 +109,16 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.pool.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS app_control (
+		app_id TEXT PRIMARY KEY,
+		desired_generation BIGINT NOT NULL DEFAULT 0,
+		retry_attempt INTEGER NOT NULL DEFAULT 0,
+		next_retry_at TIMESTAMPTZ
+	);
+	`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `
 	CREATE TABLE IF NOT EXISTS app_revisions (
 		id BIGSERIAL PRIMARY KEY,
 		app_id TEXT NOT NULL,
@@ -540,6 +550,8 @@ func (s *PostgresStore) UpdateAppCommit(ctx context.Context, id, commitHash, com
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("app not found")
 	}
+	_, _ = s.BumpDesiredGeneration(ctx, id)
+	_ = s.ClearRetryState(ctx, id)
 	return nil
 }
 
@@ -613,6 +625,9 @@ func (s *PostgresStore) UpdateAppStatus(ctx context.Context, id, status string, 
 		if ct.RowsAffected() == 0 {
 			return fmt.Errorf("app not found")
 		}
+		if status == "pending" {
+			_, _ = s.BumpDesiredGeneration(ctx, id)
+		}
 		return nil
 	}
 
@@ -623,6 +638,9 @@ func (s *PostgresStore) UpdateAppStatus(ctx context.Context, id, status string, 
 	}
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("app not found")
+	}
+	if status == "pending" {
+		_, _ = s.BumpDesiredGeneration(ctx, id)
 	}
 	return nil
 }

@@ -621,6 +621,51 @@ func (r *Registry) UpdateSyncResult(
 	)
 }
 
+// FinishSync writes the sync result. If desired state changed during the sync,
+// the app stays pending so the newer commit or vars are not lost.
+func (r *Registry) FinishSync(
+	id string,
+	expectedGen int64,
+	status string,
+	lastSyncAt time.Time,
+	syncedCommit string,
+	syncedCommitMessage string,
+	syncOutput string,
+	syncError string,
+) (bool, error) {
+	if err := r.UpdateSyncResult(id, status, lastSyncAt, syncedCommit, syncedCommitMessage, syncOutput, syncError); err != nil {
+		return false, err
+	}
+	gen, err := r.store.DesiredGeneration(context.Background(), id)
+	if err != nil {
+		return false, err
+	}
+	if gen == expectedGen {
+		_ = r.store.ClearRetryState(context.Background(), id)
+		return false, nil
+	}
+	if err := r.store.UpdateAppStatus(context.Background(), id, "pending", nil); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (r *Registry) DesiredGeneration(id string) (int64, error) {
+	return r.store.DesiredGeneration(context.Background(), id)
+}
+
+func (r *Registry) SetRetry(id string, attempt int, next time.Time) error {
+	return r.store.SetRetryState(context.Background(), id, attempt, next)
+}
+
+func (r *Registry) ClearRetry(id string) error {
+	return r.store.ClearRetryState(context.Background(), id)
+}
+
+func (r *Registry) RetryState(id string) (int, time.Time, error) {
+	return r.store.RetryState(context.Background(), id)
+}
+
 // UpdateSyncResultErr stores sync metadata with a structured error.
 func (r *Registry) UpdateSyncResultErr(
 	id string,

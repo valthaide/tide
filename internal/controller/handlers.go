@@ -582,7 +582,7 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if se := h.runAppSync(app); se != nil {
+	if se := h.syncThroughReconciler(app); se != nil {
 		writeSyncError(w, httpStatusForSyncErr(se), se)
 		return
 	}
@@ -658,11 +658,20 @@ func (h *Handler) runReconcileOperation(opID, appID string) {
 		h.Ops.Finish(opID, OpFailed, syncerr.CodeUnknown, syncerr.StageUnknown, redact.String(err.Error()))
 		return
 	}
-	if se := h.runAppSync(app); se != nil {
+	if se := h.syncThroughReconciler(app); se != nil {
 		h.Ops.Finish(opID, OpFailed, se.Code, se.Stage, redact.String(se.Message))
 		return
 	}
 	h.Ops.Finish(opID, OpSucceeded, "", "", "")
+}
+
+func (h *Handler) syncThroughReconciler(app *api.App) *syncerr.Error {
+	if syncer, ok := h.SyncGate.(interface {
+		SyncAppNow(app *api.App) *syncerr.Error
+	}); ok && syncer != nil {
+		return syncer.SyncAppNow(app)
+	}
+	return h.runAppSync(app)
 }
 
 func (h *Handler) syncTimeout() time.Duration {
