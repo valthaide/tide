@@ -105,7 +105,7 @@ func suspendedValue(app api.App) string {
 func printAppsTable(apps []api.App) {
 	color := colorEnabled()
 	wide := outputFormat() == "wide"
-	headers := []string{"NAME", "READY", "STATUS", "SUSPENDED", "DRIFT", "REVISION", "LAST SYNC", "MESSAGE", "IMAGES", "TAGS"}
+	headers := []string{"NAME", "READY", "STATUS", "SUSPENDED", "DRIFT", "REVISION", "LAST SYNC", "MESSAGE"}
 	if wide {
 		headers = append(headers, "TRIGGER", "QUEUE", "LAST RECONCILE", "NEXT RECONCILE", "ATTEMPT")
 	}
@@ -127,8 +127,6 @@ func printAppsTable(apps []api.App) {
 			rev,
 			relativeTime(app.LastSyncAt),
 			messageFor(app),
-			imagesValue(app),
-			orDash(shortRef(app.Tags)),
 		}
 		if wide {
 			attempt := "-"
@@ -189,27 +187,72 @@ func printAppDetail(app api.App) {
 	}
 }
 
-func imagesValue(app api.App) string {
+func printShortImages(apps []api.App) {
+	for _, app := range apps {
+		line := shortImagesLine(app)
+		if line == "" {
+			continue
+		}
+		fmt.Printf("  %s  %s\n", app.Name, line)
+	}
+}
+
+func shortImagesLine(app api.App) string {
 	if len(app.Images) == 0 {
-		return "-"
+		return ""
 	}
 	parts := make([]string, 0, len(app.Images))
 	for _, img := range app.Images {
-		ref := strings.TrimSpace(img.Image)
-		if digest := strings.TrimSpace(img.Digest); digest != "" {
-			ref += "@" + shortRef(digest)
+		label := shortImageLabel(img)
+		if label == "" {
+			continue
 		}
 		if service := strings.TrimSpace(img.Service); service != "" {
-			ref = service + "=" + ref
+			label = service + "=" + label
 		}
-		if ref != "" {
-			parts = append(parts, ref)
-		}
+		parts = append(parts, label)
 	}
-	if len(parts) == 0 {
-		return "-"
+	return strings.Join(parts, "  ")
+}
+
+func shortImageLabel(img api.ImageRef) string {
+	if tag := imageTag(img.Image); tag != "" {
+		return shortenToken(tag)
 	}
-	return strings.Join(parts, ",")
+	if tag := strings.TrimSpace(img.Tag); tag != "" {
+		return shortenToken(tag)
+	}
+	if digest := strings.TrimSpace(img.Digest); digest != "" {
+		return shortRef(digest)
+	}
+	return ""
+}
+
+func imageTag(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if i := strings.Index(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	name := ref
+	if slash := strings.LastIndex(ref, "/"); slash >= 0 {
+		name = ref[slash+1:]
+	}
+	colon := strings.LastIndex(name, ":")
+	if colon < 0 || colon == len(name)-1 {
+		return ""
+	}
+	return name[colon+1:]
+}
+
+func shortenToken(tag string) string {
+	tag = strings.TrimSpace(tag)
+	if strings.HasPrefix(tag, "sha-") && len(tag) > len("sha-")+12 {
+		return "sha-" + tag[len("sha-"):len("sha-")+12]
+	}
+	if len(tag) > 24 {
+		return tag[:12]
+	}
+	return tag
 }
 
 func fullImageRef(img api.ImageRef) string {

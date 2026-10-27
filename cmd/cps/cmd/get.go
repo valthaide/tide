@@ -39,6 +39,7 @@ var getAppsCmd = &cobra.Command{
 			return nil
 		}
 		printAppsTable(apps)
+		printShortImages(apps)
 		return nil
 	},
 }
