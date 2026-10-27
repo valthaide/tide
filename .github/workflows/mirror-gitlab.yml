@@ -40,5 +40,6 @@ jobs:
             echo "skip mirror of branch ${REF_NAME}"
             exit 0
           fi
-          # Fast-forward only, so a tag checkout cannot roll main backwards.
-          git push gitlab "HEAD:refs/heads/main"
+          # GitLab main follows this push. Histories diverged after the old
+          # GitLab-only CI pin, so a fast-forward is rejected. Tags are not moved.
+          git push --force gitlab "HEAD:refs/heads/main"
