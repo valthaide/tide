@@ -32,14 +32,10 @@ var getAppsCmd = &cobra.Command{
 				if app.Oneshot != "" {
 					fmt.Printf("  %s oneshot %s\n", app.Name, app.Oneshot)
 				}
-				for _, img := range app.Images {
-					fmt.Printf("  %s %s %s %s\n", app.Name, img.Service, img.Image, orDash(img.Digest))
-				}
 			}
 			return nil
 		}
 		printAppsTable(apps)
-		printShortImages(apps)
 		return nil
 	},
 }

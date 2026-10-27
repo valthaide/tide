@@ -187,74 +187,6 @@ func printAppDetail(app api.App) {
 	}
 }
 
-func printShortImages(apps []api.App) {
-	for _, app := range apps {
-		line := shortImagesLine(app)
-		if line == "" {
-			continue
-		}
-		fmt.Printf("  %s  %s\n", app.Name, line)
-	}
-}
-
-func shortImagesLine(app api.App) string {
-	if len(app.Images) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(app.Images))
-	for _, img := range app.Images {
-		label := shortImageLabel(img)
-		if label == "" {
-			continue
-		}
-		if service := strings.TrimSpace(img.Service); service != "" {
-			label = service + "=" + label
-		}
-		parts = append(parts, label)
-	}
-	return strings.Join(parts, "  ")
-}
-
-func shortImageLabel(img api.ImageRef) string {
-	if tag := imageTag(img.Image); tag != "" {
-		return shortenToken(tag)
-	}
-	if tag := strings.TrimSpace(img.Tag); tag != "" {
-		return shortenToken(tag)
-	}
-	if digest := strings.TrimSpace(img.Digest); digest != "" {
-		return shortRef(digest)
-	}
-	return ""
-}
-
-func imageTag(ref string) string {
-	ref = strings.TrimSpace(ref)
-	if i := strings.Index(ref, "@"); i >= 0 {
-		ref = ref[:i]
-	}
-	name := ref
-	if slash := strings.LastIndex(ref, "/"); slash >= 0 {
-		name = ref[slash+1:]
-	}
-	colon := strings.LastIndex(name, ":")
-	if colon < 0 || colon == len(name)-1 {
-		return ""
-	}
-	return name[colon+1:]
-}
-
-func shortenToken(tag string) string {
-	tag = strings.TrimSpace(tag)
-	if strings.HasPrefix(tag, "sha-") && len(tag) > len("sha-")+12 {
-		return "sha-" + tag[len("sha-"):len("sha-")+12]
-	}
-	if len(tag) > 24 {
-		return tag[:12]
-	}
-	return tag
-}
-
 func fullImageRef(img api.ImageRef) string {
 	ref := strings.TrimSpace(img.Image)
 	if tag := strings.TrimSpace(img.Tag); tag != "" && !strings.Contains(ref, ":"+tag) && !strings.Contains(ref, "@") {
@@ -264,36 +196,6 @@ func fullImageRef(img api.ImageRef) string {
 		ref += "@" + digest
 	}
 	return orDash(ref)
-}
-
-// shortRef keeps a sha256 digest to 12 hex characters so tables stay aligned.
-func shortRef(s string) string {
-	const marker = "sha256:"
-	var b strings.Builder
-	rest := s
-	for {
-		i := strings.Index(rest, marker)
-		if i < 0 {
-			b.WriteString(rest)
-			return b.String()
-		}
-		b.WriteString(rest[:i+len(marker)])
-		hexPart := rest[i+len(marker):]
-		n := 0
-		for n < len(hexPart) && isHex(hexPart[n]) {
-			n++
-		}
-		take := n
-		if take > 12 {
-			take = 12
-		}
-		b.WriteString(hexPart[:take])
-		rest = hexPart[n:]
-	}
-}
-
-func isHex(b byte) bool {
-	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
 
 func orDash(s string) string {
