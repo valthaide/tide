@@ -24,8 +24,8 @@ func TestPrintAlignedTableKeepsColumnsWithANSI(t *testing.T) {
 	)
 	out := buf.String()
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("want 3 lines, got %d\n%s", len(lines), out)
+	if len(lines) != 4 {
+		t.Fatalf("want 4 lines, got %d\n%s", len(lines), out)
 	}
 	// Strip ANSI and compare column starts via fixed gaps.
 	plain := make([]string, len(lines))
@@ -45,7 +45,9 @@ func TestPrintAlignedTableKeepsColumnsWithANSI(t *testing.T) {
 		t.Fatalf("READY not found in %q", plain[0])
 	}
 	for i := 1; i < len(plain); i++ {
-		// READY values True/False should start at same index as READY header.
+		if strings.Trim(plain[i], "- ") == "" {
+			continue
+		}
 		rest := plain[i]
 		if len(rest) < readyIdx+4 {
 			t.Fatalf("row too short: %q", rest)

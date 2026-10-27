@@ -53,6 +53,13 @@ func printAlignedTableTo(w io.Writer, headers []string, rows [][]string, paintHe
 		writePad(h, i, paintHeader)
 	}
 	fmt.Fprintln(w)
+	for i := range headers {
+		if i > 0 {
+			fmt.Fprint(w, "  ")
+		}
+		fmt.Fprint(w, strings.Repeat("-", widths[i]))
+	}
+	fmt.Fprintln(w)
 
 	for _, row := range rows {
 		for i := 0; i < cols; i++ {

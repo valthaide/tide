@@ -128,7 +128,7 @@ func printAppsTable(apps []api.App) {
 			relativeTime(app.LastSyncAt),
 			messageFor(app),
 			imagesValue(app),
-			orDash(app.Tags),
+			orDash(shortRef(app.Tags)),
 		}
 		if wide {
 			attempt := "-"
@@ -175,6 +175,15 @@ func printAppDetail(app api.App) {
 		errDisp = app.LastSyncErrorCode + "/" + app.LastSyncErrorStage + ": " + app.LastSyncError
 	}
 	fmt.Printf("Last Sync Err:  %s\n", orDash(errDisp))
+	if len(app.Images) > 0 {
+		fmt.Printf("Images:\n")
+		for _, img := range app.Images {
+			fmt.Printf("  %s  %s\n", orDash(img.Service), fullImageRef(img))
+		}
+	}
+	if tags := strings.TrimSpace(app.Tags); tags != "" {
+		fmt.Printf("Tags:           %s\n", tags)
+	}
 	if out := strings.TrimSpace(app.LastSyncOutput); out != "" {
 		fmt.Printf("\n--- Last Sync Output ---\n%s\n", out)
 	}
@@ -188,7 +197,7 @@ func imagesValue(app api.App) string {
 	for _, img := range app.Images {
 		ref := strings.TrimSpace(img.Image)
 		if digest := strings.TrimSpace(img.Digest); digest != "" {
-			ref += "@" + digest
+			ref += "@" + shortRef(digest)
 		}
 		if service := strings.TrimSpace(img.Service); service != "" {
 			ref = service + "=" + ref
@@ -201,6 +210,47 @@ func imagesValue(app api.App) string {
 		return "-"
 	}
 	return strings.Join(parts, ",")
+}
+
+func fullImageRef(img api.ImageRef) string {
+	ref := strings.TrimSpace(img.Image)
+	if tag := strings.TrimSpace(img.Tag); tag != "" && !strings.Contains(ref, ":"+tag) && !strings.Contains(ref, "@") {
+		ref += ":" + tag
+	}
+	if digest := strings.TrimSpace(img.Digest); digest != "" && !strings.Contains(ref, "@") {
+		ref += "@" + digest
+	}
+	return orDash(ref)
+}
+
+// shortRef keeps a sha256 digest to 12 hex characters so tables stay aligned.
+func shortRef(s string) string {
+	const marker = "sha256:"
+	var b strings.Builder
+	rest := s
+	for {
+		i := strings.Index(rest, marker)
+		if i < 0 {
+			b.WriteString(rest)
+			return b.String()
+		}
+		b.WriteString(rest[:i+len(marker)])
+		hexPart := rest[i+len(marker):]
+		n := 0
+		for n < len(hexPart) && isHex(hexPart[n]) {
+			n++
+		}
+		take := n
+		if take > 12 {
+			take = 12
+		}
+		b.WriteString(hexPart[:take])
+		rest = hexPart[n:]
+	}
+}
+
+func isHex(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
 
 func orDash(s string) string {
