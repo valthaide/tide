@@ -114,16 +114,11 @@ func main() {
 	if runtimeDir := strings.TrimSpace(os.Getenv("CONOPS_RUNTIME_DIR")); runtimeDir != "" {
 		executor.WorkDir = runtimeDir
 	}
-	if toolsDir := strings.TrimSpace(os.Getenv("CONOPS_TOOLS_DIR")); toolsDir != "" {
-		executor.ToolsDir = toolsDir
-	} else if dataDir != "." {
-		executor.ToolsDir = filepath.Join(dataDir, "conops-tools")
-	}
 	_ = fsperm.EnsureSharedDir(executor.WorkDir)
 	if err := fsperm.MigrateRuntimePermissions(executor.WorkDir); err != nil {
 		logger.Warn("Failed to migrate runtime permissions", "dir", executor.WorkDir, "error", err)
 	}
-	logger.Info("Runtime workspace configured", "dir", executor.WorkDir, "tools_dir", executor.ToolsDir)
+	logger.Info("Runtime workspace configured", "dir", executor.WorkDir)
 
 	var reconciler *controller.Reconciler
 	var reconcilerCfg controller.ReconcilerConfig

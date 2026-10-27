@@ -30,10 +30,9 @@ import (
 
 // ComposeExecutor handles Docker Compose operations.
 type ComposeExecutor struct {
-	WorkDir  string
-	ToolsDir string
-	Logger   *slog.Logger
-	Secrets  *secrets.Manager
+	WorkDir string
+	Logger  *slog.Logger
+	Secrets *secrets.Manager
 
 	toolchainMu      sync.Mutex
 	dockerResolution dockerCommandResolution
@@ -86,9 +85,8 @@ func (s ProjectRuntimeState) IsHealthy() bool {
 // NewComposeExecutor creates a new executor.
 func NewComposeExecutor(logger *slog.Logger) *ComposeExecutor {
 	return &ComposeExecutor{
-		WorkDir:  "./.conops-runtime",
-		ToolsDir: "./.conops-tools",
-		Logger:   logger,
+		WorkDir: "./.conops-runtime",
+		Logger:  logger,
 	}
 }
 
@@ -1156,46 +1154,8 @@ func (e *ComposeExecutor) runCommand(
 
 	output, err := e.execProcess(ctx, cmd, args, workDir, env, onOutput)
 
-	// If a docker/compose command failed because the compose plugin's
-	// embedded API version is older than the daemon's minimum, upgrade the
-	// plugin and retry the command once. This covers the edge-case where
-	// probeComposeDaemonCompatibility passes (e.g. "compose ls" exits 0)
-	// but heavier operations like "compose pull" are rejected.
 	if err != nil && isDocker && outputLooksLikeDockerAPIMismatch(output) {
-		if e.Logger != nil {
-			e.Logger.Warn(
-				"Docker compose API version mismatch detected, upgrading plugin and retrying",
-				"original_cmd", formatCommand(cmd, args),
-			)
-		}
-		if refreshErr := e.forceRefreshComposePlugin(ctx); refreshErr != nil {
-			if e.Logger != nil {
-				e.Logger.Error("Compose plugin upgrade failed", "error", refreshErr)
-			}
-			return output, dockerAPIIncompatibleError("", "")
-		}
-		resolution, resErr := e.resolveDockerCommand(ctx)
-		if resErr != nil {
-			if e.Logger != nil {
-				e.Logger.Error("Docker re-resolution failed after compose upgrade", "error", resErr)
-			}
-			return output, dockerAPIIncompatibleError("", "")
-		}
-		if onOutput != nil {
-			onOutput("\n--- compose plugin upgraded, retrying command ---\n")
-		}
-		retryOut, retryErr := e.execProcess(
-			ctx,
-			resolution.Path,
-			args,
-			workDir,
-			mergeCommandEnv(callerEnv, resolution.Env),
-			onOutput,
-		)
-		if retryErr != nil && outputLooksLikeDockerAPIMismatch(retryOut+retryErr.Error()) {
-			return retryOut, dockerAPIIncompatibleError("", "")
-		}
-		return retryOut, retryErr
+		return output, dockerAPIIncompatibleError("", "")
 	}
 
 	return output, err
