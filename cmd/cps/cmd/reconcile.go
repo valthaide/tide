@@ -16,6 +16,7 @@ var (
 	reconcileWait    bool
 	reconcileTimeout time.Duration
 	reconcileSync    bool
+	reconcileForce   bool
 )
 
 var reconcileCmd = &cobra.Command{
@@ -53,7 +54,11 @@ Exit codes with --wait: 0 ok, 2 failed, 3 timeout.
 			return nil
 		}
 
-		resp, err := client.Post("/api/v1/apps/"+app.ID+"/reconcile", nil)
+		path := "/api/v1/apps/" + app.ID + "/reconcile"
+		if reconcileForce {
+			path += "?force=true"
+		}
+		resp, err := client.Post(path, nil)
 		if err != nil {
 			return err
 		}
@@ -77,6 +82,14 @@ Exit codes with --wait: 0 ok, 2 failed, 3 timeout.
 		}
 		if opID == "" {
 			return fmt.Errorf("reconcile response missing operation_id")
+		}
+		var queued struct {
+			Position int `json:"position"`
+			Class    int `json:"class"`
+		}
+		_ = json.Unmarshal(body, &queued)
+		if queued.Position > 0 {
+			fmt.Printf("queued %s position %d class %d\n", app.Name, queued.Position, queued.Class)
 		}
 		fmt.Printf("reconcile accepted for %s (%s) operation=%s\n", app.Name, app.ID, opID)
 
@@ -134,10 +147,44 @@ func getOperation(c *APIClient, id string) (*api.Operation, error) {
 	return &apiResp.Data, nil
 }
 
+var reconcileAllCmd = &cobra.Command{
+	Use:   "all",
+	Short: "Enqueue every application that is not suspended",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client := NewClient()
+		apps, err := listApps(client)
+		if err != nil {
+			return err
+		}
+		for _, app := range apps {
+			if app.Suspended {
+				continue
+			}
+			path := "/api/v1/apps/" + app.ID + "/reconcile"
+			if reconcileForce {
+				path += "?force=true"
+			}
+			resp, err := client.Post(path, nil)
+			if err != nil {
+				return err
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+			}
+			fmt.Printf("queued %s\n", app.Name)
+		}
+		return nil
+	},
+}
+
 func init() {
 	reconcileAppCmd.Flags().BoolVar(&reconcileWait, "wait", false, "Wait for the reconcile operation to finish")
 	reconcileAppCmd.Flags().DurationVar(&reconcileTimeout, "timeout", 5*time.Minute, "Timeout for --wait")
 	reconcileAppCmd.Flags().BoolVar(&reconcileSync, "sync", false, "Use legacy synchronous POST /sync")
-	reconcileCmd.AddCommand(reconcileAppCmd)
+	reconcileAppCmd.Flags().BoolVar(&reconcileForce, "force", false, "Bypass the CI success gate")
+	reconcileAllCmd.Flags().BoolVar(&reconcileForce, "force", false, "Bypass the CI success gate")
+	reconcileCmd.AddCommand(reconcileAppCmd, reconcileAllCmd)
 	rootCmd.AddCommand(reconcileCmd)
 }

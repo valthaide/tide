@@ -109,6 +109,47 @@ func ParseDuration(raw string) (time.Duration, *Issue) {
 	return d, nil
 }
 
+// ParseReconcileInterval accepts empty, off, 0, or a duration of at least 30s.
+// off and 0 report disabled=true.
+func ParseReconcileInterval(raw string) (time.Duration, bool, *Issue) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false, nil
+	}
+	if raw == "off" || raw == "0" {
+		return 0, true, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, false, &Issue{Rule: "invalid_duration", Message: "invalid_duration: " + raw}
+	}
+	if d < 30*time.Second {
+		return 0, false, &Issue{Rule: "invalid_duration", Message: "invalid_duration: reconcile_interval minimum 30s"}
+	}
+	return d, false, nil
+}
+
+// CheckPriority accepts nil or an integer from -100 to 100.
+func CheckPriority(value *int) *Issue {
+	if value == nil {
+		return nil
+	}
+	if *value < -100 || *value > 100 {
+		return &Issue{Rule: "invalid_priority", Message: fmt.Sprintf("invalid_priority: %d", *value)}
+	}
+	return nil
+}
+
+// CheckRetryRejected accepts empty, error_only, always, or never.
+func CheckRetryRejected(raw string) *Issue {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "error_only", "always", "never":
+		return nil
+	default:
+		return &Issue{Rule: "invalid_retry_rejected", Message: "invalid_retry_rejected: " + raw}
+	}
+}
+
 // Summary is the part of `docker compose config` that validation needs.
 type Summary struct {
 	Images        map[string]string

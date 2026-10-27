@@ -15,12 +15,16 @@ import (
 
 // HostDocument describes apps that should run on one host.
 type HostDocument struct {
-	Schema            int       `yaml:"schema"`
-	Host              string    `yaml:"host"`
-	Build             string    `yaml:"build"`
-	RequireDigest     *bool     `yaml:"require_digest"`
-	AllowedRegistries []string  `yaml:"allowed_registries"`
-	Apps              []AppSpec `yaml:"apps"`
+	Schema               int       `yaml:"schema"`
+	Host                 string    `yaml:"host"`
+	Build                string    `yaml:"build"`
+	RequireDigest        *bool     `yaml:"require_digest"`
+	AllowedRegistries    []string  `yaml:"allowed_registries"`
+	ReconcileInterval    string    `yaml:"reconcile_interval"`
+	ReconcileConcurrency int       `yaml:"reconcile_concurrency"`
+	RetryRejected        string    `yaml:"retry_rejected"`
+	Priority             *int      `yaml:"priority"`
+	Apps                 []AppSpec `yaml:"apps"`
 }
 
 // AppSpec is a desired application registration from fleet git.
@@ -49,6 +53,9 @@ type AppSpec struct {
 	AllowedRegistries      []string          `yaml:"allowed_registries"`
 	EnvFiles               []string          `yaml:"env_files"`
 	PolicyExceptions       []PolicyException `yaml:"policy_exceptions"`
+	ReconcileInterval      string            `yaml:"reconcile_interval"`
+	RetryRejected          string            `yaml:"retry_rejected"`
+	Priority               *int              `yaml:"priority"`
 }
 
 // PolicyException allows one compose rule for one service while policy mode is warn.

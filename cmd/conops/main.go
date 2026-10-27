@@ -153,6 +153,11 @@ func main() {
 		if fleetCfg.Enabled() {
 			logger.Info("Fleet reconciler enabled", "repo", fleetCfg.RepoURL, "host", fleetCfg.Host, "interval", fleetCfg.Interval.String())
 			fleetReconciler := fleet.NewReconciler(fleetCfg, registry, executor, logger)
+			fleetReconciler.OnHost = func(doc *fleet.HostDocument) {
+				if doc != nil && doc.ReconcileConcurrency > 0 {
+					reconciler.SetLimit(doc.ReconcileConcurrency)
+				}
+			}
 			go fleetReconciler.Run(ctx)
 		} else {
 			logger.Info("Fleet reconciler disabled (set CONOPS_FLEET_REPO_URL to enable)")
@@ -239,6 +244,7 @@ func main() {
 					r.Delete("/{id}", appHandler.DeleteApp)
 				})
 				r.Post("/gc", appHandler.ImageGC)
+				r.Get("/queue", appHandler.GetQueue)
 				r.Get("/operations/{id}", appHandler.GetOperation)
 			}
 		})

@@ -53,6 +53,10 @@ type Store interface {
 	SetRetryState(ctx context.Context, id string, attempt int, next time.Time) error
 	ClearRetryState(ctx context.Context, id string) error
 	RetryState(ctx context.Context, id string) (attempt int, next time.Time, err error)
+	SetNextReconcile(ctx context.Context, id string, next, last time.Time) error
+	SetQueued(ctx context.Context, id string, queued time.Time, trigger string, class int) error
+	ClearQueued(ctx context.Context, id string) error
+	LoadSchedule(ctx context.Context, id string) (next, last, queued time.Time, trigger string, class int, err error)
 }
 
 // AppCredential stores encrypted app-level credentials.

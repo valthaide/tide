@@ -54,6 +54,12 @@ type Policy struct {
 	EnvFiles []string `json:"env_files,omitempty" yaml:"env_files"`
 	// PolicyExceptions name service rules that warn mode may allow.
 	PolicyExceptions []PolicyException `json:"policy_exceptions,omitempty" yaml:"policy_exceptions"`
+	// ReconcileInterval is a Go duration or off. Empty inherits the controller default.
+	ReconcileInterval string `json:"reconcile_interval,omitempty" yaml:"reconcile_interval"`
+	// RetryRejected is error_only, always, or never. Empty means error_only.
+	RetryRejected string `json:"retry_rejected,omitempty" yaml:"retry_rejected"`
+	// Priority orders apps inside one trigger class. Higher runs first. Nil means 0.
+	Priority *int `json:"priority,omitempty" yaml:"priority"`
 }
 
 // PolicyException is one allowed compose policy rule for one service.

@@ -51,6 +51,7 @@ type Reconciler struct {
 	Apps          AppManager
 	Cleaner       RuntimeCleaner
 	Logger        *slog.Logger
+	OnHost        func(*HostDocument)
 	missingStreak int
 }
 
@@ -109,6 +110,9 @@ func (r *Reconciler) syncOnce(ctx context.Context) {
 		return
 	}
 	metrics.ObserveFleetSuccess()
+	if r.OnHost != nil {
+		r.OnHost(doc)
+	}
 }
 
 // logMissingHostFile counts consecutive misses. Cycle N logs one WARN and
@@ -485,6 +489,37 @@ func rememberProject(cleaner RuntimeCleaner, app *api.App) {
 	namer.RememberProject(app.ID, app.ComposeProject())
 }
 
+func hostInterval(doc *HostDocument) string {
+	if doc == nil {
+		return ""
+	}
+	return doc.ReconcileInterval
+}
+
+func hostRetry(doc *HostDocument) string {
+	if doc == nil {
+		return ""
+	}
+	return doc.RetryRejected
+}
+
+func inherited(app, host string) string {
+	if strings.TrimSpace(app) != "" {
+		return strings.TrimSpace(app)
+	}
+	return strings.TrimSpace(host)
+}
+
+func inheritedPriority(app *int, doc *HostDocument) *int {
+	if app != nil {
+		return app
+	}
+	if doc == nil {
+		return nil
+	}
+	return doc.Priority
+}
+
 func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 	hostBuild := ""
 	var hostDigest *bool
@@ -516,6 +551,9 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 		PublicVars:             spec.PublicVars,
 		AllowedRegistries:      regs,
 		EnvFiles:               spec.EnvFiles,
+		ReconcileInterval:      inherited(spec.ReconcileInterval, hostInterval(doc)),
+		RetryRejected:          inherited(spec.RetryRejected, hostRetry(doc)),
+		Priority:               inheritedPriority(spec.Priority, doc),
 	}
 	for _, ex := range spec.PolicyExceptions {
 		p.PolicyExceptions = append(p.PolicyExceptions, deploypolicy.PolicyException{

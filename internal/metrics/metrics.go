@@ -211,7 +211,7 @@ var (
 	SyncQueueLength = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "sync_queue_length",
-		Help:      "Apps waiting to sync.",
+		Help:      "Rows in the apply queue, including apps not yet pending.",
 	})
 
 	SyncRunning = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -237,6 +237,55 @@ var (
 		Name:      "image_gc_removed_total",
 		Help:      "Images removed by ConOps image GC.",
 	})
+
+	ReconcileTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "reconcile_total",
+		Help:      "Reconcile results. noop is a cheap pass with nothing to apply.",
+	}, []string{"app", "result", "trigger"})
+
+	QueueWait = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "sync_queue_wait_seconds",
+		Help:      "Seconds an app waited in the apply queue.",
+		Buckets:   []float64{1, 5, 15, 30, 60, 120, 300, 600, 900},
+	}, []string{"trigger"})
+
+	QueueOldest = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "sync_queue_oldest_wait_seconds",
+		Help:      "Age of the oldest apply-queue row.",
+	})
+
+	Verifying = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "verifying",
+		Help:      "Apps whose health check continues after the sync slot was released.",
+	})
+
+	appLastReconcile = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_last_reconcile_timestamp",
+		Help:      "Unix time of the last reconcile for an app.",
+	}, []string{"app"})
+
+	appNextReconcile = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_next_reconcile_timestamp",
+		Help:      "Unix time of the next periodic reconcile for an app.",
+	}, []string{"app"})
+
+	appReconcileOverdue = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_reconcile_overdue",
+		Help:      "1 when the last reconcile is older than twice the interval.",
+	}, []string{"app"})
+
+	appReconcileAttempt = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_reconcile_attempt",
+		Help:      "Current retry attempt for an app.",
+	}, []string{"app"})
 )
 
 // ImageSample is one running service image reported by the reconciler.
@@ -327,6 +376,63 @@ func SetSyncActivity(queue, running int) {
 	SyncRunning.Set(float64(running))
 }
 
+// ObserveReconcile counts one reconcile result.
+func ObserveReconcile(app, result, trigger string) {
+	if app == "" {
+		app = "unknown"
+	}
+	if result == "" {
+		result = "failed"
+	}
+	if trigger == "" {
+		trigger = "commit"
+	}
+	ReconcileTotal.WithLabelValues(app, result, trigger).Inc()
+}
+
+// ObserveQueueWait records how long an app sat in the queue.
+func ObserveQueueWait(trigger string, wait time.Duration) {
+	if trigger == "" {
+		trigger = "commit"
+	}
+	if wait < 0 {
+		wait = 0
+	}
+	QueueWait.WithLabelValues(trigger).Observe(wait.Seconds())
+}
+
+// SetQueueOldest sets the age of the oldest queued app.
+func SetQueueOldest(wait time.Duration) {
+	if wait < 0 {
+		wait = 0
+	}
+	QueueOldest.Set(wait.Seconds())
+}
+
+// SetVerifying sets how many apps are in background health checks.
+func SetVerifying(n int) {
+	Verifying.Set(float64(n))
+}
+
+// SetReconcileSchedule publishes the last and next reconcile times.
+func SetReconcileSchedule(app string, last, next time.Time, overdue bool, attempt int) {
+	if app == "" {
+		return
+	}
+	if !last.IsZero() {
+		appLastReconcile.WithLabelValues(app).Set(float64(last.Unix()))
+	}
+	if !next.IsZero() {
+		appNextReconcile.WithLabelValues(app).Set(float64(next.Unix()))
+	}
+	if overdue {
+		appReconcileOverdue.WithLabelValues(app).Set(1)
+	} else {
+		appReconcileOverdue.WithLabelValues(app).Set(0)
+	}
+	appReconcileAttempt.WithLabelValues(app).Set(float64(attempt))
+}
+
 // VarSample is one public variable exported to metrics.
 type VarSample struct {
 	App   string
@@ -370,6 +476,14 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		PullRunning,
 		DeploysTotal,
 		ImageGCRemoved,
+		ReconcileTotal,
+		QueueWait,
+		QueueOldest,
+		Verifying,
+		appLastReconcile,
+		appNextReconcile,
+		appReconcileOverdue,
+		appReconcileAttempt,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {

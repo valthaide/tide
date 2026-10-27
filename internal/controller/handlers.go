@@ -244,6 +244,9 @@ func (h *Handler) attachRunningImages(ctx context.Context, apps []*api.App) {
 func (h *Handler) decorate(ctx context.Context, apps []*api.App) {
 	h.attachRunningImages(ctx, apps)
 	h.attachOneshot(ctx, apps)
+	if q, ok := h.SyncGate.(interface{ Annotate([]*api.App) }); ok {
+		q.Annotate(apps)
+	}
 	for _, app := range apps {
 		annotatePublic(app)
 	}
@@ -612,6 +615,21 @@ func (h *Handler) ReconcileApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Query().Get("force") == "true" || r.URL.Query().Get("force") == "1" {
+		if skip, ok := h.SyncGate.(interface{ SkipCI(string) }); ok {
+			skip.SkipCI(app.ID)
+		}
+	}
+	if note, ok := h.SyncGate.(interface{ NoteManual(*api.App) }); ok {
+		note.NoteManual(app)
+	}
+	pos, class := 0, 0
+	if q, ok := h.SyncGate.(interface {
+		Position(string) (int, int)
+	}); ok {
+		pos, class = q.Position(app.ID)
+	}
+
 	op, existing := h.Ops.StartReconcile(app.ID, app.Name)
 	if existing {
 		w.Header().Set("Content-Type", "application/json")
@@ -632,7 +650,25 @@ func (h *Handler) ReconcileApp(w http.ResponseWriter, r *http.Request) {
 		"message":      "reconcile accepted",
 		"operation_id": op.ID,
 		"data":         op,
+		"position":     pos,
+		"class":        class,
 	})
+}
+
+// GetQueue handles GET /api/v1/queue.
+func (h *Handler) GetQueue(w http.ResponseWriter, r *http.Request) {
+	type snap interface {
+		Snapshot() []QueueItem
+	}
+	var items []QueueItem
+	if q, ok := h.SyncGate.(snap); ok && q != nil {
+		items = q.Snapshot()
+	}
+	if items == nil {
+		items = []QueueItem{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.APIResponse{Data: items})
 }
 
 // GetOperation handles GET /api/v1/operations/{id}.

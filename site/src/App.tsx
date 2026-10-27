@@ -89,7 +89,6 @@ function App() {
             className="mr-4 hidden md:flex items-center gap-2 font-bold cursor-pointer hover:opacity-80 transition-opacity" 
             onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
           >
-            <img src="/docs/media/conops.png" alt="ConOps" className="h-6 w-6" />
             <span>{siteConfig.name}</span>
           </div>
           

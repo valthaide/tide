@@ -58,8 +58,10 @@ func (h *WebhookHandler) GitPush(w http.ResponseWriter, r *http.Request) {
 		if branch != "" && app.Branch != "" && !strings.EqualFold(strings.TrimPrefix(branch, "refs/heads/"), app.Branch) {
 			continue
 		}
-		// Mark pending so reconciler picks up; watcher will refresh commit on next poll / soon.
-		if app.Status != "pending" && app.Status != "syncing" {
+		// A push during sync must stay queued. Pending is unchanged so the generation is not bumped twice.
+		if app.Status == "syncing" {
+			_ = h.Registry.BumpDesired(app.ID)
+		} else if app.Status != "pending" {
 			_ = h.Registry.UpdateStatus(app.ID, "pending", nil)
 		}
 		// Bump seen commit empty→force watcher by touching status; request immediate check via pending.

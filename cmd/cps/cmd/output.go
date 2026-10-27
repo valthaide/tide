@@ -104,7 +104,11 @@ func suspendedValue(app api.App) string {
 
 func printAppsTable(apps []api.App) {
 	color := colorEnabled()
+	wide := outputFormat() == "wide"
 	headers := []string{"NAME", "READY", "STATUS", "SUSPENDED", "DRIFT", "REVISION", "LAST SYNC", "MESSAGE", "IMAGES", "TAGS"}
+	if wide {
+		headers = append(headers, "TRIGGER", "QUEUE", "LAST RECONCILE", "NEXT RECONCILE", "ATTEMPT")
+	}
 	rows := make([][]string, 0, len(apps))
 	for _, app := range apps {
 		rev := shortCommit(app.LastSyncedCommit)
@@ -114,7 +118,7 @@ func printAppsTable(apps []api.App) {
 		if rev == "" {
 			rev = "-"
 		}
-		rows = append(rows, []string{
+		row := []string{
 			app.Name,
 			readyValue(app),
 			app.Status,
@@ -125,7 +129,15 @@ func printAppsTable(apps []api.App) {
 			messageFor(app),
 			imagesValue(app),
 			orDash(app.Tags),
-		})
+		}
+		if wide {
+			attempt := "-"
+			if app.Attempt > 0 {
+				attempt = fmt.Sprintf("%d", app.Attempt)
+			}
+			row = append(row, orDash(app.Trigger), orDash(app.Queue), relativeTime(app.LastReconcile), relativeTime(app.NextReconcile), attempt)
+		}
+		rows = append(rows, row)
 	}
 	printAlignedTable(headers, rows,
 		func(_ int, plain string) string { return colorHeader(color, plain) },

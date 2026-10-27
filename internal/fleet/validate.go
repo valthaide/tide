@@ -39,6 +39,18 @@ func Validate(data []byte, opts ValidateOptions) (Report, error) {
 	}
 	var issues []fleetcheck.Issue
 	var names []fleetcheck.AppName
+	if _, _, issue := fleetcheck.ParseReconcileInterval(doc.ReconcileInterval); issue != nil {
+		issues = append(issues, *issue)
+	}
+	if issue := fleetcheck.CheckRetryRejected(doc.RetryRejected); issue != nil {
+		issues = append(issues, *issue)
+	}
+	if issue := fleetcheck.CheckPriority(doc.Priority); issue != nil {
+		issues = append(issues, *issue)
+	}
+	if doc.ReconcileConcurrency < 0 {
+		issues = append(issues, fleetcheck.Issue{Rule: "invalid_concurrency", Message: "invalid_concurrency: reconcile_concurrency"})
+	}
 	for _, app := range doc.Apps {
 		project := strings.TrimSpace(app.Project)
 		if project == "" {
@@ -54,6 +66,18 @@ func Validate(data []byte, opts ValidateOptions) (Report, error) {
 				issue.App = app.Name
 				issues = append(issues, *issue)
 			}
+		}
+		if _, _, issue := fleetcheck.ParseReconcileInterval(app.ReconcileInterval); issue != nil {
+			issue.App = app.Name
+			issues = append(issues, *issue)
+		}
+		if issue := fleetcheck.CheckRetryRejected(app.RetryRejected); issue != nil {
+			issue.App = app.Name
+			issues = append(issues, *issue)
+		}
+		if issue := fleetcheck.CheckPriority(app.Priority); issue != nil {
+			issue.App = app.Name
+			issues = append(issues, *issue)
 		}
 	}
 	for _, issue := range fleetcheck.ProjectConflicts(names) {

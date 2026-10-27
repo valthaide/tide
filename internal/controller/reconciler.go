@@ -45,11 +45,18 @@ func (e *gateWait) Error() string { return e.msg }
 
 // ReconcilerConfig controls how the monolith applies desired state.
 type ReconcilerConfig struct {
-	Interval      time.Duration
-	SyncTimeout   time.Duration
-	RetryErrors   bool
-	MaxConcurrent int
-	PullParallel  int
+	Interval             time.Duration
+	SyncTimeout          time.Duration
+	RetryErrors          bool
+	MaxConcurrent        int
+	PullParallel         int
+	AppReconcileInterval time.Duration
+	AppReconcileOff      bool
+	ReconcileJitter      time.Duration
+	QueueAging           time.Duration
+	QueueWarnAfter       time.Duration
+	SlotHealthHold       time.Duration
+	SlotHealthRelease    bool
 }
 
 // LoadReconcilerConfigFromEnv loads reconciler config from environment variables.
@@ -79,8 +86,12 @@ func LoadReconcilerConfigFromEnv() (ReconcilerConfig, error) {
 	retryErrors := strings.EqualFold(os.Getenv("CONOPS_RETRY_ERRORS"), "true")
 
 	maxConcurrent := 2
-	parallelEnv := "CONOPS_SYNC_PARALLEL"
+	parallelEnv := "CONOPS_RECONCILE_CONCURRENCY"
 	value := strings.TrimSpace(os.Getenv(parallelEnv))
+	if value == "" {
+		parallelEnv = "CONOPS_SYNC_PARALLEL"
+		value = strings.TrimSpace(os.Getenv(parallelEnv))
+	}
 	if value == "" {
 		parallelEnv = "CONOPS_MAX_CONCURRENT_SYNCS"
 		value = strings.TrimSpace(os.Getenv(parallelEnv))
@@ -102,12 +113,69 @@ func LoadReconcilerConfigFromEnv() (ReconcilerConfig, error) {
 		pullParallel = n
 	}
 
+	appInterval := 5 * time.Minute
+	appOff := false
+	if value := strings.TrimSpace(os.Getenv("CONOPS_APP_RECONCILE_INTERVAL")); value != "" {
+		if value == "off" || value == "0" {
+			appOff = true
+		} else {
+			parsed, err := time.ParseDuration(value)
+			if err != nil || parsed < 30*time.Second {
+				return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_APP_RECONCILE_INTERVAL: %s", value)
+			}
+			appInterval = parsed
+		}
+	}
+	var jitter time.Duration
+	if value := strings.TrimSpace(os.Getenv("CONOPS_RECONCILE_JITTER")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed < 0 {
+			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_RECONCILE_JITTER: %s", value)
+		}
+		jitter = parsed
+	}
+	aging := 10 * time.Minute
+	if value := strings.TrimSpace(os.Getenv("CONOPS_QUEUE_AGING")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_QUEUE_AGING: %s", value)
+		}
+		aging = parsed
+	}
+	warnAfter := 15 * time.Minute
+	if value := strings.TrimSpace(os.Getenv("CONOPS_QUEUE_WARN_AFTER")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_QUEUE_WARN_AFTER: %s", value)
+		}
+		warnAfter = parsed
+	}
+	slotRelease := false
+	var slotHold time.Duration
+	if value := strings.TrimSpace(os.Getenv("CONOPS_SLOT_HEALTH_HOLD")); value != "" && value != "until_healthy" {
+		slotRelease = true
+		if value != "0" {
+			parsed, err := time.ParseDuration(value)
+			if err != nil || parsed < 0 {
+				return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_SLOT_HEALTH_HOLD: %s", value)
+			}
+			slotHold = parsed
+		}
+	}
+
 	return ReconcilerConfig{
-		Interval:      interval,
-		SyncTimeout:   timeout,
-		RetryErrors:   retryErrors,
-		MaxConcurrent: maxConcurrent,
-		PullParallel:  pullParallel,
+		Interval:             interval,
+		SyncTimeout:          timeout,
+		RetryErrors:          retryErrors,
+		MaxConcurrent:        maxConcurrent,
+		PullParallel:         pullParallel,
+		AppReconcileInterval: appInterval,
+		AppReconcileOff:      appOff,
+		ReconcileJitter:      jitter,
+		QueueAging:           aging,
+		QueueWarnAfter:       warnAfter,
+		SlotHealthHold:       slotHold,
+		SlotHealthRelease:    slotRelease,
 	}, nil
 }
 
@@ -169,6 +237,14 @@ type Reconciler struct {
 	driftStreak      map[string]int
 	recoverStreak    map[string]int
 	lastGC           time.Time
+	limit            int
+	manualWaiting    int
+	queue            map[string]*QueueItem
+	nextAt           map[string]time.Time
+	lastAt           map[string]time.Time
+	running          []compose.RunningImage
+	warnedQueue      map[string]time.Time
+	skipCI           map[string]struct{}
 }
 
 // NewReconciler creates a new reconciler.
@@ -176,12 +252,17 @@ func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger,
 	if cfg.MaxConcurrent < 1 {
 		cfg.MaxConcurrent = 2
 	}
+	capN := cfg.MaxConcurrent
+	if capN < 64 {
+		capN = 64
+	}
 	return &Reconciler{
 		Registry:         registry,
 		Executor:         executor,
 		Logger:           logger,
 		Config:           cfg,
-		sem:              make(chan struct{}, cfg.MaxConcurrent),
+		sem:              make(chan struct{}, capN),
+		limit:            cfg.MaxConcurrent,
 		inFlight:         make(map[string]struct{}),
 		nudge:            make(chan struct{}, 1),
 		retryAfter:       map[string]transientRetry{},
@@ -190,16 +271,34 @@ func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger,
 		forceApply:       map[string]struct{}{},
 		driftStreak:      map[string]int{},
 		recoverStreak:    map[string]int{},
+		queue:            map[string]*QueueItem{},
+		nextAt:           map[string]time.Time{},
+		lastAt:           map[string]time.Time{},
+		warnedQueue:      map[string]time.Time{},
+		skipCI:           map[string]struct{}{},
 	}
 }
 
 // AcquireSync slot for force-sync and reconcile (shared concurrency limit).
 func (r *Reconciler) AcquireSync(ctx context.Context) error {
-	select {
-	case r.sem <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		r.mu.Lock()
+		full := r.limit > 0 && len(r.inFlight) >= r.limit
+		r.mu.Unlock()
+		if !full {
+			select {
+			case r.sem <- struct{}{}:
+				return nil
+			default:
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -269,22 +368,12 @@ func (r *Reconciler) dispatch() {
 	sort.SliceStable(apps, func(i, j int) bool {
 		return apps[i].Name < apps[j].Name
 	})
-	if n := len(apps); n > 1 {
-		r.mu.Lock()
-		start := r.dispatchCursor % n
-		r.dispatchCursor++
-		r.mu.Unlock()
-		if start > 0 {
-			rotated := make([]*App, 0, n)
-			rotated = append(rotated, apps[start:]...)
-			rotated = append(rotated, apps[:start]...)
-			apps = rotated
-		}
-	}
 	blocked := r.blockedApps(apps)
 	r.noteProjects(apps)
 	r.publishRunningImages(apps)
 	r.publishPublicVars(apps)
+	r.runPeriodic(apps, runtimeSnapshot)
+	apps = r.orderByQueue(apps)
 	for _, app := range apps {
 		if app.Suspended {
 			continue
@@ -359,6 +448,12 @@ func (r *Reconciler) dispatch() {
 		if r.inTransientPause(app) {
 			continue
 		}
+		if r.configHold(app) {
+			if !r.inTransientPause(app) {
+				r.scheduleTransient(app.ID)
+			}
+			continue
+		}
 		appCopy := app
 		if !r.tryStart(appCopy.ID) {
 			if r.Logger != nil {
@@ -370,21 +465,13 @@ func (r *Reconciler) dispatch() {
 		go func() {
 			defer r.wg.Done()
 			defer r.finishSync(appCopy.ID)
+			r.markQueueStart(appCopy.ID)
 			if err := r.syncApp(appCopy); err != nil && r.Logger != nil {
 				r.Logger.Error("App sync failed", "app_id", appCopy.ID, "error", redactAppText(appCopy, err.Error()))
 			}
 		}()
 	}
-	queue := 0
-	for _, app := range apps {
-		if app != nil && app.Status == "pending" && !r.inFlightApp(app.ID) {
-			queue++
-		}
-	}
-	r.mu.Lock()
-	running := len(r.inFlight)
-	r.mu.Unlock()
-	metrics.SetSyncActivity(queue, running)
+	r.publishQueue()
 	r.maybeGC()
 }
 
@@ -401,6 +488,12 @@ func (r *Reconciler) tryStart(id string) bool {
 	if _, ok := r.inFlight[id]; ok {
 		return false
 	}
+	if r.manualWaiting > 0 {
+		return false
+	}
+	if r.limit > 0 && len(r.inFlight) >= r.limit {
+		return false
+	}
 	select {
 	case r.sem <- struct{}{}:
 		r.inFlight[id] = struct{}{}
@@ -411,6 +504,7 @@ func (r *Reconciler) tryStart(id string) bool {
 }
 
 func (r *Reconciler) finishSync(id string) {
+	r.dequeue(id)
 	r.mu.Lock()
 	delete(r.inFlight, id)
 	r.mu.Unlock()
@@ -504,6 +598,7 @@ func (r *Reconciler) envFileDriftReason(app *App) string {
 }
 
 func (r *Reconciler) requeuePending(app *App, reason string) {
+	r.enqueue(app, triggerForReason(reason), reason, appPriority(app))
 	if app.Status == "pending" {
 		return
 	}
@@ -707,9 +802,14 @@ func (r *Reconciler) syncApp(app *App) error {
 		return se
 	}
 
+	if r.releaseHealthSlot(app, target, output, syncStartedAt, gen) {
+		return nil
+	}
 	if err := r.confirmHealthy(ctx, app, target); err != nil {
+		metrics.ObserveReconcile(app.Name, "rolled_back", r.currentTrigger(app.ID))
 		return r.rollbackUnhealthy(ctx, app, target, output, err, syncStartedAt, gen)
 	}
+	metrics.ObserveReconcile(app.Name, "applied", r.currentTrigger(app.ID))
 
 	now := time.Now()
 	syncErr := ""
@@ -1066,6 +1166,9 @@ func (r *Reconciler) publishRunningImages(apps []*App) {
 	if err != nil {
 		return
 	}
+	r.mu.Lock()
+	r.running = images
+	r.mu.Unlock()
 	byProject := make(map[string]string, len(apps))
 	for _, app := range apps {
 		if app == nil {
@@ -1272,6 +1375,9 @@ func (r *Reconciler) checkPipelineGate(app *App) error {
 		return nil
 	}
 	policy := app.Policy()
+	if r.consumeSkipCI(app.ID) {
+		return nil
+	}
 	if !policy.RequirePipelineSuccess {
 		return nil
 	}

@@ -104,13 +104,31 @@ func healthClass(app *App) bool {
 	return strings.Contains(msg, "unhealthy") || strings.Contains(msg, "restarting") || strings.Contains(msg, "health timeout") || app.LastSyncErrorCode == syncerr.CodeUnhealthy
 }
 
+func retryMode(app *App) string {
+	if app == nil {
+		return "error_only"
+	}
+	switch strings.ToLower(strings.TrimSpace(app.Policy().RetryRejected)) {
+	case "always", "never", "error_only":
+		return strings.ToLower(strings.TrimSpace(app.Policy().RetryRejected))
+	default:
+		return "error_only"
+	}
+}
+
 func (r *Reconciler) shouldRetryRejected(app *App, snapshot map[string]compose.ProjectRuntimeState) bool {
-	if app == nil || app.Status == "rolled_back" || !healthClass(app) {
+	mode := retryMode(app)
+	if app == nil || mode == "never" || !healthClass(app) {
+		return false
+	}
+	if app.Status == "rolled_back" && mode != "always" {
 		return false
 	}
 	if strings.TrimSpace(app.LastHealthyCommit) != "" && snapshot != nil {
 		if state, ok := snapshot[app.ComposeProject()]; ok && state.Ready() {
-			return false
+			if mode != "always" || app.LastSeenCommit == app.LastSyncedCommit {
+				return false
+			}
 		}
 	}
 	_, next, err := r.Registry.RetryState(app.ID)
@@ -174,20 +192,30 @@ func (r *Reconciler) SyncAppNow(app *api.App) *syncerr.Error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.Config.SyncTimeout)
 	defer cancel()
-	if err := r.AcquireSync(ctx); err != nil {
+	r.mu.Lock()
+	r.manualWaiting++
+	r.mu.Unlock()
+	errAcquire := r.AcquireSync(ctx)
+	r.mu.Lock()
+	r.manualWaiting--
+	r.mu.Unlock()
+	if errAcquire != nil {
 		return syncerr.New(syncerr.CodeTimeout, syncerr.StageUnknown, "sync queue timeout")
 	}
+	r.enqueue(app, "manual", "manual", appPriority(app))
 	r.mu.Lock()
 	r.inFlight[app.ID] = struct{}{}
 	r.forceApply[app.ID] = struct{}{}
 	r.mu.Unlock()
 	defer func() {
+		r.dequeue(app.ID)
 		r.mu.Lock()
 		delete(r.inFlight, app.ID)
 		delete(r.forceApply, app.ID)
 		r.mu.Unlock()
 		r.ReleaseSync()
 	}()
+	r.markQueueStart(app.ID)
 	_ = r.Registry.ClearRetry(app.ID)
 	err := r.syncApp(app)
 	if err == nil {

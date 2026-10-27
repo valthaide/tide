@@ -118,6 +118,17 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	`); err != nil {
 		return nil, fmt.Errorf("failed to create app_control table: %w", err)
 	}
+	for _, column := range []string{
+		"next_reconcile_at DATETIME",
+		"last_reconcile_at DATETIME",
+		"queued_at DATETIME",
+		"trigger_name TEXT NOT NULL DEFAULT ''",
+		"queue_class INTEGER NOT NULL DEFAULT 0",
+	} {
+		if err := addSQLiteColumnIfMissing(db, "app_control", column); err != nil {
+			return nil, err
+		}
+	}
 
 	if _, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS app_revisions (

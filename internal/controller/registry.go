@@ -666,6 +666,27 @@ func (r *Registry) RetryState(id string) (int, time.Time, error) {
 	return r.store.RetryState(context.Background(), id)
 }
 
+func (r *Registry) BumpDesired(id string) error {
+	_, err := r.store.BumpDesiredGeneration(context.Background(), id)
+	return err
+}
+
+func (r *Registry) SetNextReconcile(id string, next, last time.Time) error {
+	return r.store.SetNextReconcile(context.Background(), id, next, last)
+}
+
+func (r *Registry) SetQueued(id string, queued time.Time, trigger string, class int) error {
+	return r.store.SetQueued(context.Background(), id, queued, trigger, class)
+}
+
+func (r *Registry) ClearQueued(id string) error {
+	return r.store.ClearQueued(context.Background(), id)
+}
+
+func (r *Registry) LoadSchedule(id string) (time.Time, time.Time, time.Time, string, int, error) {
+	return r.store.LoadSchedule(context.Background(), id)
+}
+
 // UpdateSyncResultErr stores sync metadata with a structured error.
 func (r *Registry) UpdateSyncResultErr(
 	id string,

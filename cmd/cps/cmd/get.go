@@ -3,6 +3,8 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/valthaide/conops-private/internal/api"
@@ -121,11 +123,67 @@ func printContainersTable(containers []api.Container) {
 	)
 }
 
+var getQueueCmd = &cobra.Command{
+	Use:   "queue",
+	Short: "Show the apply queue",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client := NewClient()
+		resp, err := client.Get("/api/v1/queue")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if err := CheckResponse(resp); err != nil {
+			return err
+		}
+		var apiResp struct {
+			Data []struct {
+				Name     string    `json:"app"`
+				Trigger  string    `json:"trigger"`
+				Class    int       `json:"class"`
+				Priority int       `json:"priority"`
+				QueuedAt time.Time `json:"queued_at"`
+				Reasons  []string  `json:"reasons"`
+				Running  bool      `json:"running"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+			return err
+		}
+		if outputFormat() == "json" {
+			return printJSON(apiResp.Data)
+		}
+		headers := []string{"POS", "APP", "TRIGGER", "CLASS", "PRIORITY", "QUEUED", "REASONS"}
+		rows := make([][]string, 0, len(apiResp.Data))
+		for i, item := range apiResp.Data {
+			state := strings.Join(item.Reasons, ",")
+			if item.Running {
+				state = "running " + state
+			}
+			rows = append(rows, []string{
+				fmt.Sprintf("%d", i+1),
+				item.Name,
+				orDash(item.Trigger),
+				fmt.Sprintf("%d", item.Class),
+				fmt.Sprintf("%d", item.Priority),
+				relativeTime(item.QueuedAt),
+				orDash(state),
+			})
+		}
+		color := colorEnabled()
+		printAlignedTable(headers, rows,
+			func(_ int, plain string) string { return colorHeader(color, plain) },
+			func(_ int, plain string) string { return colorData(color, plain) },
+		)
+		return nil
+	},
+}
+
 func init() {
-	getCmd.AddCommand(getAppsCmd, getAppCmd, getControllerCmd)
+	getCmd.AddCommand(getAppsCmd, getAppCmd, getControllerCmd, getQueueCmd)
 	rootCmd.AddCommand(getCmd)
 
 	getCmd.RunE = func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("resource required: apps|app|controller")
+		return fmt.Errorf("resource required: apps|app|controller|queue")
 	}
 }

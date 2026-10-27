@@ -67,6 +67,20 @@ type App struct {
 	FleetRevision string `json:"fleet_revision,omitempty"`
 	// Schema is the additive app document version.
 	Schema int `json:"schema,omitempty"`
+	// Trigger is why this app is queued. Filled on read.
+	Trigger string `json:"trigger,omitempty"`
+	// Queue is the queue position, empty when the app is not queued.
+	Queue string `json:"queue,omitempty"`
+	// LastReconcile is the last cheap or applied reconcile.
+	LastReconcile time.Time `json:"last_reconcile_at,omitempty"`
+	// NextReconcile is the next periodic reconcile.
+	NextReconcile time.Time `json:"next_reconcile_at,omitempty"`
+	// Attempt is the current retry attempt.
+	Attempt int `json:"attempt,omitempty"`
+	// QueueClass is the trigger class while the app is queued.
+	QueueClass int `json:"queue_class,omitempty"`
+	// Priority is the fleet priority used inside a trigger class.
+	Priority int `json:"priority,omitempty"`
 }
 
 // VolumeRef is one named volume used by an app.

@@ -118,6 +118,17 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	`); err != nil {
 		return err
 	}
+	for _, stmt := range []string{
+		`ALTER TABLE app_control ADD COLUMN IF NOT EXISTS next_reconcile_at TIMESTAMPTZ`,
+		`ALTER TABLE app_control ADD COLUMN IF NOT EXISTS last_reconcile_at TIMESTAMPTZ`,
+		`ALTER TABLE app_control ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ`,
+		`ALTER TABLE app_control ADD COLUMN IF NOT EXISTS trigger_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE app_control ADD COLUMN IF NOT EXISTS queue_class INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := s.pool.Exec(ctx, stmt); err != nil {
+			return err
+		}
+	}
 	if _, err := s.pool.Exec(ctx, `
 	CREATE TABLE IF NOT EXISTS app_revisions (
 		id BIGSERIAL PRIMARY KEY,
