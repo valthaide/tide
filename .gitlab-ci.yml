@@ -3,7 +3,7 @@ stages:
 
 workflow:
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'
+    - if: '$CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "schedule"'
 
 default:
   tags:
@@ -41,8 +41,61 @@ build-image:
         --use-new-run
       echo "Built version ${VERSION}"
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
     - if: '$CI_COMMIT_TAG'
       when: on_success
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: manual
     - when: never
+
+pull-github:
+  stage: build
+  image:
+    name: alpine/git:2.54.0@sha256:e8ceedc73bd80992ae8d58a7d24c58b8322146c354f1d2e81a97db4452068ec0
+    entrypoint: [""]
+  variables:
+    GIT_STRATEGY: none
+  resource_group: github-pull
+  script:
+    - |
+      set -eu
+      umask 077
+      export HOME="$(mktemp -d)"
+      export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+      printf '%s' "$GITHUB_PULL_KEY_B64" | base64 -d > "$HOME/key"
+      printf 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n' > "$HOME/known_hosts"
+      export GIT_SSH_COMMAND="ssh -i $HOME/key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/known_hosts -o HostKeyAlgorithms=ssh-ed25519"
+      gh="git@github.com:valthaide/conops-private.git"
+      gl="https://${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+      auth="Authorization: Basic $(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64 | tr -d '\n')"
+      git init -q "$HOME/work"
+      cd "$HOME/work"
+      git fetch -q "$gh" master:refs/heads/gh
+      git -c "http.extraheader=$auth" fetch -q "$gl" main:refs/heads/gl
+      if [ "$(git rev-parse gh)" = "$(git rev-parse gl)" ]; then
+        echo "main is up to date at $(git rev-parse --short gl)"
+      else
+        if ! git merge-base --is-ancestor gl gh; then
+          echo "GitHub master is not a fast forward of GitLab main, refusing to update" >&2
+          exit 1
+        fi
+        git -c "http.extraheader=$auth" push -q "$gl" gh:refs/heads/main
+        echo "main updated to $(git rev-parse --short gh)"
+      fi
+      git ls-remote --tags "$gh" > gh_refs
+      git -c "http.extraheader=$auth" ls-remote --tags "$gl" > gl_refs
+      awk '$2 !~ /\^\{\}$/ { sub("refs/tags/", "", $2); print $2 }' gh_refs | sort > gh_tags
+      awk '$2 !~ /\^\{\}$/ { sub("refs/tags/", "", $2); print $2 }' gl_refs | sort > gl_tags
+      comm -23 gh_tags gl_tags > new_tags
+      while read -r tag; do
+        case "$tag" in
+          *[!A-Za-z0-9._-]*) echo "skipping tag with unexpected name" >&2; continue ;;
+        esac
+        git fetch -q "$gh" "refs/tags/$tag:refs/tags/$tag"
+        git -c "http.extraheader=$auth" push -q "$gl" "refs/tags/$tag:refs/tags/$tag"
+        echo "tag $tag added"
+      done < new_tags
+      echo "tags checked, $(wc -l < new_tags) new"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
