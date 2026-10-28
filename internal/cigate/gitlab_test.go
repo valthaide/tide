@@ -92,9 +92,24 @@ func TestTriggerFailureDoesNotOverridePushSuccess(t *testing.T) {
 	}
 }
 
-func TestOnlyTriggerFailureWaits(t *testing.T) {
+func TestOnlyTriggerFailureDeploys(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"id":30,"status":"failed","source":"trigger"},{"id":29,"status":"failed","source":"api"}]`))
+		_, _ = w.Write([]byte(`[{"id":30,"status":"failed","source":"trigger"},{"id":29,"status":"success","source":"api"}]`))
+	}))
+	defer srv.Close()
+	c := &Checker{APIBase: srv.URL, Token: "tok", Client: srv.Client()}
+	res := c.CheckCommit(context.Background(), "https://git.example/g/p.git", "abc")
+	if !res.Allowed || res.Outcome != OutcomeAllow || len(res.Ignored) != 2 {
+		t.Fatalf("%+v", res)
+	}
+	if res.Ignored[0].ID != 30 || res.Ignored[0].Source != "trigger" || res.Ignored[1].Source != "api" {
+		t.Fatalf("ignored: %+v", res.Ignored)
+	}
+}
+
+func TestNoPipelinesWaits(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer srv.Close()
 	c := &Checker{APIBase: srv.URL, Token: "tok", Client: srv.Client()}

@@ -45,6 +45,9 @@ type Result struct {
 	WebURL     string
 	PipelineID int64
 	Source     string
+	// Ignored lists pipelines of other sources when the deploy proceeds
+	// because no push or merge request pipeline decided the commit.
+	Ignored []Pipeline
 }
 
 // Pipeline is one GitLab pipeline on a commit.
@@ -94,8 +97,7 @@ func SelectPipeline(pipelines []Pipeline, sources []string) (Pipeline, bool) {
 		if _, ok := allowed[source]; !ok {
 			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(pipeline.Status)) {
-		case StatusCanceled, "cancelled", StatusSkipped:
+		if !pipelineCounts(pipeline.Status) {
 			continue
 		}
 		pipeline.Source = source
@@ -103,6 +105,50 @@ func SelectPipeline(pipelines []Pipeline, sources []string) (Pipeline, bool) {
 		return pipeline, true
 	}
 	return Pipeline{}, false
+}
+
+func pipelineCounts(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case StatusCanceled, "cancelled", StatusSkipped:
+		return false
+	default:
+		return true
+	}
+}
+
+// OtherSourcePipelines returns pipelines that are not canceled or skipped and
+// whose source is outside the deciding set. Newest first, same order as input.
+func OtherSourcePipelines(pipelines []Pipeline, sources []string) []Pipeline {
+	allowed := map[string]struct{}{}
+	for _, source := range NormalizeSources(sources) {
+		allowed[source] = struct{}{}
+	}
+	var out []Pipeline
+	for _, pipeline := range pipelines {
+		if !pipelineCounts(pipeline.Status) {
+			continue
+		}
+		source := strings.ToLower(strings.TrimSpace(pipeline.Source))
+		if source == "" {
+			continue
+		}
+		if _, ok := allowed[source]; ok {
+			continue
+		}
+		pipeline.Source = source
+		pipeline.Status = strings.ToLower(strings.TrimSpace(pipeline.Status))
+		out = append(out, pipeline)
+	}
+	return out
+}
+
+// FormatPipelines renders id, source, and status for a log line.
+func FormatPipelines(pipelines []Pipeline) string {
+	parts := make([]string, 0, len(pipelines))
+	for _, pipeline := range pipelines {
+		parts = append(parts, fmt.Sprintf("id=%d source=%s status=%s", pipeline.ID, pipeline.Source, pipeline.Status))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Checker queries GitLab for the newest pipeline of a commit.
@@ -245,6 +291,16 @@ func (c *Checker) CheckCommit(ctx context.Context, repoURL, commitSHA string) Re
 	}
 	chosen, ok := SelectPipeline(pipelines, c.Sources)
 	if !ok {
+		others := OtherSourcePipelines(pipelines, c.Sources)
+		if len(others) > 0 {
+			return Result{
+				Allowed: true,
+				Outcome: OutcomeAllow,
+				Reason:  ReasonOK,
+				Status:  "absent",
+				Ignored: others,
+			}
+		}
 		outcome, reason := ClassifyPipelineStatus("missing")
 		return Result{Allowed: false, Outcome: outcome, Reason: reason, Status: "missing"}
 	}

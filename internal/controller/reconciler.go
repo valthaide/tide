@@ -1403,6 +1403,9 @@ func (r *Reconciler) checkPipelineGate(app *App) error {
 	switch res.Outcome {
 	case cigate.OutcomeAllow, "":
 		if res.Allowed {
+			if len(res.Ignored) > 0 && r.Logger != nil {
+				r.Logger.Info("Deploy allowed without a counted pipeline", "app", app.Name, "commit", app.LastSeenCommit, "ignored_pipelines", cigate.FormatPipelines(res.Ignored))
+			}
 			return nil
 		}
 	case cigate.OutcomeWait:

@@ -742,6 +742,9 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			res := checker.CheckCommit(ctx, app.RepoURL, commit)
 			cancel()
+			if res.Allowed && len(res.Ignored) > 0 && h.Logger != nil {
+				h.Logger.Info("Deploy allowed without a counted pipeline", "app", app.Name, "commit", commit, "ignored_pipelines", cigate.FormatPipelines(res.Ignored))
+			}
 			if res.Outcome == cigate.OutcomeWait {
 				now := time.Now()
 				_ = h.Registry.UpdateStatus(app.ID, "pending", &now)
