@@ -800,9 +800,11 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 
 	progress := newSyncProgressReporter(h.Registry, h.Logger, app.ID, syncProgressFlushInterval)
 	opts := compose.ApplyOptions{
-		Vars:      app.Policy().Vars,
-		BuildMode: app.Policy().EffectiveBuild(),
-		Project:   app.ComposeProject(),
+		Vars:              app.Policy().Vars,
+		BuildMode:         app.Policy().EffectiveBuild(),
+		Project:           app.ComposeProject(),
+		CreateVolumes:     app.Policy().CreateVolumes,
+		VolumeNamePattern: app.Policy().VolumeNamePattern,
 	}
 	var output string
 	if ia, ok := h.Applier.(imageApplier); ok {

@@ -510,6 +510,13 @@ func inherited(app, host string) string {
 	return strings.TrimSpace(host)
 }
 
+func hostVolumePattern(doc *HostDocument) string {
+	if doc == nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.VolumeNamePattern)
+}
+
 func pipelineSources(app []string, doc *HostDocument) []string {
 	if len(app) > 0 {
 		return app
@@ -562,6 +569,8 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 		PublicVars:             spec.PublicVars,
 		AllowedRegistries:      regs,
 		EnvFiles:               spec.EnvFiles,
+		CreateVolumes:          doc != nil && doc.CreateVolumes,
+		VolumeNamePattern:      hostVolumePattern(doc),
 		ReconcileInterval:      inherited(spec.ReconcileInterval, hostInterval(doc)),
 		RetryRejected:          inherited(spec.RetryRejected, hostRetry(doc)),
 		Priority:               inheritedPriority(spec.Priority, doc),

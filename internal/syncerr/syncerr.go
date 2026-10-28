@@ -9,30 +9,31 @@ import (
 
 // Common error codes for alerts and cps.
 const (
-	CodeGitAuth        = "git_auth"
-	CodeGitFetch       = "git_fetch"
-	CodeComposeApply   = "compose_apply"
-	CodeSecretsSOPS    = "secrets_sops"
-	CodeSecretsVault   = "secrets_vault"
-	CodeCredentials    = "credentials"
-	CodeTimeout        = "timeout"
-	CodeEnvFileMissing = "env_file_missing"
-	CodeBlockedByCI    = "blocked_by_ci"
-	CodeDirtyWorktree  = "dirty_worktree"
-	CodeUnhealthy      = "unhealthy"
-	CodeBuildForbidden = "build_forbidden"
-	CodeRegistryAuth   = "registry_auth"
-	CodePullFailed     = "pull_failed"
-	CodeOneshotFailed  = "oneshot_failed"
-	CodeOneshotTimeout = "oneshot_timeout"
-	CodeValidation     = "validation_failed"
-	CodePortConflict   = "port_conflict"
-	CodeVolumeMissing  = "volume_missing"
-	CodeDigestRequired = "digest_required"
-	CodeRegistryDenied = "registry_not_allowed"
-	CodeUnsetVar       = "unset_var"
-	CodeDockerAPI      = "docker_api_incompatible"
-	CodeUnknown        = "unknown"
+	CodeGitAuth            = "git_auth"
+	CodeGitFetch           = "git_fetch"
+	CodeComposeApply       = "compose_apply"
+	CodeSecretsSOPS        = "secrets_sops"
+	CodeSecretsVault       = "secrets_vault"
+	CodeCredentials        = "credentials"
+	CodeTimeout            = "timeout"
+	CodeEnvFileMissing     = "env_file_missing"
+	CodeBlockedByCI        = "blocked_by_ci"
+	CodeDirtyWorktree      = "dirty_worktree"
+	CodeUnhealthy          = "unhealthy"
+	CodeBuildForbidden     = "build_forbidden"
+	CodeRegistryAuth       = "registry_auth"
+	CodePullFailed         = "pull_failed"
+	CodeOneshotFailed      = "oneshot_failed"
+	CodeOneshotTimeout     = "oneshot_timeout"
+	CodeValidation         = "validation_failed"
+	CodePortConflict       = "port_conflict"
+	CodeVolumeMissing      = "volume_missing"
+	CodeVolumeNameRejected = "volume_name_rejected"
+	CodeDigestRequired     = "digest_required"
+	CodeRegistryDenied     = "registry_not_allowed"
+	CodeUnsetVar           = "unset_var"
+	CodeDockerAPI          = "docker_api_incompatible"
+	CodeUnknown            = "unknown"
 )
 
 // Stages of a sync pipeline.
@@ -201,6 +202,8 @@ func Classify(err error) *Error {
 		return New(CodeValidation, StageValidate, msg)
 	case strings.Contains(lower, "port_conflict"):
 		return New(CodePortConflict, StageValidate, msg)
+	case strings.Contains(lower, "volume_name_rejected"):
+		return New(CodeVolumeNameRejected, StageValidate, msg)
 	case strings.Contains(lower, "volume_missing"):
 		return New(CodeVolumeMissing, StageValidate, msg)
 	case strings.Contains(lower, "digest_required"):

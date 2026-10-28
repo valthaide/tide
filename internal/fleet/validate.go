@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/valthaide/conops-private/internal/compose"
@@ -47,6 +48,11 @@ func Validate(data []byte, opts ValidateOptions) (Report, error) {
 	}
 	if issue := fleetcheck.CheckPriority(doc.Priority); issue != nil {
 		issues = append(issues, *issue)
+	}
+	if doc.CreateVolumes && strings.TrimSpace(doc.VolumeNamePattern) != "" {
+		if _, err := regexp.Compile(doc.VolumeNamePattern); err != nil {
+			issues = append(issues, fleetcheck.Issue{Rule: "invalid_volume_pattern", Message: "invalid_volume_pattern: " + err.Error()})
+		}
 	}
 	if doc.ReconcileConcurrency < 0 {
 		issues = append(issues, fleetcheck.Issue{Rule: "invalid_concurrency", Message: "invalid_concurrency: reconcile_concurrency"})

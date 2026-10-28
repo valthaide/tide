@@ -47,6 +47,13 @@ type ApplyOptions struct {
 	PolicyExceptions []deploypolicy.PolicyException
 	// ForeignPorts maps a published host port to the app or container that owns it.
 	ForeignPorts map[int]string
+	// CreateVolumes creates a missing external volume when its name matches VolumeNamePattern.
+	// Existing volumes are left unchanged. Default false.
+	CreateVolumes bool
+	// VolumeNamePattern is a regular expression. Empty refuses creation even when CreateVolumes is set.
+	VolumeNamePattern string
+	// OnVolumeCreated reports a volume this apply created.
+	OnVolumeCreated func(name string)
 }
 
 // SlotGate limits how many image pulls run at once.
@@ -375,10 +382,8 @@ func (e *ComposeExecutor) prepareImageSync(
 		return imagePrep{}, err
 	}
 	for _, vol := range sum.ExternalVols {
-		if !e.volumeExists(ctx, vol) {
-			msg := "volume_missing: " + vol
-			appendLogLine(syncLog, msg)
-			return imagePrep{}, syncerr.New(syncerr.CodeVolumeMissing, syncerr.StageValidate, msg)
+		if err := e.ensureExternalVolume(ctx, syncLog, vol, opts); err != nil {
+			return imagePrep{}, err
 		}
 	}
 	if len(sum.ContainerName) > 0 {

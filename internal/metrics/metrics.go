@@ -238,6 +238,12 @@ var (
 		Help:      "Images removed by ConOps image GC.",
 	})
 
+	VolumesCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "volumes_created_total",
+		Help:      "External volumes created by ConOps.",
+	}, []string{"volume"})
+
 	ReconcileTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "reconcile_total",
@@ -476,6 +482,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		PullRunning,
 		DeploysTotal,
 		ImageGCRemoved,
+		VolumesCreated,
 		ReconcileTotal,
 		QueueWait,
 		QueueOldest,
@@ -749,6 +756,15 @@ func SetEnvDrift(app string, drifted bool) {
 		v = 1
 	}
 	envDrift.WithLabelValues(app).Set(v)
+}
+
+// ObserveVolumeCreated counts one external volume ConOps created.
+func ObserveVolumeCreated(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	VolumesCreated.WithLabelValues(name).Inc()
 }
 
 // ObserveReconcileSuccess records last successful reconcile timestamp.

@@ -63,6 +63,10 @@ type Policy struct {
 	RetryRejected string `json:"retry_rejected,omitempty" yaml:"retry_rejected"`
 	// Priority orders apps inside one trigger class. Higher runs first. Nil means 0.
 	Priority *int `json:"priority,omitempty" yaml:"priority"`
+	// CreateVolumes creates a missing external volume when its name matches VolumeNamePattern.
+	CreateVolumes bool `json:"create_volumes,omitempty" yaml:"create_volumes"`
+	// VolumeNamePattern is the host regular expression for volumes this controller may create.
+	VolumeNamePattern string `json:"volume_name_pattern,omitempty" yaml:"volume_name_pattern"`
 }
 
 // PolicyException is one allowed compose policy rule for one service.

@@ -46,7 +46,7 @@ func UnknownFields(data []byte) ([]string, error) {
 					return nil, fmt.Errorf("unknown_field: schema %d is newer than %d", n, supportedSchema)
 				}
 			}
-		case "host", "build", "require_digest", "allowed_registries", "reconcile_interval", "reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources":
+		case "host", "build", "require_digest", "allowed_registries", "reconcile_interval", "reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources", "create_volumes", "volume_name_pattern":
 		case "apps":
 			unknown = append(unknown, unknownAppFields(val)...)
 		default:

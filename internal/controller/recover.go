@@ -97,7 +97,7 @@ func healthClass(app *App) bool {
 		return false
 	}
 	switch app.LastSyncErrorCode {
-	case syncerr.CodeValidation, syncerr.CodePortConflict, syncerr.CodeVolumeMissing, syncerr.CodeDigestRequired, syncerr.CodeRegistryDenied, syncerr.CodeBuildForbidden, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI:
+	case syncerr.CodeValidation, syncerr.CodePortConflict, syncerr.CodeVolumeMissing, syncerr.CodeVolumeNameRejected, syncerr.CodeDigestRequired, syncerr.CodeRegistryDenied, syncerr.CodeBuildForbidden, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI:
 		return false
 	}
 	msg := strings.ToLower(app.LastSyncError + " " + app.LastSyncErrorCode)

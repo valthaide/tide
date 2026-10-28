@@ -25,6 +25,8 @@ type HostDocument struct {
 	RetryRejected          string    `yaml:"retry_rejected"`
 	Priority               *int      `yaml:"priority"`
 	RequirePipelineSources []string  `yaml:"require_pipeline_sources"`
+	CreateVolumes          bool      `yaml:"create_volumes"`
+	VolumeNamePattern      string    `yaml:"volume_name_pattern"`
 	Apps                   []AppSpec `yaml:"apps"`
 }
 

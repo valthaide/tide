@@ -736,6 +736,14 @@ func (r *Reconciler) syncApp(app *App) error {
 		BindPrefixes:      bindPrefixes(),
 		AllowedRegistries: policy.AllowedRegistries,
 		PolicyExceptions:  policy.PolicyExceptions,
+		CreateVolumes:     policy.CreateVolumes,
+		VolumeNamePattern: policy.VolumeNamePattern,
+		OnVolumeCreated: func(name string) {
+			if r.Logger != nil {
+				r.Logger.Info("Created external volume", "app", app.Name, "volume", name)
+			}
+			r.noteDeploy(app, "volume_created", target, deploypolicy.EncodeVars(policy.Vars), name, "volume")
+		},
 	}
 	if target != strings.TrimSpace(app.LastSeenCommit) {
 		opts.Vars = deploypolicy.DecodeVars(app.LastHealthyVars)
@@ -1081,6 +1089,8 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 					Project:           app.ComposeProject(),
 					RequireDigest:     app.Policy().RequireDigest,
 					AllowedRegistries: app.Policy().AllowedRegistries,
+					CreateVolumes:     app.Policy().CreateVolumes,
+					VolumeNamePattern: app.Policy().VolumeNamePattern,
 					SyncTimeout:       r.Config.SyncTimeout,
 				}, nil)
 				cancel()
@@ -1348,7 +1358,7 @@ func declaredFailure(se *syncerr.Error) bool {
 	}
 	switch se.GetCode() {
 	case syncerr.CodeBuildForbidden, syncerr.CodeRegistryAuth, syncerr.CodePullFailed, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI,
-		syncerr.CodeValidation, syncerr.CodePortConflict, syncerr.CodeVolumeMissing, syncerr.CodeDigestRequired,
+		syncerr.CodeValidation, syncerr.CodePortConflict, syncerr.CodeVolumeMissing, syncerr.CodeVolumeNameRejected, syncerr.CodeDigestRequired,
 		syncerr.CodeOneshotFailed, syncerr.CodeOneshotTimeout, syncerr.CodeRegistryDenied:
 		return true
 	default:
@@ -1695,7 +1705,7 @@ func deployTrigger(app *App, target string) string {
 
 func deployResult(result string) string {
 	switch result {
-	case "applied", "rolled_back", "recovered":
+	case "applied", "rolled_back", "recovered", "volume_created":
 		return result
 	default:
 		return "failed"
