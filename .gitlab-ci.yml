@@ -1,6 +1,10 @@
 stages:
   - build
 
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'
+
 default:
   tags:
     - platform
