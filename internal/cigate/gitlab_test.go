@@ -21,9 +21,9 @@ func TestAPIBaseAndProjectPath(t *testing.T) {
 
 func TestClassifyPipelineStatus(t *testing.T) {
 	cases := []struct {
-		status          string
-		wantOutcome     string
-		wantReason      string
+		status      string
+		wantOutcome string
+		wantReason  string
 	}{
 		{"success", OutcomeAllow, ReasonOK},
 		{"pending", OutcomeWait, ReasonCIPending},
@@ -46,10 +46,10 @@ func TestCheckCommitPendingThenSuccess(t *testing.T) {
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if n.Add(1) == 1 {
-			_, _ = w.Write([]byte(`[{"status":"pending"}]`))
+			_, _ = w.Write([]byte(`[{"id":1,"status":"pending","source":"push"}]`))
 			return
 		}
-		_, _ = w.Write([]byte(`[{"status":"success","web_url":"https://git/x"}]`))
+		_, _ = w.Write([]byte(`[{"id":2,"status":"success","source":"push","web_url":"https://git/x"}]`))
 	}))
 	defer srv.Close()
 
@@ -66,13 +66,53 @@ func TestCheckCommitPendingThenSuccess(t *testing.T) {
 
 func TestCheckCommitFailed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"status":"failed"}]`))
+		_, _ = w.Write([]byte(`[{"id":9,"status":"failed","source":"push"}]`))
 	}))
 	defer srv.Close()
 	c := &Checker{APIBase: srv.URL, Token: "tok", Client: srv.Client()}
 	res := c.CheckCommit(context.Background(), "https://git.example/g/p.git", "abc")
-	if res.Outcome != OutcomeDeny || res.Reason != ReasonCIFailed {
+	if res.Outcome != OutcomeDeny || res.Reason != ReasonCIFailed || res.Source != "push" || res.PipelineID != 9 {
 		t.Fatalf("%+v", res)
+	}
+}
+
+func TestTriggerFailureDoesNotOverridePushSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":30,"status":"failed","source":"trigger"},
+			{"id":29,"status":"failed","source":"api"},
+			{"id":28,"status":"success","source":"push"}
+		]`))
+	}))
+	defer srv.Close()
+	c := &Checker{APIBase: srv.URL, Token: "tok", Client: srv.Client()}
+	res := c.CheckCommit(context.Background(), "https://git.example/g/p.git", "abc")
+	if !res.Allowed || res.Source != "push" || res.PipelineID != 28 {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestOnlyTriggerFailureWaits(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":30,"status":"failed","source":"trigger"},{"id":29,"status":"failed","source":"api"}]`))
+	}))
+	defer srv.Close()
+	c := &Checker{APIBase: srv.URL, Token: "tok", Client: srv.Client()}
+	res := c.CheckCommit(context.Background(), "https://git.example/g/p.git", "abc")
+	if res.Outcome != OutcomeWait || res.Reason != ReasonCIPending || res.Status != "missing" {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestCanceledPushIsIgnored(t *testing.T) {
+	chosen, ok := SelectPipeline([]Pipeline{
+		{ID: 4, Status: "canceled", Source: "push"},
+		{ID: 3, Status: "skipped", Source: "push"},
+		{ID: 2, Status: "failed", Source: "trigger"},
+		{ID: 1, Status: "success", Source: "merge_request_event"},
+	}, nil)
+	if !ok || chosen.ID != 1 || chosen.Source != "merge_request_event" {
+		t.Fatalf("%+v ok=%v", chosen, ok)
 	}
 }
 

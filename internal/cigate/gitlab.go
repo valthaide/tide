@@ -38,18 +38,80 @@ const (
 
 // Result is the pipeline gate decision for a commit.
 type Result struct {
-	Allowed bool
-	Outcome string // allow | wait | deny
-	Status  string
-	Reason  string // ok | ci_pending | ci_failed | ci_error
-	WebURL  string
+	Allowed    bool
+	Outcome    string // allow | wait | deny
+	Status     string
+	Reason     string // ok | ci_pending | ci_failed | ci_error
+	WebURL     string
+	PipelineID int64
+	Source     string
+}
+
+// Pipeline is one GitLab pipeline on a commit.
+type Pipeline struct {
+	ID     int64
+	Status string
+	Source string
+	WebURL string
+}
+
+// DefaultPipelineSources are the pipeline sources that decide a deploy when
+// require_pipeline_sources is unset.
+func DefaultPipelineSources() []string {
+	return []string{"push", "merge_request_event"}
+}
+
+// NormalizeSources returns the sources that count. An empty list means the default.
+func NormalizeSources(sources []string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, source := range sources {
+		source = strings.ToLower(strings.TrimSpace(source))
+		if source == "" {
+			continue
+		}
+		if _, ok := seen[source]; ok {
+			continue
+		}
+		seen[source] = struct{}{}
+		out = append(out, source)
+	}
+	if len(out) == 0 {
+		return DefaultPipelineSources()
+	}
+	return out
+}
+
+// SelectPipeline returns the newest pipeline whose source is allowed.
+// Canceled and skipped pipelines are ignored. Pipelines must be newest first.
+func SelectPipeline(pipelines []Pipeline, sources []string) (Pipeline, bool) {
+	allowed := map[string]struct{}{}
+	for _, source := range NormalizeSources(sources) {
+		allowed[source] = struct{}{}
+	}
+	for _, pipeline := range pipelines {
+		source := strings.ToLower(strings.TrimSpace(pipeline.Source))
+		if _, ok := allowed[source]; !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(pipeline.Status)) {
+		case StatusCanceled, "cancelled", StatusSkipped:
+			continue
+		}
+		pipeline.Source = source
+		pipeline.Status = strings.ToLower(strings.TrimSpace(pipeline.Status))
+		return pipeline, true
+	}
+	return Pipeline{}, false
 }
 
 // Checker queries GitLab for the newest pipeline of a commit.
+// Sources limits which pipeline sources count. Empty means push and merge_request_event.
 type Checker struct {
 	APIBase string // e.g. https://git.example/api/v4
 	Token   string
 	Client  *http.Client
+	Sources []string
 }
 
 // TokenFromEnv returns a GitLab API token (never logged).
@@ -141,7 +203,7 @@ func (c *Checker) CheckCommit(ctx context.Context, repoURL, commitSHA string) Re
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 
-	endpoint := fmt.Sprintf("%s/projects/%s/pipelines?sha=%s&per_page=1&order_by=id&sort=desc",
+	endpoint := fmt.Sprintf("%s/projects/%s/pipelines?sha=%s&per_page=100&order_by=id&sort=desc",
 		apiBase, project, url.QueryEscape(commitSHA))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -163,24 +225,37 @@ func (c *Checker) CheckCommit(ctx context.Context, repoURL, commitSHA string) Re
 		return Result{Allowed: false, Outcome: OutcomeDeny, Reason: ReasonCIError, Status: "unknown"}
 	}
 
-	var pipelines []struct {
+	var listed []struct {
+		ID     int64  `json:"id"`
 		Status string `json:"status"`
+		Source string `json:"source"`
 		WebURL string `json:"web_url"`
 	}
-	if err := json.Unmarshal(body, &pipelines); err != nil {
+	if err := json.Unmarshal(body, &listed); err != nil {
 		return Result{Allowed: false, Outcome: OutcomeDeny, Reason: ReasonCIError, Status: "unknown"}
 	}
-	if len(pipelines) == 0 {
+	pipelines := make([]Pipeline, 0, len(listed))
+	for _, item := range listed {
+		pipelines = append(pipelines, Pipeline{
+			ID:     item.ID,
+			Status: item.Status,
+			Source: item.Source,
+			WebURL: item.WebURL,
+		})
+	}
+	chosen, ok := SelectPipeline(pipelines, c.Sources)
+	if !ok {
 		outcome, reason := ClassifyPipelineStatus("missing")
 		return Result{Allowed: false, Outcome: outcome, Reason: reason, Status: "missing"}
 	}
-	st := strings.ToLower(strings.TrimSpace(pipelines[0].Status))
-	outcome, reason := ClassifyPipelineStatus(st)
+	outcome, reason := ClassifyPipelineStatus(chosen.Status)
 	return Result{
-		Allowed: outcome == OutcomeAllow,
-		Outcome: outcome,
-		Reason:  reason,
-		Status:  st,
-		WebURL:  pipelines[0].WebURL,
+		Allowed:    outcome == OutcomeAllow,
+		Outcome:    outcome,
+		Reason:     reason,
+		Status:     chosen.Status,
+		WebURL:     chosen.WebURL,
+		PipelineID: chosen.ID,
+		Source:     chosen.Source,
 	}
 }

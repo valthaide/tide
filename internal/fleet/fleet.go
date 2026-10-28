@@ -15,16 +15,17 @@ import (
 
 // HostDocument describes apps that should run on one host.
 type HostDocument struct {
-	Schema               int       `yaml:"schema"`
-	Host                 string    `yaml:"host"`
-	Build                string    `yaml:"build"`
-	RequireDigest        *bool     `yaml:"require_digest"`
-	AllowedRegistries    []string  `yaml:"allowed_registries"`
-	ReconcileInterval    string    `yaml:"reconcile_interval"`
-	ReconcileConcurrency int       `yaml:"reconcile_concurrency"`
-	RetryRejected        string    `yaml:"retry_rejected"`
-	Priority             *int      `yaml:"priority"`
-	Apps                 []AppSpec `yaml:"apps"`
+	Schema                 int       `yaml:"schema"`
+	Host                   string    `yaml:"host"`
+	Build                  string    `yaml:"build"`
+	RequireDigest          *bool     `yaml:"require_digest"`
+	AllowedRegistries      []string  `yaml:"allowed_registries"`
+	ReconcileInterval      string    `yaml:"reconcile_interval"`
+	ReconcileConcurrency   int       `yaml:"reconcile_concurrency"`
+	RetryRejected          string    `yaml:"retry_rejected"`
+	Priority               *int      `yaml:"priority"`
+	RequirePipelineSources []string  `yaml:"require_pipeline_sources"`
+	Apps                   []AppSpec `yaml:"apps"`
 }
 
 // AppSpec is a desired application registration from fleet git.
@@ -41,6 +42,7 @@ type AppSpec struct {
 	PruneVolumes           bool              `yaml:"prune_volumes"`
 	HealthTimeout          string            `yaml:"health_timeout"`
 	RequirePipelineSuccess bool              `yaml:"require_pipeline_success"`
+	RequirePipelineSources []string          `yaml:"require_pipeline_sources"`
 	WatchFiles             []WatchFileSpec   `yaml:"watch_files"`
 	Build                  string            `yaml:"build"`
 	Vars                   map[string]string `yaml:"vars"`

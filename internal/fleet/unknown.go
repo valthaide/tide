@@ -46,7 +46,7 @@ func UnknownFields(data []byte) ([]string, error) {
 					return nil, fmt.Errorf("unknown_field: schema %d is newer than %d", n, supportedSchema)
 				}
 			}
-		case "host", "build", "require_digest", "allowed_registries", "reconcile_interval", "reconcile_concurrency", "retry_rejected", "priority":
+		case "host", "build", "require_digest", "allowed_registries", "reconcile_interval", "reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources":
 		case "apps":
 			unknown = append(unknown, unknownAppFields(val)...)
 		default:
@@ -63,7 +63,7 @@ func unknownAppFields(seq *yaml.Node) []string {
 	known := map[string]struct{}{
 		"name": {}, "repo_url": {}, "branch": {}, "revision": {}, "compose_path": {},
 		"repo_auth_method": {}, "poll_interval": {}, "deploy_key_file": {}, "suspended": {},
-		"prune_volumes": {}, "health_timeout": {}, "require_pipeline_success": {},
+		"prune_volumes": {}, "health_timeout": {}, "require_pipeline_success": {}, "require_pipeline_sources": {},
 		"watch_files": {}, "build": {}, "vars": {}, "project": {},
 		"sync_timeout": {}, "pull_timeout": {}, "oneshot_timeout": {},
 		"require_digest": {}, "public_vars": {}, "allowed_registries": {},

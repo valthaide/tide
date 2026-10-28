@@ -23,7 +23,10 @@ type WatchFile struct {
 
 // Policy is per-app deploy behaviour from fleet YAML.
 type Policy struct {
-	RequirePipelineSuccess bool        `json:"require_pipeline_success" yaml:"require_pipeline_success"`
+	RequirePipelineSuccess bool `json:"require_pipeline_success" yaml:"require_pipeline_success"`
+	// RequirePipelineSources limits which GitLab pipeline sources decide the gate.
+	// Empty means push and merge_request_event.
+	RequirePipelineSources []string    `json:"require_pipeline_sources,omitempty" yaml:"require_pipeline_sources"`
 	WatchFiles             []WatchFile `json:"watch_files,omitempty" yaml:"watch_files"`
 	// PruneVolumes removes this app's named compose volumes when the app is deleted.
 	// Images used only by this app are always removed; volumes stay unless this is set.

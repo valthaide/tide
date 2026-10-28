@@ -757,7 +757,7 @@ func TestCISuccessOnNextCycleAfterWait(t *testing.T) {
 	if waiting.Status != "pending" {
 		t.Fatalf("after CI wait status=%q, want pending", waiting.Status)
 	}
-	if got := testutil.ToFloat64(metrics.DeployBlockedTotal.WithLabelValues(app.Name, cigate.ReasonCIPending)); got != 1 {
+	if got := testutil.ToFloat64(metrics.DeployBlockedTotal.WithLabelValues(app.Name, cigate.ReasonCIPending, "")); got != 1 {
 		t.Fatalf("deploy_blocked ci_pending=%v, want 1", got)
 	}
 
@@ -776,7 +776,7 @@ func TestCISuccessOnNextCycleAfterWait(t *testing.T) {
 	if deployed.Status != "synced" || deployed.LastSyncedCommit != "bbbbbbbb" {
 		t.Fatalf("after next cycle status=%q synced=%q", deployed.Status, deployed.LastSyncedCommit)
 	}
-	if got := testutil.ToFloat64(metrics.DeployBlockedTotal.WithLabelValues(app.Name, cigate.ReasonCIPending)); got != 0 {
+	if got := testutil.ToFloat64(metrics.DeployBlockedTotal.WithLabelValues(app.Name, cigate.ReasonCIPending, "")); got != 0 {
 		t.Fatalf("deploy_blocked ci_pending=%v after deploy, want 0", got)
 	}
 	if gate.calls != 3 {

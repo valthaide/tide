@@ -510,6 +510,16 @@ func inherited(app, host string) string {
 	return strings.TrimSpace(host)
 }
 
+func pipelineSources(app []string, doc *HostDocument) []string {
+	if len(app) > 0 {
+		return app
+	}
+	if doc == nil {
+		return nil
+	}
+	return doc.RequirePipelineSources
+}
+
 func inheritedPriority(app *int, doc *HostDocument) *int {
 	if app != nil {
 		return app
@@ -539,6 +549,7 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 	}
 	p := deploypolicy.Policy{
 		RequirePipelineSuccess: spec.RequirePipelineSuccess,
+		RequirePipelineSources: pipelineSources(spec.RequirePipelineSources, doc),
 		PruneVolumes:           spec.PruneVolumes,
 		HealthTimeout:          spec.HealthTimeout,
 		Build:                  build,

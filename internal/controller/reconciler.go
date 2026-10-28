@@ -36,9 +36,11 @@ type imageApplier interface {
 
 // gateWait is returned when CI is still running; sync should stay pending and retry.
 type gateWait struct {
-	msg    string
-	reason string
-	status string
+	msg        string
+	reason     string
+	status     string
+	source     string
+	pipelineID int64
 }
 
 func (e *gateWait) Error() string { return e.msg }
@@ -648,7 +650,7 @@ func (r *Reconciler) syncApp(app *App) error {
 				now := time.Now()
 				_ = r.Registry.UpdateStatus(app.ID, "pending", &now)
 				_ = r.Registry.UpdateSyncProgress(app.ID, now, fmt.Sprintf("waiting for CI: status=%s reason=%s commit=%s", wait.status, wait.reason, app.LastSeenCommit))
-				metrics.ObserveDeployBlocked(app.Name, wait.reason)
+				metrics.ObserveDeployBlocked(app.Name, wait.reason, wait.source)
 				r.noteCIWait(app, wait.status, wait.reason)
 				return nil
 			}
@@ -661,7 +663,9 @@ func (r *Reconciler) syncApp(app *App) error {
 			} else if strings.Contains(se.Message, cigate.ReasonCIError) {
 				reason = cigate.ReasonCIError
 			}
-			metrics.ObserveDeployBlocked(app.Name, reason)
+			if se.Code != syncerr.CodeBlockedByCI {
+				metrics.ObserveDeployBlocked(app.Name, reason, "")
+			}
 			r.noteCIFinished(app, "failed")
 			return se
 		}
@@ -1391,7 +1395,10 @@ func (r *Reconciler) checkPipelineGate(app *App) error {
 	if r.Gate != nil {
 		res = r.Gate.CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
 	} else {
-		res = (&cigate.Checker{Token: cigate.TokenFromEnv()}).CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
+		res = (&cigate.Checker{
+			Token:   cigate.TokenFromEnv(),
+			Sources: policy.RequirePipelineSources,
+		}).CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
 	}
 	switch res.Outcome {
 	case cigate.OutcomeAllow, "":
@@ -1399,16 +1406,17 @@ func (r *Reconciler) checkPipelineGate(app *App) error {
 			return nil
 		}
 	case cigate.OutcomeWait:
-		msg := fmt.Sprintf("deploy waiting: pipeline status=%s reason=%s", res.Status, res.Reason)
-		return &gateWait{msg: msg, reason: res.Reason, status: res.Status}
+		msg := fmt.Sprintf("deploy waiting: pipeline id=%d source=%s status=%s reason=%s", res.PipelineID, res.Source, res.Status, res.Reason)
+		return &gateWait{msg: msg, reason: res.Reason, status: res.Status, source: res.Source, pipelineID: res.PipelineID}
 	}
 	reason := res.Reason
 	if reason == "" {
 		reason = cigate.ReasonCIFailed
 	}
-	msg := fmt.Sprintf("deploy blocked: pipeline status=%s reason=%s", res.Status, reason)
+	msg := fmt.Sprintf("deploy blocked: pipeline id=%d source=%s status=%s reason=%s", res.PipelineID, res.Source, res.Status, reason)
+	metrics.ObserveDeployBlocked(app.Name, reason, res.Source)
 	if r.Logger != nil {
-		r.Logger.Warn("Deploy blocked by CI gate", "app", app.Name, "commit", app.LastSeenCommit, "reason", reason, "pipeline_status", res.Status)
+		r.Logger.Warn("Deploy blocked by CI gate", "app", app.Name, "commit", app.LastSeenCommit, "reason", reason, "pipeline_id", res.PipelineID, "pipeline_source", res.Source, "pipeline_status", res.Status)
 	}
 	return syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate, msg)
 }

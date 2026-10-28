@@ -95,8 +95,8 @@ var (
 	DeployBlockedTotal = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "deploy_blocked",
-		Help:      "1 while a deploy is blocked for this app and reason (ci_pending, ci_failed, ci_error); 0 after the block clears.",
-	}, []string{"app", "reason"})
+		Help:      "1 while a deploy is blocked for this app and reason (ci_pending, ci_failed, ci_error); 0 after the block clears. pipeline_source is the GitLab pipeline that decided the outcome.",
+	}, []string{"app", "reason", "pipeline_source"})
 
 	CICheckLastTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
@@ -758,16 +758,18 @@ func ObserveReconcileSuccess() {
 
 var deployBlockReasons = []string{"ci_pending", "ci_failed", "ci_error"}
 
-// ObserveDeployBlocked marks deploy_blocked{app,reason}=1 and clears other reasons for the app.
-func ObserveDeployBlocked(app, reason string) {
+// ObserveDeployBlocked marks deploy_blocked{app,reason,pipeline_source}=1 and clears other series for the app.
+func ObserveDeployBlocked(app, reason, source string) {
 	app = strings.TrimSpace(app)
 	reason = strings.TrimSpace(reason)
+	source = strings.TrimSpace(source)
 	if app == "" {
 		app = "unknown"
 	}
 	if reason == "" {
 		reason = "unknown"
 	}
+	DeployBlockedTotal.DeletePartialMatch(prometheus.Labels{"app": app})
 	known := false
 	for _, item := range deployBlockReasons {
 		v := 0.0
@@ -775,23 +777,21 @@ func ObserveDeployBlocked(app, reason string) {
 			v = 1
 			known = true
 		}
-		DeployBlockedTotal.WithLabelValues(app, item).Set(v)
+		DeployBlockedTotal.WithLabelValues(app, item, source).Set(v)
 	}
 	if !known {
-		DeployBlockedTotal.WithLabelValues(app, reason).Set(1)
+		DeployBlockedTotal.WithLabelValues(app, reason, source).Set(1)
 	}
 	CICheckLastTimestamp.WithLabelValues(app).Set(float64(time.Now().Unix()))
 }
 
-// ClearDeployBlocked sets every deploy_blocked reason for the app to 0.
+// ClearDeployBlocked removes deploy_blocked series for the app.
 func ClearDeployBlocked(app string) {
 	app = strings.TrimSpace(app)
 	if app == "" {
 		app = "unknown"
 	}
-	for _, reason := range deployBlockReasons {
-		DeployBlockedTotal.WithLabelValues(app, reason).Set(0)
-	}
+	DeployBlockedTotal.DeletePartialMatch(prometheus.Labels{"app": app})
 }
 
 // SetWatchHashError sets whether the last watch_files hash failed.

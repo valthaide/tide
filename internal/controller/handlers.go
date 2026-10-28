@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -737,22 +738,28 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 	if policy := app.Policy(); policy.RequirePipelineSuccess {
 		commit := app.LastSeenCommit
 		if commit != "" && commit != app.LastSyncedCommit {
-			checker := &cigate.Checker{Token: cigate.TokenFromEnv()}
+			checker := &cigate.Checker{Token: cigate.TokenFromEnv(), Sources: policy.RequirePipelineSources}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			res := checker.CheckCommit(ctx, app.RepoURL, commit)
 			cancel()
 			if res.Outcome == cigate.OutcomeWait {
 				now := time.Now()
 				_ = h.Registry.UpdateStatus(app.ID, "pending", &now)
-				metrics.ObserveDeployBlocked(app.Name, res.Reason)
+				metrics.ObserveDeployBlocked(app.Name, res.Reason, res.Source)
+				if h.Logger != nil {
+					h.Logger.Info("Deploy waiting for CI", "app", app.Name, "commit", commit, "pipeline_id", res.PipelineID, "pipeline_source", res.Source, "pipeline_status", res.Status)
+				}
 				return syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate,
-					"deploy waiting: pipeline status="+res.Status+" reason="+res.Reason)
+					fmt.Sprintf("deploy waiting: pipeline id=%d source=%s status=%s reason=%s", res.PipelineID, res.Source, res.Status, res.Reason))
 			}
 			if !res.Allowed {
 				se := syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate,
-					"deploy blocked: pipeline status="+res.Status+" reason="+res.Reason)
+					fmt.Sprintf("deploy blocked: pipeline id=%d source=%s status=%s reason=%s", res.PipelineID, res.Source, res.Status, res.Reason))
 				_ = h.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
-				metrics.ObserveDeployBlocked(app.Name, res.Reason)
+				metrics.ObserveDeployBlocked(app.Name, res.Reason, res.Source)
+				if h.Logger != nil {
+					h.Logger.Warn("Deploy blocked by CI gate", "app", app.Name, "commit", commit, "reason", res.Reason, "pipeline_id", res.PipelineID, "pipeline_source", res.Source, "pipeline_status", res.Status)
+				}
 				return se
 			}
 		}
