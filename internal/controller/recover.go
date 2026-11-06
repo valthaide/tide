@@ -208,9 +208,10 @@ func (r *Reconciler) SyncAppNow(app *api.App) *syncerr.Error {
 	r.forceApply[app.ID] = struct{}{}
 	r.mu.Unlock()
 	defer func() {
-		r.dequeue(app.ID)
+		if r.endFlight(app.ID) && r.Registry != nil {
+			_ = r.Registry.MarkPending(app.ID)
+		}
 		r.mu.Lock()
-		delete(r.inFlight, app.ID)
 		delete(r.forceApply, app.ID)
 		r.mu.Unlock()
 		r.ReleaseSync()

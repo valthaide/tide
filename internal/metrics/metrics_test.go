@@ -129,6 +129,46 @@ conops_app_image_info{app="php",digest="sha256:abc",image="registry.example/php:
 	}
 }
 
+func TestImageNotFoundGauge(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	c := newAppsCollector(staticLister{apps: []AppSnapshot{
+		{ID: "1", Name: "coach", Status: "image_not_found", LastSyncErrorCode: "image_not_found", LastSyncError: "image_not_found: app:missing"},
+		{ID: "2", Name: "web", Status: "synced"},
+	}})
+	if err := reg.Register(c); err != nil {
+		t.Fatal(err)
+	}
+	expected := `
+# HELP conops_app_image_not_found 1 when the image manifest is missing and the app waits until desired state changes.
+# TYPE conops_app_image_not_found gauge
+conops_app_image_not_found{app="coach"} 1
+conops_app_image_not_found{app="web"} 0
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "conops_app_image_not_found"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueueAppWaitGauge(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(QueueAppWait); err != nil {
+		t.Fatal(err)
+	}
+	SetQueueAppWaits(map[string]time.Duration{"dev-2-backend": 90 * time.Minute})
+	expected := `
+# HELP conops_sync_queue_app_wait_seconds Seconds an app has been waiting in the apply queue.
+# TYPE conops_sync_queue_app_wait_seconds gauge
+conops_sync_queue_app_wait_seconds{app="dev-2-backend"} 5400
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "conops_sync_queue_app_wait_seconds"); err != nil {
+		t.Fatal(err)
+	}
+	SetQueueAppWaits(nil)
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(""), "conops_sync_queue_app_wait_seconds"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGitFetchErrorsStartAtZero(t *testing.T) {
 	EnsureGitFetchErrors("https://git.example/org/monitoring.git")
 	for _, reason := range []string{"auth", "network", "not_found", "other"} {

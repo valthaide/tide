@@ -137,7 +137,7 @@ exit 0
 
 func TestClassifyPullErrorPrefersNotFound(t *testing.T) {
 	err := classifyPullError(context.DeadlineExceeded, "manifest for app:missing not found", true, time.Minute, []string{"app:missing"})
-	if err == nil || !strings.Contains(err.Error(), "pull_failed: not_found") {
+	if err == nil || !strings.Contains(err.Error(), "image_not_found: app:missing") {
 		t.Fatal(err)
 	}
 	err = classifyPullError(context.DeadlineExceeded, "", true, time.Minute, []string{"app:slow"})

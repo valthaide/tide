@@ -23,6 +23,7 @@ const (
 	CodeBuildForbidden     = "build_forbidden"
 	CodeRegistryAuth       = "registry_auth"
 	CodePullFailed         = "pull_failed"
+	CodeImageNotFound      = "image_not_found"
 	CodeOneshotFailed      = "oneshot_failed"
 	CodeOneshotTimeout     = "oneshot_timeout"
 	CodeValidation         = "validation_failed"
@@ -192,6 +193,8 @@ func Classify(err error) *Error {
 		return New(CodeBuildForbidden, StageValidate, msg)
 	case strings.Contains(lower, "registry_auth"):
 		return New(CodeRegistryAuth, StageRegistry, msg)
+	case strings.Contains(lower, "image_not_found"):
+		return New(CodeImageNotFound, StagePull, msg)
 	case strings.Contains(lower, "pull_failed"):
 		return New(CodePullFailed, StagePull, msg)
 	case strings.Contains(lower, "oneshot_failed"):

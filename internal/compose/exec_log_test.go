@@ -40,6 +40,47 @@ func TestDockerPSHealthTimeoutIsNotLoggedAsError(t *testing.T) {
 	}
 }
 
+func TestComposeConfigOutputIsNotLogged(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' 'HASURA_GRAPHQL_ADMIN_SECRET: super-secret-value'\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	e := &ComposeExecutor{Logger: logger}
+	out, err := e.execProcess(context.Background(), bin, []string{"compose", "-p", "dev", "-f", "compose.yml", "config", "--format", "json"}, dir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "super-secret-value") {
+		t.Fatalf("caller still needs the config text, got %q", out)
+	}
+	if strings.Contains(buf.String(), "super-secret-value") || strings.Contains(buf.String(), "Command output") {
+		t.Fatalf("compose config leaked into the log:\n%s", buf.String())
+	}
+}
+
+func TestImageInspectMissIsDebug(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\necho 'Error: No such image: app:missing' >&2\nexit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e := &ComposeExecutor{Logger: logger}
+	_, err := e.execProcess(context.Background(), bin, []string{"image", "inspect", "app:missing"}, dir, nil, nil)
+	if err == nil {
+		t.Fatal("expected inspect to fail")
+	}
+	if strings.Contains(buf.String(), "ERROR") || strings.Contains(buf.String(), "level=ERROR") {
+		t.Fatalf("missing image inspect logged ERROR:\n%s", buf.String())
+	}
+}
+
 func TestDockerPSRealFailureStillLogged(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "docker")

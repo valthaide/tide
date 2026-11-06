@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"sort"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/valthaide/conops-private/internal/api"
 	"github.com/valthaide/conops-private/internal/compose"
+	"github.com/valthaide/conops-private/internal/deploypolicy"
 	"github.com/valthaide/conops-private/internal/metrics"
 	"github.com/valthaide/conops-private/internal/syncerr"
 )
@@ -24,6 +26,9 @@ type QueueItem struct {
 	QueuedAt time.Time `json:"queued_at"`
 	Reasons  []string  `json:"reasons,omitempty"`
 	Running  bool      `json:"running,omitempty"`
+	// FollowUp is set when a new enqueue arrives while this app is syncing.
+	// finishSync keeps that row instead of clearing it.
+	FollowUp bool `json:"-"`
 }
 
 func triggerClass(trigger string) int {
@@ -155,10 +160,12 @@ func (r *Reconciler) runPeriodic(apps []*App, snap map[string]compose.ProjectRun
 	if r == nil {
 		return
 	}
-	for _, app := range apps {
+	for i, app := range apps {
 		if app == nil || app.Suspended {
 			continue
 		}
+		app = r.liveApp(app)
+		apps[i] = app
 		interval, off := r.appInterval(app)
 		if off {
 			metrics.SetReconcileSchedule(app.Name, time.Time{}, time.Time{}, false, 0)
@@ -169,7 +176,7 @@ func (r *Reconciler) runPeriodic(apps []*App, snap map[string]compose.ProjectRun
 			continue
 		}
 		r.publishSchedule(app, interval)
-		if r.configHold(app) {
+		if r.imageMissHold(app) || r.configHold(app) {
 			metrics.ObserveReconcile(app.Name, "skipped", "periodic")
 			continue
 		}
@@ -178,14 +185,26 @@ func (r *Reconciler) runPeriodic(apps []*App, snap map[string]compose.ProjectRun
 			metrics.ObserveReconcile(app.Name, "noop", "periodic")
 			continue
 		}
-		if app.Status == "syncing" || app.Status == "verifying" {
-			r.enqueue(app, trigger, reason, appPriority(app))
-			if app.Status == "syncing" && r.Registry != nil {
+		if r.inTransientPause(app) && !retryPauseBroken(app, reason, r.retrySeen(app.ID)) {
+			metrics.ObserveReconcile(app.Name, "skipped", "periodic")
+			continue
+		}
+		if r.inFlightApp(app.ID) {
+			created := r.enqueue(app, trigger, reason, appPriority(app))
+			if r.Registry != nil {
 				_ = r.Registry.BumpDesired(app.ID)
 			}
-		} else {
-			r.requeuePending(app, reason)
+			if created && r.Logger != nil {
+				r.Logger.Info("Periodic reconcile queued", "app", app.Name, "trigger", trigger, "reason", reason)
+			}
+			continue
 		}
+		if r.queued(app.ID) {
+			r.enqueue(app, trigger, reason, appPriority(app))
+			metrics.ObserveReconcile(app.Name, "skipped", "periodic")
+			continue
+		}
+		r.requeuePending(app, reason)
 		if r.Logger != nil {
 			r.Logger.Info("Periodic reconcile queued", "app", app.Name, "trigger", trigger, "reason", reason)
 		}
@@ -291,9 +310,9 @@ func appPriority(app *App) int {
 	return 0
 }
 
-func (r *Reconciler) enqueue(app *App, trigger, reason string, priority int) {
+func (r *Reconciler) enqueue(app *App, trigger, reason string, priority int) bool {
 	if r == nil || app == nil {
-		return
+		return false
 	}
 	if trigger == "" {
 		trigger = triggerForReason(reason)
@@ -304,6 +323,7 @@ func (r *Reconciler) enqueue(app *App, trigger, reason string, priority int) {
 		r.queue = map[string]*QueueItem{}
 	}
 	item := r.queue[app.ID]
+	created := item == nil
 	if item == nil {
 		item = &QueueItem{
 			AppID:    app.ID,
@@ -335,16 +355,20 @@ func (r *Reconciler) enqueue(app *App, trigger, reason string, priority int) {
 			item.Reasons = append(item.Reasons, reason)
 		}
 	}
+	if _, busy := r.inFlight[app.ID]; busy {
+		item.FollowUp = true
+	}
 	class := item.Class
 	storedTrigger := item.Trigger
 	queuedAt := item.QueuedAt
-	r.mu.Unlock()
 	if r.Registry != nil {
 		_ = r.Registry.SetQueued(app.ID, queuedAt, storedTrigger, class)
 	}
-	if r.Logger != nil && reason != "" && reason != "pending" {
+	r.mu.Unlock()
+	if created && r.Logger != nil && reason != "" && reason != "pending" {
 		r.Logger.Info("Enqueued app", "app", app.Name, "trigger", storedTrigger, "class", class, "reason", reason)
 	}
+	return created
 }
 
 func (r *Reconciler) ensureQueued(app *App, trigger, reason string) {
@@ -369,10 +393,257 @@ func (r *Reconciler) markQueueStart(id string) {
 func (r *Reconciler) dequeue(id string) {
 	r.mu.Lock()
 	delete(r.queue, id)
-	r.mu.Unlock()
 	if r.Registry != nil {
 		_ = r.Registry.ClearQueued(id)
 	}
+	r.mu.Unlock()
+}
+
+func (r *Reconciler) queued(id string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.queue[id]
+	return ok
+}
+
+func (r *Reconciler) queueTrigger(id string) string {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if item := r.queue[id]; item != nil {
+		return item.Trigger
+	}
+	return ""
+}
+
+// endFlight removes the in-flight mark. A queue row that arrived during the
+// sync stays queued and the caller marks the app pending.
+func (r *Reconciler) endFlight(id string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.inFlight, id)
+	item := r.queue[id]
+	keep := item != nil && item.FollowUp
+	if item != nil {
+		item.FollowUp = false
+	}
+	if keep {
+		return true
+	}
+	delete(r.queue, id)
+	if r.Registry != nil {
+		_ = r.Registry.ClearQueued(id)
+	}
+	return false
+}
+
+func (r *Reconciler) liveApp(app *App) *App {
+	if r == nil || r.Registry == nil || app == nil || strings.TrimSpace(app.ID) == "" {
+		return app
+	}
+	fresh, err := r.Registry.Get(app.ID)
+	if err != nil || fresh == nil {
+		return app
+	}
+	return fresh
+}
+
+func retryPauseBroken(app *App, reason, pausedSeen string) bool {
+	if app == nil {
+		return false
+	}
+	switch reason {
+	case "vars_changed", "env_file_changed":
+		return true
+	case "commit_drift":
+		seen := strings.TrimSpace(app.LastSeenCommit)
+		pausedSeen = strings.TrimSpace(pausedSeen)
+		return pausedSeen != "" && seen != "" && seen != pausedSeen
+	default:
+		return false
+	}
+}
+
+func (r *Reconciler) desiredSettled(app *App) bool {
+	if app == nil || r == nil {
+		return false
+	}
+	if r.varsDriftReason(app) != "" {
+		return false
+	}
+	seen := strings.TrimSpace(app.LastSeenCommit)
+	synced := strings.TrimSpace(app.LastSyncedCommit)
+	if seen != "" && seen != synced {
+		if app.Status == "rolled_back" && seen == strings.TrimSpace(app.RejectedCommit) {
+			return true
+		}
+		return false
+	}
+	switch app.Status {
+	case "synced", "rolled_back", "pending":
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Reconciler) imageMissHold(app *App) bool {
+	if r == nil || !imageNotFoundApp(app) {
+		return false
+	}
+	seen := strings.TrimSpace(app.LastSeenCommit)
+	rejected := strings.TrimSpace(app.RejectedCommit)
+	if rejected != "" && seen != rejected {
+		return false
+	}
+	if rejected == "" {
+		r.retryMu.Lock()
+		if r.imageMissSeen == nil {
+			r.imageMissSeen = map[string]string{}
+		}
+		prev := r.imageMissSeen[app.ID]
+		if prev == "" {
+			r.imageMissSeen[app.ID] = seen
+			prev = seen
+		}
+		r.retryMu.Unlock()
+		if prev != "" && seen != prev {
+			return false
+		}
+	}
+	rejectedVars := deploypolicy.DecodeVars(app.RejectedVars)
+	if len(rejectedVars) > 0 && !deploypolicy.VarsEqual(app.Policy().Vars, rejectedVars) {
+		return false
+	}
+	return true
+}
+
+// reconcileQueue drops a row whose desired state is already applied, and
+// makes any other non-running row pending so the worker can take it.
+func (r *Reconciler) reconcileQueue(app *App) {
+	if r == nil || app == nil || !r.queued(app.ID) || r.inFlightApp(app.ID) {
+		return
+	}
+	trigger := r.queueTrigger(app.ID)
+	if trigger == "manual" || trigger == "rollback" {
+		if app.Status != "pending" && app.Status != "syncing" && app.Status != "verifying" && r.Registry != nil {
+			if err := r.Registry.UpdateStatus(app.ID, "pending", nil); err == nil {
+				app.Status = "pending"
+			}
+		}
+		return
+	}
+	if r.desiredSettled(app) {
+		r.dequeue(app.ID)
+		if app.Status == "pending" && r.Registry != nil {
+			if err := r.Registry.UpdateStatus(app.ID, "synced", nil); err == nil {
+				app.Status = "synced"
+			}
+		}
+		if r.Logger != nil {
+			r.Logger.Info("Dropped queued app; desired state already applied", "app", app.Name)
+		}
+		return
+	}
+	if app.Status == "pending" {
+		return
+	}
+	if r.imageMissHold(app) {
+		r.dequeue(app.ID)
+		if r.Logger != nil {
+			r.Logger.Info("Dropped queued app; desired state already applied", "app", app.Name)
+		}
+		return
+	}
+	switch app.Status {
+	case "syncing", "verifying", "failed", "error":
+		return
+	default:
+		if r.Registry == nil {
+			return
+		}
+		if err := r.Registry.UpdateStatus(app.ID, "pending", nil); err == nil {
+			app.Status = "pending"
+		}
+	}
+}
+
+// restoreQueue puts a persisted queue flag back on the work queue, or clears
+// it when the app is already at the desired state.
+func (r *Reconciler) restoreQueue() {
+	if r == nil || r.Registry == nil {
+		return
+	}
+	for _, app := range r.Registry.List() {
+		if app == nil {
+			continue
+		}
+		_, _, queuedAt, trigger, class, err := r.Registry.LoadSchedule(app.ID)
+		if err != nil || queuedAt.IsZero() {
+			continue
+		}
+		if r.desiredSettled(app) || r.imageMissHold(app) {
+			_ = r.Registry.ClearQueued(app.ID)
+			continue
+		}
+		if trigger == "" {
+			trigger = "commit"
+		}
+		r.mu.Lock()
+		if r.queue == nil {
+			r.queue = map[string]*QueueItem{}
+		}
+		if r.queue[app.ID] == nil {
+			r.queue[app.ID] = &QueueItem{
+				AppID:    app.ID,
+				Name:     app.Name,
+				Trigger:  trigger,
+				Class:    class,
+				Priority: appPriority(app),
+				QueuedAt: queuedAt,
+			}
+		}
+		r.mu.Unlock()
+		if app.Status != "pending" && app.Status != "syncing" && app.Status != "verifying" {
+			_ = r.Registry.UpdateStatus(app.ID, "pending", nil)
+		}
+	}
+}
+
+// RetryApp puts one app back on the work queue without restarting ConOps.
+func (r *Reconciler) RetryApp(app *api.App) error {
+	if r == nil || app == nil {
+		return fmt.Errorf("app is nil")
+	}
+	if r.inFlightApp(app.ID) {
+		return fmt.Errorf("sync already in progress")
+	}
+	r.clearTransient(app.ID)
+	if r.Registry != nil {
+		_ = r.Registry.ClearRetry(app.ID)
+	}
+	r.enqueue(app, "manual", "retry", appPriority(app))
+	if r.Registry != nil {
+		if err := r.Registry.UpdateStatus(app.ID, "pending", nil); err != nil {
+			return err
+		}
+	}
+	select {
+	case r.nudge <- struct{}{}:
+	default:
+	}
+	if r.Logger != nil {
+		r.Logger.Info("Retry queued", "app", app.Name)
+	}
+	return nil
 }
 
 func (r *Reconciler) orderByQueue(apps []*App) []*App {
@@ -509,35 +780,72 @@ func (r *Reconciler) publishQueue() {
 		warnAfter = r.Config.QueueWarnAfter
 	}
 	now := time.Now()
+	waits := map[string]time.Duration{}
 	for _, item := range items {
 		if item.Running || item.QueuedAt.IsZero() {
 			continue
 		}
 		wait := now.Sub(item.QueuedAt)
+		waits[item.Name] = wait
 		if wait > oldest {
 			oldest = wait
 		}
-		if wait >= warnAfter && r.Logger != nil {
+		if wait >= warnAfter {
 			r.mu.Lock()
 			if r.warnedQueue == nil {
 				r.warnedQueue = map[string]time.Time{}
 			}
 			last := r.warnedQueue[item.AppID]
-			if last.IsZero() || now.Sub(last) >= warnAfter {
+			due := last.IsZero() || now.Sub(last) >= warnAfter
+			if due {
 				r.warnedQueue[item.AppID] = now
-				r.mu.Unlock()
-				r.Logger.Warn("App queued longer than expected", "app", item.Name, "trigger", item.Trigger, "wait", wait.Round(time.Second).String())
-			} else {
-				r.mu.Unlock()
+			}
+			r.mu.Unlock()
+			if due {
+				r.recoverStuck(item, wait)
 			}
 		}
 	}
+	metrics.SetQueueAppWaits(waits)
 	metrics.SetQueueOldest(oldest)
 	running := 0
 	r.mu.Lock()
 	running = len(r.inFlight)
 	r.mu.Unlock()
 	metrics.SetSyncActivity(len(items), running)
+}
+
+func (r *Reconciler) recoverStuck(item QueueItem, wait time.Duration) {
+	if r == nil || r.inFlightApp(item.AppID) {
+		return
+	}
+	var app *App
+	if r.Registry != nil {
+		app, _ = r.Registry.Get(item.AppID)
+	}
+	waitLabel := wait.Round(time.Second).String()
+	if app != nil && item.Trigger != "manual" && item.Trigger != "rollback" && (r.desiredSettled(app) || r.imageMissHold(app)) {
+		r.dequeue(app.ID)
+		if r.Logger != nil {
+			r.Logger.Info("Dropped queued app; desired state already applied", "app", app.Name, "wait", waitLabel)
+		}
+		return
+	}
+	if app != nil && app.Status != "pending" && app.Status != "syncing" && app.Status != "verifying" && r.Registry != nil {
+		if err := r.Registry.UpdateStatus(app.ID, "pending", nil); err != nil {
+			if r.Logger != nil {
+				r.Logger.Warn("Failed to requeue stuck app", "app", item.Name, "error", err)
+			}
+			return
+		}
+		if r.Logger != nil {
+			r.Logger.Warn("Requeued stuck app", "app", item.Name, "trigger", item.Trigger, "wait", waitLabel)
+		}
+		return
+	}
+	if r.Logger != nil {
+		r.Logger.Warn("App queued longer than expected", "app", item.Name, "trigger", item.Trigger, "wait", waitLabel)
+	}
 }
 
 // SetLimit changes how many apps may sync at once, up to the semaphore size.

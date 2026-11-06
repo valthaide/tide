@@ -56,6 +56,12 @@ func TestFailureReasons(t *testing.T) {
 	if !quietCommandOutput("docker", []string{"inspect", "abc"}) || !quietCommandOutput("docker", []string{"image", "inspect", "php:1"}) {
 		t.Fatal("inspect output must be debug")
 	}
+	if !quietCommandOutput("docker", []string{"compose", "-p", "app", "-f", "compose.yml", "config", "--format", "json"}) {
+		t.Fatal("compose config output must be quiet")
+	}
+	if quietCommandOutput("docker", []string{"compose", "-p", "app", "-f", "compose.yml", "up", "-d"}) {
+		t.Fatal("compose up output must stay visible")
+	}
 }
 
 func TestOneshotExitNonZeroIsUnhealthy(t *testing.T) {

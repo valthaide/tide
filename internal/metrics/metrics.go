@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/valthaide/conops-private/internal/giterr"
+	"github.com/valthaide/conops-private/internal/syncerr"
 )
 
 const namespace = "conops"
@@ -263,6 +264,15 @@ var (
 		Help:      "Age of the oldest apply-queue row.",
 	})
 
+	// QueueAppWait is the current wait of each app still sitting in the apply queue.
+	// The name is distinct from the sync_queue_wait_seconds histogram, which records
+	// completed waits by trigger and cannot take an app label.
+	QueueAppWait = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "sync_queue_app_wait_seconds",
+		Help:      "Seconds an app has been waiting in the apply queue.",
+	}, []string{"app"})
+
 	Verifying = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "verifying",
@@ -415,6 +425,32 @@ func SetQueueOldest(wait time.Duration) {
 	QueueOldest.Set(wait.Seconds())
 }
 
+// SetQueueAppWaits replaces per-app queue waits. Apps that left the queue disappear.
+func SetQueueAppWaits(waits map[string]time.Duration) {
+	QueueAppWait.Reset()
+	for app, wait := range waits {
+		app = strings.TrimSpace(app)
+		if app == "" {
+			continue
+		}
+		if wait < 0 {
+			wait = 0
+		}
+		QueueAppWait.WithLabelValues(app).Set(wait.Seconds())
+	}
+}
+
+func snapshotImageNotFound(app AppSnapshot) float64 {
+	if strings.TrimSpace(app.Status) == "image_not_found" || strings.TrimSpace(app.LastSyncErrorCode) == syncerr.CodeImageNotFound {
+		return 1
+	}
+	msg := strings.ToLower(app.LastSyncError)
+	if strings.Contains(msg, "image_not_found") || (strings.Contains(msg, "pull_failed") && strings.Contains(msg, "not_found")) {
+		return 1
+	}
+	return 0
+}
+
 // SetVerifying sets how many apps are in background health checks.
 func SetVerifying(n int) {
 	Verifying.Set(float64(n))
@@ -486,6 +522,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		ReconcileTotal,
 		QueueWait,
 		QueueOldest,
+		QueueAppWait,
 		Verifying,
 		appLastReconcile,
 		appNextReconcile,
@@ -520,6 +557,7 @@ type appsCollector struct {
 	suspendedDesc                   *prometheus.Desc
 	rolledBackDesc                  *prometheus.Desc
 	revisionDesc                    *prometheus.Desc
+	imageNotFoundDesc               *prometheus.Desc
 }
 
 func newAppsCollector(lister AppLister) *appsCollector {
@@ -591,6 +629,12 @@ func newAppsCollector(lister AppLister) *appsCollector {
 			[]string{"app", "ref", "sha"},
 			nil,
 		),
+		imageNotFoundDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "app_image_not_found"),
+			"1 when the image manifest is missing and the app waits until desired state changes.",
+			[]string{"app"},
+			nil,
+		),
 	}
 }
 
@@ -606,6 +650,7 @@ func (c *appsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.suspendedDesc
 	ch <- c.rolledBackDesc
 	ch <- c.revisionDesc
+	ch <- c.imageNotFoundDesc
 }
 
 func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -659,6 +704,7 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 			appLabel = id
 		}
 		ch <- prometheus.MustNewConstMetric(c.suspendedDesc, prometheus.GaugeValue, suspended, appLabel)
+		ch <- prometheus.MustNewConstMetric(c.imageNotFoundDesc, prometheus.GaugeValue, snapshotImageNotFound(app), appLabel)
 
 		ref := strings.TrimSpace(app.Revision)
 		if ref == "" {

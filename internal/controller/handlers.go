@@ -598,6 +598,37 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// RetryApp handles POST /api/v1/apps/{id}/retry.
+// It puts one app back on the work queue without restarting ConOps.
+func (h *Handler) RetryApp(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if app.Suspended {
+		http.Error(w, "app is suspended", http.StatusConflict)
+		return
+	}
+	if kicker, ok := h.SyncGate.(interface{ RetryApp(*api.App) error }); ok && kicker != nil {
+		if err := kicker.RetryApp(app); err != nil {
+			status := http.StatusInternalServerError
+			if strings.Contains(strings.ToLower(err.Error()), "in progress") {
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+	} else if err := h.Registry.MarkPending(app.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(api.APIResponse{Message: "retry queued", Data: app})
+}
+
 // ReconcileApp handles POST /api/v1/apps/{id}/reconcile (asynchronous).
 // Returns 202 with operation_id; concurrent POSTs while running return the same id.
 func (h *Handler) ReconcileApp(w http.ResponseWriter, r *http.Request) {

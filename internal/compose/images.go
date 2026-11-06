@@ -258,6 +258,9 @@ func pullFailedError(output string, images []string) error {
 	case strings.Contains(lower, "not found") || strings.Contains(lower, "manifest unknown") || strings.Contains(lower, "name unknown") || strings.Contains(lower, "no such manifest"):
 		kind = "not_found"
 	}
+	if kind == "not_found" {
+		return syncerr.New(syncerr.CodeImageNotFound, syncerr.StagePull, "image_not_found: "+ref)
+	}
 	msg := "pull_failed: " + ref
 	if kind != "" {
 		msg = "pull_failed: " + kind + " " + ref

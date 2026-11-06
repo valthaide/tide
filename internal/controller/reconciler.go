@@ -207,6 +207,7 @@ type WatchFileManager interface {
 	WatchEntryHashesForApp(appID string, files []deploypolicy.WatchFile) (map[string]string, error)
 	RestartService(ctx context.Context, appID, composePath, service string) (string, error)
 	HTTPReload(ctx context.Context, reloadURL string) error
+	ExecService(ctx context.Context, appID, composePath, service, command string) error
 }
 
 // pipelineGate is the CI check. Tests substitute it; production leaves it nil
@@ -232,6 +233,7 @@ type Reconciler struct {
 	nudge            chan struct{}
 	retryMu          sync.Mutex
 	retryAfter       map[string]transientRetry
+	imageMissSeen    map[string]string
 	wg               sync.WaitGroup
 	watchHashErrSeen map[string]string    // appID -> last error text (rate-limit logs)
 	ciWaitSince      map[string]time.Time // appID -> when CI wait started
@@ -315,6 +317,7 @@ func (r *Reconciler) ReleaseSync() {
 // Run starts the reconciliation loop. A sync that is still running does not
 // block the next pass, so other apps leave pending as slots free.
 func (r *Reconciler) Run(ctx context.Context) {
+	r.restoreQueue()
 	r.dispatch()
 
 	ticker := time.NewTicker(r.Config.Interval)
@@ -384,11 +387,20 @@ func (r *Reconciler) dispatch() {
 			r.declareOnce(app, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, msg))
 			continue
 		}
+		if !r.inFlightApp(app.ID) && (app.Status == "syncing" || app.Status == "verifying" || r.queued(app.ID)) {
+			app = r.liveApp(app)
+		}
+		r.reconcileQueue(app)
 		if app.Status == "syncing" {
-			if r.syncLooksStale(app) {
-				r.requeuePending(app, "recovering_interrupted_sync")
-			} else {
-				continue
+			if !r.inFlightApp(app.ID) {
+				app = r.liveApp(app)
+			}
+			if app.Status == "syncing" {
+				if r.syncLooksStale(app) {
+					r.requeuePending(app, "recovering_interrupted_sync")
+				} else {
+					continue
+				}
 			}
 		}
 
@@ -417,7 +429,7 @@ func (r *Reconciler) dispatch() {
 		if app.Status == "synced" {
 			r.handleWatchFileDrift(app)
 		}
-		if app.Status == "synced" || app.Status == "failed" {
+		if app.Status == "synced" || app.Status == "failed" || app.Status == "image_not_found" {
 			if reason := r.varsDriftReason(app); reason != "" {
 				r.requeuePending(app, reason)
 			}
@@ -448,6 +460,9 @@ func (r *Reconciler) dispatch() {
 			continue
 		}
 		if r.inTransientPause(app) {
+			continue
+		}
+		if app.Status != "pending" && r.imageMissHold(app) {
 			continue
 		}
 		if r.configHold(app) {
@@ -506,10 +521,14 @@ func (r *Reconciler) tryStart(id string) bool {
 }
 
 func (r *Reconciler) finishSync(id string) {
-	r.dequeue(id)
-	r.mu.Lock()
-	delete(r.inFlight, id)
-	r.mu.Unlock()
+	if r.endFlight(id) {
+		if r.Registry != nil {
+			_ = r.Registry.MarkPending(id)
+		}
+		if r.Logger != nil {
+			r.Logger.Info("Desired state changed during sync; queued again", "app_id", id)
+		}
+	}
 	r.ReleaseSync()
 	select {
 	case r.nudge <- struct{}{}:
@@ -600,7 +619,16 @@ func (r *Reconciler) envFileDriftReason(app *App) string {
 }
 
 func (r *Reconciler) requeuePending(app *App, reason string) {
-	r.enqueue(app, triggerForReason(reason), reason, appPriority(app))
+	if app == nil {
+		return
+	}
+	if r.inTransientPause(app) && !retryPauseBroken(app, reason, r.retrySeen(app.ID)) {
+		return
+	}
+	created := r.enqueue(app, triggerForReason(reason), reason, appPriority(app))
+	if !created {
+		return
+	}
 	if app.Status == "pending" {
 		return
 	}
@@ -765,23 +793,32 @@ func (r *Reconciler) syncApp(app *App) error {
 	if err != nil {
 		se := syncerr.Classify(err)
 		status := "error"
-		if declaredFailure(se) {
+		if imageNotFoundError(se) {
+			status = "image_not_found"
+		} else if declaredFailure(se) {
 			status = "failed"
 		}
 		attempt, wait := 0, time.Duration(0)
-		if transientFailure(se) {
+		switch {
+		case imageNotFoundError(se):
+			r.clearTransient(app.ID)
+		case transientFailure(se):
 			attempt, wait = r.scheduleTransient(app.ID)
-		} else {
+			r.noteRetrySeen(app.ID, strings.TrimSpace(app.LastSeenCommit))
+		default:
 			r.clearTransient(app.ID)
 		}
 		if r.Logger != nil {
-			if declaredFailure(se) {
+			switch {
+			case imageNotFoundError(se):
+				r.Logger.Warn("Image not found; not retrying until desired state changes", "app", app.Name, "reason", redactAppText(app, se.Message))
+			case declaredFailure(se):
 				if attempt > 1 {
 					r.Logger.Info("Retrying transient failure", "app", app.Name, "reason", se.Message, "attempt", attempt, "next", wait.String())
 				} else {
 					r.Logger.Error("App sync failed", "app", app.Name, "reason", redactAppText(app, se.Message))
 				}
-			} else {
+			default:
 				r.Logger.Error("Sync apply failed", "app_id", app.ID, "commit", target, "code", se.Code, "stage", se.Stage, "output", truncateOutput(output))
 			}
 		}
@@ -796,13 +833,23 @@ func (r *Reconciler) syncApp(app *App) error {
 			output,
 			syncerr.Encode(se),
 		)
-		if superseded && r.Logger != nil {
-			r.Logger.Info("Desired state changed during sync; queued again", "app", app.Name, "skipped", 1)
-		}
-		if transientFailure(se) {
+		if imageNotFoundError(se) {
+			// Remember the desired commit and vars that missed. A later sync of
+			// the same commit must still deploy that commit, not the last healthy one.
+			_ = r.Registry.UpdateRollback(app.ID, app.LastHealthyCommit, target, app.LastHealthyVars, deploypolicy.EncodeVars(fleetVars))
+			if fresh, ferr := r.Registry.Get(app.ID); ferr == nil && fresh != nil &&
+				strings.TrimSpace(fresh.LastSeenCommit) == strings.TrimSpace(target) &&
+				deploypolicy.VarsEqual(fresh.Policy().Vars, fleetVars) {
+				_ = r.Registry.UpdateStatus(app.ID, "image_not_found", nil)
+				superseded = false
+			}
+		} else if transientFailure(se) {
 			// Keep the attempted vars as rejected so the next loop does not
 			// treat the same fleet vars as a new revision and skip the backoff.
 			_ = r.Registry.UpdateRollback(app.ID, app.LastHealthyCommit, app.RejectedCommit, app.LastHealthyVars, deploypolicy.EncodeVars(fleetVars))
+		}
+		if superseded && r.Logger != nil {
+			r.Logger.Info("Desired state changed during sync; queued again", "app", app.Name, "skipped", 1)
 		}
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
 		if declaredFailure(se) {
@@ -876,10 +923,32 @@ func (r *Reconciler) syncApp(app *App) error {
 type transientRetry struct {
 	attempts int
 	next     time.Time
+	seen     string
+}
+
+func imageNotFoundError(se *syncerr.Error) bool {
+	if se == nil {
+		return false
+	}
+	if se.Code == syncerr.CodeImageNotFound {
+		return true
+	}
+	msg := strings.ToLower(se.Message)
+	return strings.Contains(msg, "image_not_found") || (strings.Contains(msg, "pull_failed") && strings.Contains(msg, "not_found"))
+}
+
+func imageNotFoundApp(app *App) bool {
+	if app == nil {
+		return false
+	}
+	if app.Status == "image_not_found" || app.LastSyncErrorCode == syncerr.CodeImageNotFound {
+		return true
+	}
+	return imageNotFoundError(&syncerr.Error{Code: app.LastSyncErrorCode, Message: app.LastSyncError})
 }
 
 func transientFailure(se *syncerr.Error) bool {
-	if se == nil {
+	if se == nil || imageNotFoundError(se) {
 		return false
 	}
 	switch se.GetCode() {
@@ -950,7 +1019,31 @@ func (r *Reconciler) scheduleTransient(appID string) (int, time.Duration) {
 func (r *Reconciler) clearTransient(appID string) {
 	r.retryMu.Lock()
 	delete(r.retryAfter, appID)
+	delete(r.imageMissSeen, appID)
 	r.retryMu.Unlock()
+}
+
+func (r *Reconciler) noteRetrySeen(id, seen string) {
+	if r == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	r.retryMu.Lock()
+	defer r.retryMu.Unlock()
+	if r.retryAfter == nil {
+		r.retryAfter = map[string]transientRetry{}
+	}
+	st := r.retryAfter[id]
+	st.seen = strings.TrimSpace(seen)
+	r.retryAfter[id] = st
+}
+
+func (r *Reconciler) retrySeen(id string) string {
+	if r == nil {
+		return ""
+	}
+	r.retryMu.Lock()
+	defer r.retryMu.Unlock()
+	return r.retryAfter[id].seen
 }
 
 func (r *Reconciler) noteProjects(apps []*App) {
@@ -981,7 +1074,9 @@ func revisionToApply(app *App, force bool) string {
 	}
 	rejected := strings.TrimSpace(app.RejectedCommit)
 	healthy := strings.TrimSpace(app.LastHealthyCommit)
-	if rejected != "" && seen == rejected && healthy != "" {
+	// image_not_found stores the missed commit as rejected so the hold can
+	// tell a new commit from the same one. That commit is still the one to deploy.
+	if rejected != "" && seen == rejected && healthy != "" && !imageNotFoundApp(app) {
 		return healthy
 	}
 	return seen
@@ -1357,7 +1452,7 @@ func declaredFailure(se *syncerr.Error) bool {
 		return false
 	}
 	switch se.GetCode() {
-	case syncerr.CodeBuildForbidden, syncerr.CodeRegistryAuth, syncerr.CodePullFailed, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI,
+	case syncerr.CodeBuildForbidden, syncerr.CodeRegistryAuth, syncerr.CodePullFailed, syncerr.CodeImageNotFound, syncerr.CodeUnsetVar, syncerr.CodeDockerAPI,
 		syncerr.CodeValidation, syncerr.CodePortConflict, syncerr.CodeVolumeMissing, syncerr.CodeVolumeNameRejected, syncerr.CodeDigestRequired,
 		syncerr.CodeOneshotFailed, syncerr.CodeOneshotTimeout, syncerr.CodeRegistryDenied:
 		return true
@@ -1554,10 +1649,18 @@ func (r *Reconciler) applyWatchActions(app *App, mgr WatchFileManager, files []d
 	for _, w := range files {
 		switch w.Action {
 		case "reload":
-			if w.ReloadURL != "" {
+			switch {
+			case w.ReloadCommand != "":
+				if w.Service == "" {
+					r.logWatchResult(app.Name, "reload", w.Path, "", "", fmt.Errorf("reload_command requires service"))
+					continue
+				}
+				err := mgr.ExecService(ctx, app.ID, app.ComposePath, w.Service, w.ReloadCommand)
+				r.logWatchResult(app.Name, "reload", w.Path, "", w.Service, err)
+			case w.ReloadURL != "":
 				err := mgr.HTTPReload(ctx, w.ReloadURL)
 				r.logWatchResult(app.Name, "reload", w.Path, w.ReloadURL, "", err)
-			} else if w.Service != "" {
+			case w.Service != "":
 				_, err := mgr.RestartService(ctx, app.ID, app.ComposePath, w.Service)
 				r.logWatchResult(app.Name, "restart", w.Path, "", w.Service, err)
 			}

@@ -461,6 +461,31 @@ func (e *ComposeExecutor) RestartService(ctx context.Context, appID, composePath
 	return redact.String(out), err
 }
 
+// ExecService runs a command in one service container (for example kill -HUP 1).
+func (e *ComposeExecutor) ExecService(ctx context.Context, appID, composePath, service, command string) error {
+	service = strings.TrimSpace(service)
+	command = strings.TrimSpace(command)
+	if service == "" || command == "" {
+		return fmt.Errorf("reload command requires service and command")
+	}
+	projectName := e.projectFor(appID)
+	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(composePath) == "" {
+		composePath = "compose.yaml"
+	}
+	composeFullPath := filepath.Join(appDirAbs, "repo", composePath)
+	composeDir := filepath.Dir(composeFullPath)
+	composeFileName := filepath.Base(composeFullPath)
+	_, err = e.runCommand(ctx, "docker", []string{
+		"compose", "-p", projectName, "-f", composeFileName,
+		"exec", "-T", service, "sh", "-c", command,
+	}, composeDir, nil, nil)
+	return err
+}
+
 // HTTPReload POSTs to a reload endpoint (e.g. Prometheus /-/reload).
 func (e *ComposeExecutor) HTTPReload(ctx context.Context, reloadURL string) error {
 	reloadURL = strings.TrimSpace(reloadURL)
@@ -1245,7 +1270,7 @@ func (e *ComposeExecutor) execProcess(
 	output := outputBuilder.String()
 	outputMu.Unlock()
 	trimmed := strings.TrimSpace(output)
-	if trimmed != "" && e.Logger != nil {
+	if trimmed != "" && e.Logger != nil && !composeConfigCommand(cmd, args) {
 		msg := redact.String(truncateOutput(trimmed))
 		if quietCommandOutput(cmd, args) {
 			e.Logger.Debug("Command output", "cmd", cmdDisplay, "output", msg)
@@ -1261,10 +1286,14 @@ func (e *ComposeExecutor) execProcess(
 			if errors.As(waitErr, &exitErr) {
 				exitCode = exitErr.ExitCode()
 			}
-			if contextStopped(ctx) {
+			level := slog.LevelError
+			if imageInspectCommand(cmd, args) {
+				level = slog.LevelDebug
+			}
+			if contextStopped(ctx) && level == slog.LevelError {
 				e.Logger.Error("Command context ended", "cmd", cmdDisplay, "context_err", ctx.Err())
 			}
-			e.Logger.Error(
+			e.Logger.Log(context.Background(), level,
 				"Command failed",
 				"cmd", cmdDisplay,
 				"dir", workDir,
@@ -1523,9 +1552,45 @@ func quietCommandOutput(cmd string, args []string) bool {
 		return true
 	case "image":
 		return len(args) > 1 && args[1] == "inspect"
+	case "compose":
+		return composeSubcommand(args) == "config"
 	default:
 		return false
 	}
+}
+
+func composeConfigCommand(cmd string, args []string) bool {
+	return filepath.Base(cmd) == "docker" && len(args) > 0 && args[0] == "compose" && composeSubcommand(args) == "config"
+}
+
+func imageInspectCommand(cmd string, args []string) bool {
+	return filepath.Base(cmd) == "docker" && len(args) > 1 && args[0] == "image" && args[1] == "inspect"
+}
+
+// composeSubcommand returns the compose verb after global flags.
+func composeSubcommand(args []string) string {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "-") {
+			switch arg {
+			case "-p", "-f", "--project-name", "--file", "--profile", "--env-file", "--project-directory", "--parallel":
+				i++
+			default:
+				if !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") && len(arg) == 2 {
+					i++
+				}
+			}
+			continue
+		}
+		return arg
+	}
+	return ""
 }
 
 func contextStopped(ctx context.Context) bool {

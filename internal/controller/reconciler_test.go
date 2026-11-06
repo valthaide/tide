@@ -600,6 +600,9 @@ func TestTransientBackoffGrows(t *testing.T) {
 	if transientFailure(syncerr.New(syncerr.CodeBuildForbidden, syncerr.StageValidate, "build_forbidden: web")) {
 		t.Fatal("build_forbidden is not transient")
 	}
+	if transientFailure(syncerr.New(syncerr.CodeImageNotFound, syncerr.StagePull, "image_not_found: app:missing")) {
+		t.Fatal("image_not_found is permanent until desired state changes")
+	}
 }
 
 func TestRevisionToApplySkipsRejected(t *testing.T) {
@@ -611,6 +614,13 @@ func TestRevisionToApplySkipsRejected(t *testing.T) {
 	}
 	if got := revisionToApply(&App{LastSeenCommit: "c", RejectedCommit: "b", LastHealthyCommit: "a"}, false); got != "c" {
 		t.Fatalf("new commit: got %q", got)
+	}
+	missed := &App{
+		LastSeenCommit: "b", RejectedCommit: "b", LastHealthyCommit: "a",
+		Status: "image_not_found", LastSyncErrorCode: syncerr.CodeImageNotFound,
+	}
+	if got := revisionToApply(missed, false); got != "b" {
+		t.Fatalf("missing image must stay on the missed commit, got %q", got)
 	}
 }
 
@@ -677,6 +687,7 @@ type reloadRuntime struct {
 	hashes   map[string]string
 	reloads  []string
 	restarts []string
+	execs    []string
 }
 
 func (r *reloadRuntime) WatchFilesHashForApp(string, []deploypolicy.WatchFile) (string, error) {
@@ -695,6 +706,11 @@ func (r *reloadRuntime) HTTPReload(_ context.Context, url string) error {
 func (r *reloadRuntime) RestartService(_ context.Context, _, _, service string) (string, error) {
 	r.restarts = append(r.restarts, service)
 	return "", nil
+}
+
+func (r *reloadRuntime) ExecService(_ context.Context, _, _, service, command string) error {
+	r.execs = append(r.execs, service+" "+command)
+	return nil
 }
 
 type scriptGate struct {
@@ -876,6 +892,89 @@ func TestSyncAppliesOnlyChangedWatchFile(t *testing.T) {
 	}
 	if len(rt.restarts) != 0 {
 		t.Fatalf("restarts %v", rt.restarts)
+	}
+}
+
+func TestWatchReloadCommandDoesNotRestart(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "monitoring", RepoURL: "https://example.com/monitoring.git", Branch: "main",
+		ComposePath: "docker-compose.yml", PollInterval: "30s",
+		LastSeenCommit: "df8f922", Status: "synced",
+	}
+	addPublicApp(t, reg, app)
+	policy := deploypolicy.Encode(deploypolicy.Policy{WatchFiles: []deploypolicy.WatchFile{
+		{Path: "grafana/dashboards", Action: "reload", Service: "grafana", ReloadCommand: "kill -HUP 1"},
+	}})
+	if err := reg.UpdateDeployPolicy(app.ID, policy); err != nil {
+		t.Fatal(err)
+	}
+	prev := encodeWatchHashes(map[string]string{"grafana/dashboards": "old"})
+	if err := reg.UpdateWatchHash(app.ID, prev); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &reloadRuntime{hashes: map[string]string{"grafana/dashboards": "new"}}
+	rec := testReconciler(t, reg, rt, ReconcilerConfig{})
+	rec.recordAppliedWatchHash(got)
+	if len(rt.execs) != 1 || rt.execs[0] != "grafana kill -HUP 1" {
+		t.Fatalf("execs %v", rt.execs)
+	}
+	if len(rt.restarts) != 0 || len(rt.reloads) != 0 {
+		t.Fatalf("restarts %v reloads %v", rt.restarts, rt.reloads)
+	}
+}
+
+type missRuntime struct {
+	fakeRuntime
+}
+
+func (m *missRuntime) Apply(ctx context.Context, appID, content string, env map[string]string, repoURL, branch, composePath, commit, method string, secret []byte, progress func(string)) (string, error) {
+	m.applyCalls = append(m.applyCalls, appID)
+	m.applyCommits = append(m.applyCommits, commit)
+	return "manifest missing", syncerr.New(syncerr.CodeImageNotFound, syncerr.StagePull, "image_not_found: registry.example/coach:9")
+}
+
+func TestImageNotFoundWaitsForDesiredChange(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "coach", RepoURL: "https://example.com/coach.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "bbbbbbbb", LastSyncedCommit: "aaaaaaaa", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	vars := map[string]string{"APP_TAG": "9"}
+	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{Vars: vars})); err != nil {
+		t.Fatal(err)
+	}
+	rt := &missRuntime{}
+	r := testReconciler(t, reg, rt, ReconcilerConfig{Interval: time.Hour, SyncTimeout: time.Minute, MaxConcurrent: 1})
+	r.reconcileOnce()
+	if len(rt.applyCalls) != 1 {
+		t.Fatalf("calls %v", rt.applyCalls)
+	}
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "image_not_found" || got.LastSyncErrorCode != syncerr.CodeImageNotFound {
+		t.Fatalf("status %s code %s err %s", got.Status, got.LastSyncErrorCode, got.LastSyncError)
+	}
+	r.reconcileOnce()
+	if len(rt.applyCalls) != 1 {
+		t.Fatalf("retried a missing image: %v", rt.applyCalls)
+	}
+	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{Vars: map[string]string{"APP_TAG": "10"}})); err != nil {
+		t.Fatal(err)
+	}
+	r.rememberNext(app.ID, time.Now().Add(-time.Second), time.Now())
+	r.reconcileOnce()
+	r.reconcileOnce()
+	if len(rt.applyCalls) != 2 {
+		t.Fatalf("new tag was not applied, calls %d", len(rt.applyCalls))
 	}
 }
 
