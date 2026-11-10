@@ -9,11 +9,12 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
-	"github.com/valthaide/conops-private/internal/gitremote"
-	"github.com/valthaide/conops-private/internal/gitrev"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/pollinterval"
-	"github.com/valthaide/conops-private/internal/repoauth"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/gitremote"
+	"github.com/valthaide/tide/internal/gitrev"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/pollinterval"
+	"github.com/valthaide/tide/internal/repoauth"
 )
 
 // GitWatcher monitors registered apps for changes.
@@ -28,7 +29,7 @@ func NewGitWatcher(registry *Registry, logger *slog.Logger) *GitWatcher {
 	return &GitWatcher{
 		Registry: registry,
 		Logger:   logger,
-		CacheDir: "./.conops-cache",
+		CacheDir: envcompat.ResolveGitCacheDir(),
 	}
 }
 

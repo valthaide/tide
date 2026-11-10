@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/valthaide/tide/internal/envcompat"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -24,7 +25,7 @@ const (
 	MethodDeployKey = "deploy_key"
 	// MethodToken is defined in token.go
 
-	KnownHostsPathEnv = "CONOPS_KNOWN_HOSTS_FILE"
+	KnownHostsPathEnv = "TIDE_KNOWN_HOSTS_FILE"
 
 	defaultSSHPort = "22"
 )
@@ -86,7 +87,7 @@ func NormalizeMethod(value string) string {
 
 // ValidateCreateInput validates repo config before persistence.
 // secret is a deploy key (deploy_key) or git token (token); may be empty for token
-// when CONOPS_GIT_TOKEN will be supplied at runtime.
+// when TIDE_GIT_TOKEN will be supplied at runtime.
 func ValidateCreateInput(repoURL, method, secret string) error {
 	repoURL = strings.TrimSpace(repoURL)
 	if repoURL == "" {
@@ -150,7 +151,7 @@ func NormalizeDeployKey(value string) string {
 }
 
 // ResolveKnownHostsForRepo returns a known_hosts file that includes host keys for the
-// repo's SSH endpoint. Keys are seeded from CONOPS_KNOWN_HOSTS_FILE / user / system
+// repo's SSH endpoint. Keys are seeded from TIDE_KNOWN_HOSTS_FILE / user / system
 // files when present, and missing hosts are fetched via GitHub metadata or ssh-keyscan.
 func ResolveKnownHostsForRepo(repoURL string) (string, error) {
 	endpoint, err := ParseSSHEndpoint(repoURL)
@@ -283,7 +284,7 @@ func ensureManagedKnownHosts() (string, error) {
 	}
 
 	seed, seedErr := readSeedKnownHosts()
-	dir := filepath.Join(os.TempDir(), "conops-known-hosts")
+	dir := filepath.Join(os.TempDir(), "tide-known-hosts")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("failed creating known_hosts dir: %w", err)
 	}
@@ -309,7 +310,7 @@ func ensureManagedKnownHosts() (string, error) {
 }
 
 func readSeedKnownHosts() (string, error) {
-	if path := strings.TrimSpace(os.Getenv(KnownHostsPathEnv)); path != "" {
+	if path := envcompat.Getenv(KnownHostsPathEnv); path != "" {
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
 			return "", fmt.Errorf("%s points to an invalid file", KnownHostsPathEnv)
@@ -401,7 +402,7 @@ func fetchGitHubSSHKeys() ([]string, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "conops")
+	req.Header.Set("User-Agent", "tide")
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -428,7 +429,7 @@ func fetchHostKeysViaKeyscan(endpoint SSHEndpoint) ([]string, error) {
 	port := endpoint.normalizedPort()
 	host := endpoint.Host
 
-	// Prefer ssh-keyscan when available (present in the ConOps container image).
+	// Prefer ssh-keyscan when available (present in the Tide container image).
 	if path, err := exec.LookPath("ssh-keyscan"); err == nil {
 		cmd := exec.Command(path, "-T", "5", "-p", port, "-t", "rsa,ecdsa,ed25519", host)
 		var stdout, stderr bytes.Buffer

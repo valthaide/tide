@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/imagegc"
+	"github.com/valthaide/tide/internal/imagegc"
 )
 
 func parseImageInspect(raw string, used map[string]struct{}) []imagegc.Image {

@@ -4,25 +4,25 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
 const (
 	MethodToken = "token"
 
-	GitTokenEnv = "CONOPS_GIT_TOKEN"
+	GitTokenEnv = "TIDE_GIT_TOKEN"
 )
 
 // ResolveGitToken returns the effective git HTTPS token.
-// Prefer explicit secret; fall back to CONOPS_GIT_TOKEN.
+// Prefer explicit secret; fall back to TIDE_GIT_TOKEN.
 func ResolveGitToken(explicit string) string {
 	if t := strings.TrimSpace(explicit); t != "" {
 		return t
 	}
-	return strings.TrimSpace(os.Getenv(GitTokenEnv))
+	return envcompat.Getenv(GitTokenEnv)
 }
 
 // HTTPBasicAuth builds go-git HTTPS auth for a personal/deploy token.

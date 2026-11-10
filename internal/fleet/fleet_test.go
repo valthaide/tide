@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/deploypolicy"
 )
 
 func TestParseHostDocument(t *testing.T) {

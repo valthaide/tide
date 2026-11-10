@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 const (
@@ -103,9 +104,9 @@ func (e *ComposeExecutor) resolveDockerCommand(ctx context.Context) (dockerComma
 func (e *ComposeExecutor) buildDockerResolution(ctx context.Context) (dockerCommandResolution, error) {
 	dockerPath := "docker"
 	source := "system"
-	if value := strings.TrimSpace(os.Getenv("CONOPS_DOCKER_CLI_PATH")); value != "" {
+	if value := envcompat.Getenv("TIDE_DOCKER_CLI_PATH"); value != "" {
 		if _, err := os.Stat(value); err != nil {
-			return dockerCommandResolution{}, fmt.Errorf("CONOPS_DOCKER_CLI_PATH does not exist: %w", err)
+			return dockerCommandResolution{}, fmt.Errorf("TIDE_DOCKER_CLI_PATH does not exist: %w", err)
 		}
 		dockerPath = value
 		source = "custom"

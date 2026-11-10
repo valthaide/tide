@@ -29,7 +29,7 @@ func TestRedactGitLabPrefix(t *testing.T) {
 }
 
 func TestRedactEnvSecret(t *testing.T) {
-	t.Setenv("CONOPS_GIT_TOKEN", "supersecrettoken99")
+	t.Setenv("TIDE_GIT_TOKEN", "supersecrettoken99")
 	r := New()
 	out := r.String("using supersecrettoken99 for fetch")
 	if strings.Contains(out, "supersecrettoken99") {
@@ -38,7 +38,7 @@ func TestRedactEnvSecret(t *testing.T) {
 }
 
 func TestRedactEmptySecretIgnored(t *testing.T) {
-	t.Setenv("CONOPS_GIT_TOKEN", "")
+	t.Setenv("TIDE_GIT_TOKEN", "")
 	r := New()
 	r.AddSecret("ab") // too short
 	in := "about above"

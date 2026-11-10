@@ -11,7 +11,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 // ExternalEnvHashForApp hashes absolute env_file paths for an app runtime checkout.

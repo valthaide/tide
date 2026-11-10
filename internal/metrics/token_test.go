@@ -43,16 +43,16 @@ func TestProtectMetricsToken(t *testing.T) {
 }
 
 func TestMetricsTokenFile(t *testing.T) {
-	t.Setenv("CONOPS_METRICS_TOKEN", "")
+	t.Setenv("TIDE_METRICS_TOKEN", "")
 	path := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(path, []byte("from-file\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CONOPS_METRICS_TOKEN_FILE", path)
+	t.Setenv("TIDE_METRICS_TOKEN_FILE", path)
 	if got := MetricsToken(); got != "from-file" {
 		t.Fatalf("file token %q", got)
 	}
-	t.Setenv("CONOPS_METRICS_TOKEN", "from-env")
+	t.Setenv("TIDE_METRICS_TOKEN", "from-env")
 	if got := MetricsToken(); got != "from-env" {
 		t.Fatalf("env token %q", got)
 	}

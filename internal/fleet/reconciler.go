@@ -13,14 +13,15 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/gitremote"
-	"github.com/valthaide/conops-private/internal/gitrev"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/pollinterval"
-	"github.com/valthaide/conops-private/internal/repoauth"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/gitremote"
+	"github.com/valthaide/tide/internal/gitrev"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/pollinterval"
+	"github.com/valthaide/tide/internal/repoauth"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 // AppManager applies fleet desired state to the local app registry.
@@ -39,10 +40,15 @@ type AppManager interface {
 	Delete(id string) error
 }
 
-// RuntimeCleaner destroys compose runtime for a deleted app (best-effort).
+// RuntimeCleaner destroys compose runtime for a deleted app.
 // pruneVolumes removes named volumes declared by that app only.
 type RuntimeCleaner interface {
 	Destroy(ctx context.Context, appID, composePath string, envVars map[string]string, pruneVolumes bool) (string, error)
+}
+
+// RepoMigrator executes a production-safe repository URL / auth migration without data loss.
+type RepoMigrator interface {
+	MigrateRepoFromFleet(ctx context.Context, existing *api.App, req api.RepoMigrationRequest, nextPolicyJSON string) error
 }
 
 // Reconciler syncs the local registry from a fleet git repository.
@@ -50,6 +56,7 @@ type Reconciler struct {
 	Config        Config
 	Apps          AppManager
 	Cleaner       RuntimeCleaner
+	RepoMigrator  RepoMigrator
 	Logger        *slog.Logger
 	OnHost        func(*HostDocument)
 	missingStreak int
@@ -116,7 +123,7 @@ func (r *Reconciler) syncOnce(ctx context.Context) {
 }
 
 // logMissingHostFile counts consecutive misses. Cycle N logs one WARN and
-// later misses stay at DEBUG. N is CONOPS_FLEET_MISSING_CYCLES (default 3).
+// later misses stay at DEBUG. N is TIDE_FLEET_MISSING_CYCLES (default 3).
 func (r *Reconciler) logMissingHostFile(err error) {
 	r.missingStreak++
 	level, announce := missingHostLog(r.missingStreak, r.Config.MissingCycles)
@@ -157,7 +164,7 @@ func (r *Reconciler) loadDesired(ctx context.Context) (*HostDocument, error) {
 	if unknownErr != nil {
 		return nil, unknownErr
 	}
-	mode := StrictMode(os.Getenv("CONOPS_FLEET_STRICT"))
+	mode := StrictMode(envcompat.Getenv("TIDE_FLEET_STRICT"))
 	if len(unknown) > 0 && mode == "enforce" {
 		return nil, fmt.Errorf("unknown_field: %s", strings.Join(unknown, ","))
 	}
@@ -309,7 +316,7 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 			continue
 		}
 		desiredNames[spec.Name] = struct{}{}
-		if err := r.upsertApp(spec, doc); err != nil {
+		if err := r.upsertApp(ctx, spec, doc); err != nil {
 			return fmt.Errorf("upsert app %q: %w", spec.Name, err)
 		}
 	}
@@ -326,7 +333,9 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 		}
 		if r.Cleaner != nil {
 			rememberProject(r.Cleaner, app)
-			_, _ = r.Cleaner.Destroy(ctx, app.ID, app.ComposePath, nil, app.Policy().PruneVolumes)
+			if _, err := r.Cleaner.Destroy(ctx, app.ID, app.ComposePath, nil, app.Policy().PruneVolumes); err != nil {
+				return fmt.Errorf("destroy removed app %q: %w", app.Name, err)
+			}
 		}
 		if err := r.Apps.Delete(app.ID); err != nil {
 			return fmt.Errorf("delete app %q: %w", app.Name, err)
@@ -335,7 +344,7 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 	return nil
 }
 
-func (r *Reconciler) upsertApp(spec AppSpec, doc *HostDocument) error {
+func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocument) error {
 	method := repoauth.NormalizeMethod(spec.RepoAuthMethod)
 	if method == "" {
 		method = repoauth.MethodPublic
@@ -375,41 +384,66 @@ func (r *Reconciler) upsertApp(spec AppSpec, doc *HostDocument) error {
 		return nil
 	}
 
-	// Repo URL / auth method change → recreate
+	// Repo URL / auth method change -> production-safe in-place migration (preserves app ID, compose project, and volumes).
 	if !strings.EqualFold(existing.RepoURL, spec.RepoURL) ||
 		repoauth.NormalizeMethod(existing.RepoAuthMethod) != method {
+		nextPolicy := policyJSONFromSpec(spec, doc)
+		if r.RepoMigrator != nil {
+			migReq := api.RepoMigrationRequest{
+				RepoURL:        spec.RepoURL,
+				RepoAuthMethod: method,
+				DeployKey:      secret,
+				Branch:         spec.Branch,
+				Revision:       spec.Revision,
+				ComposePath:    spec.ComposePath,
+				Vars:           spec.Vars,
+				Reason:         "fleet repo_url updated",
+				Actor:          "fleet",
+			}
+			if err := r.RepoMigrator.MigrateRepoFromFleet(ctx, existing, migReq, nextPolicy); err != nil {
+				return err
+			}
+			if existing.FleetSuspended != spec.Suspended {
+				_ = r.Apps.SetSuspended(existing.ID, spec.Suspended)
+			}
+			return nil
+		}
+
+		// Unit-test fallback when RepoMigrator is not wired: never prune volumes, fail on cleaner error, preserve app ID if supported.
 		if r.Cleaner != nil {
 			rememberProject(r.Cleaner, existing)
-			_, _ = r.Cleaner.Destroy(context.Background(), existing.ID, existing.ComposePath, nil, existing.Policy().PruneVolumes)
+			if _, err := r.Cleaner.Destroy(ctx, existing.ID, existing.ComposePath, nil, false); err != nil {
+				return fmt.Errorf("stop existing app before repo migration: %w", err)
+			}
 		}
-		if err := r.Apps.Delete(existing.ID); err != nil {
-			return err
+		if updater, ok := r.Apps.(interface {
+			UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath string) error
+		}); ok {
+			if err := updater.UpdateRepository(existing.ID, spec.RepoURL, method, spec.Branch, spec.Revision, spec.ComposePath); err != nil {
+				return err
+			}
+			if err := r.Apps.UpdateDeployPolicy(existing.ID, nextPolicy); err != nil {
+				return err
+			}
+			if err := r.syncFleetSecret(existing.ID, method, secret, spec); err != nil {
+				return err
+			}
+			if existing.FleetSuspended != spec.Suspended {
+				_ = r.Apps.SetSuspended(existing.ID, spec.Suspended)
+			}
+			_ = r.Apps.MarkPending(existing.ID)
+			return nil
 		}
-		app := &api.App{
-			Name:           spec.Name,
-			RepoURL:        spec.RepoURL,
-			RepoAuthMethod: method,
-			Branch:         spec.Branch,
-			Revision:       spec.Revision,
-			ComposePath:    spec.ComposePath,
-			PollInterval:   spec.PollInterval,
-			Suspended:      spec.Suspended,
-		}
-		if err := r.Apps.AddWithDeployKeyAndEnvs(app, secret, nil); err != nil {
-			return err
-		}
-		if err := r.Apps.SetRevision(app.ID, spec.Revision); err != nil {
-			return err
-		}
-		if err := r.Apps.UpdateDeployPolicy(app.ID, policyJSONFromSpec(spec, doc)); err != nil {
-			return err
-		}
-		if spec.Suspended {
-			_ = r.Apps.SetSuspended(app.ID, true)
-		}
-		if r.Logger != nil {
-			r.Logger.Info("Fleet recreated app", "name", spec.Name, "id", app.ID)
-		}
+		existing.RepoURL = spec.RepoURL
+		existing.RepoAuthMethod = method
+		existing.Branch = spec.Branch
+		existing.Revision = spec.Revision
+		existing.ComposePath = spec.ComposePath
+		_ = r.Apps.UpdateApp(existing.ID, spec.Name, spec.Branch, spec.ComposePath, spec.PollInterval, nil)
+		_ = r.Apps.SetRevision(existing.ID, spec.Revision)
+		_ = r.Apps.UpdateDeployPolicy(existing.ID, nextPolicy)
+		_ = r.syncFleetSecret(existing.ID, method, secret, spec)
+		_ = r.Apps.MarkPending(existing.ID)
 		return nil
 	}
 
@@ -439,7 +473,7 @@ func (r *Reconciler) upsertApp(spec AppSpec, doc *HostDocument) error {
 			r.Logger.Info("Fleet revision updated", "name", spec.Name, "revision", spec.Revision, "branch", spec.Branch)
 		}
 	}
-	// Fleet owns only the git suspend flag. An operator pause (cps suspend) is a
+	// Fleet owns only the git suspend flag. An operator pause (tidectl suspend) is a
 	// separate column and must survive this reconcile.
 	if existing.FleetSuspended != spec.Suspended {
 		if err := r.Apps.SetSuspended(existing.ID, spec.Suspended); err != nil {
@@ -455,7 +489,7 @@ func (r *Reconciler) syncFleetSecret(appID, method, secret string, spec AppSpec)
 	switch method {
 	case repoauth.MethodToken:
 		if strings.TrimSpace(spec.DeployKeyFile) == "" {
-			// Prefer CONOPS_GIT_TOKEN from process env; do not keep a DB copy.
+			// Prefer TIDE_GIT_TOKEN from process env; do not keep a DB copy.
 			return r.Apps.ClearRepoSecret(appID)
 		}
 		return r.Apps.UpdateRepoSecret(appID, secret)
@@ -537,14 +571,41 @@ func inheritedPriority(app *int, doc *HostDocument) *int {
 	return doc.Priority
 }
 
+func convertTrustedWeb(spec *TrustedWebSpec) *deploypolicy.TrustedWebPolicy {
+	if spec == nil {
+		return nil
+	}
+	return &deploypolicy.TrustedWebPolicy{
+		Enabled:          spec.Enabled,
+		AllowedUsers:     append([]string(nil), spec.AllowedUsers...),
+		AllowedVariables: append([]string(nil), spec.AllowedVariables...),
+		RequiredJobs:     append([]string(nil), spec.RequiredJobs...),
+	}
+}
+
 func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 	hostBuild := ""
 	var hostDigest *bool
+	var hostStrictGate *bool
 	var hostRegs []string
+	var hostSharedJobs []string
+	var hostTrustedWeb *TrustedWebSpec
+	var tenantSpec TenantSpec
+	hasTenant := false
+
 	if doc != nil {
 		hostBuild = doc.Build
 		hostDigest = doc.RequireDigest
+		hostStrictGate = doc.StrictPipelineGate
 		hostRegs = doc.AllowedRegistries
+		hostSharedJobs = doc.SharedRequiredJobs
+		hostTrustedWeb = doc.TrustedWebPipelines
+		if tName := strings.TrimSpace(spec.Tenant); tName != "" && doc.Tenants != nil {
+			if ts, ok := doc.Tenants[tName]; ok {
+				tenantSpec = ts
+				hasTenant = true
+			}
+		}
 	}
 	build := spec.Build
 	if build == "" {
@@ -554,9 +615,37 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 	if len(regs) == 0 {
 		regs = hostRegs
 	}
+
+	var reqJobs []string
+	if hasTenant {
+		reqJobs = append(reqJobs, tenantSpec.RequiredJobs...)
+	}
+	reqJobs = append(reqJobs, spec.RequiredJobs...)
+
+	var sharedJobs []string
+	sharedJobs = append(sharedJobs, hostSharedJobs...)
+	if hasTenant {
+		sharedJobs = append(sharedJobs, tenantSpec.SharedRequiredJobs...)
+	}
+	sharedJobs = append(sharedJobs, spec.SharedRequiredJobs...)
+
+	trustedWeb := spec.TrustedWebPipelines
+	if trustedWeb == nil && hasTenant {
+		trustedWeb = tenantSpec.TrustedWebPipelines
+	}
+	if trustedWeb == nil {
+		trustedWeb = hostTrustedWeb
+	}
+
 	p := deploypolicy.Policy{
+		Tenant:                 spec.Tenant,
 		RequirePipelineSuccess: spec.RequirePipelineSuccess,
 		RequirePipelineSources: pipelineSources(spec.RequirePipelineSources, doc),
+		StrictPipelineGate:     effectiveBool(spec.StrictPipelineGate, hostStrictGate),
+		PipelineRef:            spec.PipelineRef,
+		RequiredJobs:           reqJobs,
+		SharedRequiredJobs:     sharedJobs,
+		TrustedWebPipelines:    convertTrustedWeb(trustedWeb),
 		PruneVolumes:           spec.PruneVolumes,
 		HealthTimeout:          spec.HealthTimeout,
 		Build:                  build,
@@ -618,9 +707,9 @@ func (r *Reconciler) resolveAppSecret(spec AppSpec, method string) (string, erro
 			return strings.TrimSpace(string(data)), nil
 		}
 		if method == repoauth.MethodToken {
-			// Empty secret → ResolveGitToken("") reads CONOPS_GIT_TOKEN on each use.
+			// Empty secret -> ResolveGitToken("") reads TIDE_GIT_TOKEN on each use.
 			if t := repoauth.ResolveGitToken(""); t == "" {
-				return "", fmt.Errorf("CONOPS_GIT_TOKEN is empty")
+				return "", fmt.Errorf("TIDE_GIT_TOKEN is empty")
 			}
 			return "", nil
 		}

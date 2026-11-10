@@ -5,14 +5,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 )
 
 const (
-	OpPending   = "pending"
-	OpRunning   = "running"
-	OpSucceeded = "succeeded"
-	OpFailed    = "failed"
+	OpPending       = "pending"
+	OpRunning       = "running"
+	OpSucceeded     = "succeeded"
+	OpFailed        = "failed"
 	OpKindReconcile = "reconcile"
 )
 

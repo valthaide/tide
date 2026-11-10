@@ -2,12 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 )
 
 type PostgresStore struct {
@@ -108,6 +109,18 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS rejected_vars TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	for _, stmt := range []string{
+		`ALTER TABLE apps ADD COLUMN IF NOT EXISTS ci_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE apps ADD COLUMN IF NOT EXISTS ci_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE apps ADD COLUMN IF NOT EXISTS ci_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE apps ADD COLUMN IF NOT EXISTS ci_source TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE apps ADD COLUMN IF NOT EXISTS ci_pipeline_id BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE apps ADD COLUMN IF NOT EXISTS ci_checked_at TIMESTAMPTZ`,
+	} {
+		if _, err := s.pool.Exec(ctx, stmt); err != nil {
+			return err
+		}
+	}
 	if _, err := s.pool.Exec(ctx, `
 	CREATE TABLE IF NOT EXISTS app_control (
 		app_id TEXT PRIMARY KEY,
@@ -158,6 +171,28 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		result TEXT NOT NULL DEFAULT '',
 		trigger_name TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMPTZ NOT NULL
+	);
+	`); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS audit_events (
+		id BIGSERIAL PRIMARY KEY,
+		created_at TIMESTAMPTZ NOT NULL,
+		kind TEXT NOT NULL,
+		actor TEXT NOT NULL DEFAULT '',
+		app_id TEXT NOT NULL DEFAULT '',
+		app_name TEXT NOT NULL DEFAULT '',
+		repo_url TEXT NOT NULL DEFAULT '',
+		target_repo_url TEXT NOT NULL DEFAULT '',
+		git_sha TEXT NOT NULL DEFAULT '',
+		pipeline_id BIGINT NOT NULL DEFAULT 0,
+		pipeline_source TEXT NOT NULL DEFAULT '',
+		pipeline_status TEXT NOT NULL DEFAULT '',
+		pipeline_url TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		decision TEXT NOT NULL DEFAULT '',
+		details_json TEXT NOT NULL DEFAULT ''
 	);
 	`); err != nil {
 		return err
@@ -259,7 +294,13 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		COALESCE(rejected_commit, ''),
 		COALESCE(revision, ''),
 		COALESCE(last_healthy_vars, ''),
-		COALESCE(rejected_vars, '')
+		COALESCE(rejected_vars, ''),
+		COALESCE(ci_status, ''),
+		COALESCE(ci_reason, ''),
+		COALESCE(ci_url, ''),
+		COALESCE(ci_source, ''),
+		COALESCE(ci_pipeline_id, 0),
+		ci_checked_at
 	FROM apps
 	WHERE id = $1
 	`
@@ -267,6 +308,7 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 
 	var app api.App
 	var fleetSuspended, operatorSuspended bool
+	var ciChecked sql.NullTime
 	err := row.Scan(
 		&app.ID,
 		&app.Name,
@@ -293,9 +335,18 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		&app.Revision,
 		&app.LastHealthyVars,
 		&app.RejectedVars,
+		&app.CIStatus,
+		&app.CIReason,
+		&app.CIURL,
+		&app.CISource,
+		&app.CIPipelineID,
+		&ciChecked,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if ciChecked.Valid {
+		app.CICheckedAt = ciChecked.Time
 	}
 	applyRuntimeFlags(&app, fleetSuspended, operatorSuspended)
 	return &app, nil
@@ -328,7 +379,13 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(rejected_commit, ''),
 		COALESCE(revision, ''),
 		COALESCE(last_healthy_vars, ''),
-		COALESCE(rejected_vars, '')
+		COALESCE(rejected_vars, ''),
+		COALESCE(ci_status, ''),
+		COALESCE(ci_reason, ''),
+		COALESCE(ci_url, ''),
+		COALESCE(ci_source, ''),
+		COALESCE(ci_pipeline_id, 0),
+		ci_checked_at
 	FROM apps
 	`
 	rows, err := s.pool.Query(ctx, query)
@@ -341,6 +398,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 	for rows.Next() {
 		var app api.App
 		var fleetSuspended, operatorSuspended bool
+		var ciChecked sql.NullTime
 		if err := rows.Scan(
 			&app.ID,
 			&app.Name,
@@ -367,8 +425,17 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.Revision,
 			&app.LastHealthyVars,
 			&app.RejectedVars,
+			&app.CIStatus,
+			&app.CIReason,
+			&app.CIURL,
+			&app.CISource,
+			&app.CIPipelineID,
+			&ciChecked,
 		); err != nil {
 			continue
+		}
+		if ciChecked.Valid {
+			app.CICheckedAt = ciChecked.Time
 		}
 		applyRuntimeFlags(&app, fleetSuspended, operatorSuspended)
 		apps = append(apps, &app)

@@ -61,9 +61,9 @@ func TestRegistryCredsPartialIsError(t *testing.T) {
 	t.Setenv("REGISTRY_HOST", "registry.example")
 	t.Setenv("REGISTRY_USERNAME", "")
 	t.Setenv("REGISTRY_PASSWORD", "")
-	t.Setenv("CONOPS_REGISTRY_HOST", "")
-	t.Setenv("CONOPS_REGISTRY_USERNAME", "")
-	t.Setenv("CONOPS_REGISTRY_PASSWORD", "")
+	t.Setenv("TIDE_REGISTRY_HOST", "")
+	t.Setenv("TIDE_REGISTRY_USERNAME", "")
+	t.Setenv("TIDE_REGISTRY_PASSWORD", "")
 	_, _, err := RegistryCredsFromEnv()
 	if err == nil {
 		t.Fatal("partial registry env must fail")

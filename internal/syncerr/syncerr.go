@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Common error codes for alerts and cps.
+// Common error codes for alerts and tidectl.
 const (
 	CodeGitAuth            = "git_auth"
 	CodeGitFetch           = "git_fetch"

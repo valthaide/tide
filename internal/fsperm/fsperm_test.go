@@ -28,7 +28,7 @@ func TestRelaxCheckoutTreeReadableByNobody(t *testing.T) {
 	if err := RelaxCheckoutTree(repo); err != nil {
 		t.Fatal(err)
 	}
-	// TempDir parents are often 0700; make the path traversable like /opt/conops/runtime.
+	// TempDir parents are often 0700; make the path traversable like /opt/tide/runtime.
 	for d := cfg; d != "/" && d != "."; d = filepath.Dir(d) {
 		_ = os.Chmod(d, 0755)
 		if d == "/tmp" {

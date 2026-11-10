@@ -19,13 +19,14 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/valthaide/conops-private/internal/fleetcheck"
-	"github.com/valthaide/conops-private/internal/fsperm"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/redact"
-	"github.com/valthaide/conops-private/internal/repoauth"
-	"github.com/valthaide/conops-private/internal/secrets"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/fleetcheck"
+	"github.com/valthaide/tide/internal/fsperm"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/redact"
+	"github.com/valthaide/tide/internal/repoauth"
+	"github.com/valthaide/tide/internal/secrets"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 // ComposeExecutor handles Docker Compose operations.
@@ -85,7 +86,7 @@ func (s ProjectRuntimeState) IsHealthy() bool {
 // NewComposeExecutor creates a new executor.
 func NewComposeExecutor(logger *slog.Logger) *ComposeExecutor {
 	return &ComposeExecutor{
-		WorkDir: "./.conops-runtime",
+		WorkDir: envcompat.ResolveRuntimeDir(),
 		Logger:  logger,
 	}
 }
@@ -312,7 +313,7 @@ func (e *ComposeExecutor) ApplyImages(
 		pullArgs = append(pullArgs, "pull")
 
 		// The idle clock starts after a pull slot is acquired. Time spent
-		// waiting for CONOPS_PULL_PARALLEL is not pull silence.
+		// waiting for TIDE_PULL_PARALLEL is not pull silence.
 		pullCtx, pullRelease, bumpPull, waitErr := e.beginPull(callerCtx, opts.PullIdle)
 		if waitErr != nil {
 			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("waiting for pull slot: %w", waitErr)
@@ -649,7 +650,7 @@ func volumeInspectKept(raw string) bool {
 		return true
 	}
 	labels := docs[0].Labels
-	if strings.EqualFold(strings.TrimSpace(labels["com.conops.keep"]), "true") {
+	if envcompat.HasKeepLabel(labels) {
 		return true
 	}
 	if strings.EqualFold(strings.TrimSpace(labels["com.docker.compose.volume.external"]), "true") {
@@ -931,7 +932,7 @@ func (e *ComposeExecutor) handleDirtyWorktree(ctx context.Context, repoLog *stri
 
 // prepareEnvOverrides creates a compose override file with environment variables.
 // It parses the raw env content and injects it into the "environment" section of the override file.
-// This ensures that ConOps values take precedence over default values defined in the base compose file's "environment" section.
+// This ensures that Tide values take precedence over default values defined in the base compose file's "environment" section.
 func (e *ComposeExecutor) prepareEnvOverrides(appDir string, serviceEnvs map[string]string) ([]string, func(), error) {
 	if len(serviceEnvs) == 0 {
 		return nil, func() {}, nil
@@ -1377,7 +1378,7 @@ func (e *ComposeExecutor) listContainerIDsByFilter(ctx context.Context, filters 
 }
 
 func composeProjectName(appID string) string {
-	const fallback = "conops-app"
+	const fallback = "tide-app"
 	raw := strings.ToLower(strings.TrimSpace(appID))
 	if raw == "" {
 		return fallback
@@ -2009,7 +2010,7 @@ type VolumeInfo struct {
 }
 
 func policyMode() string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_POLICY_MODE"))) {
+	switch strings.ToLower(envcompat.Getenv("TIDE_POLICY_MODE")) {
 	case "warn":
 		return "warn"
 	case "enforce":

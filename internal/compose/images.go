@@ -11,18 +11,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/fleetcheck"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/redact"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/fleetcheck"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/redact"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 // ApplyOptions controls image sync for one apply.
 type ApplyOptions struct {
 	// Vars are fleet variables passed to docker compose for ${NAME}.
 	Vars map[string]string
-	// BuildMode is allowed or forbidden. Empty inherits CONOPS_BUILD.
+	// BuildMode is allowed or forbidden. Empty inherits TIDE_BUILD.
 	BuildMode string
 	// NoBuild pulls and starts containers without docker build.
 	// Health rollback sets this so a failed tag is restored without a build.
@@ -43,7 +44,7 @@ type ApplyOptions struct {
 	BindPrefixes []string
 	// AllowedRegistries, when non-empty, rejects images from other registries.
 	AllowedRegistries []string
-	// PolicyExceptions are honored only while CONOPS_POLICY_MODE=warn.
+	// PolicyExceptions are honored only while TIDE_POLICY_MODE=warn.
 	PolicyExceptions []deploypolicy.PolicyException
 	// ForeignPorts maps a published host port to the app or container that owns it.
 	ForeignPorts map[int]string
@@ -95,7 +96,7 @@ var (
 func resolveBuild(opts ApplyOptions) (mode string, noBuild bool) {
 	mode = strings.ToLower(strings.TrimSpace(opts.BuildMode))
 	if mode == "" {
-		mode = strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_BUILD")))
+		mode = strings.ToLower(envcompat.Getenv("TIDE_BUILD"))
 	}
 	if mode != deploypolicy.BuildForbidden {
 		mode = deploypolicy.BuildAllowed
@@ -429,7 +430,7 @@ func (e *ComposeExecutor) prepareImageSync(
 	if !configured {
 		return prep, nil
 	}
-	dir, err := os.MkdirTemp("", "conops-docker-config-")
+	dir, err := os.MkdirTemp("", "tide-docker-config-")
 	if err != nil {
 		return imagePrep{}, fmt.Errorf("registry config dir: %w", err)
 	}

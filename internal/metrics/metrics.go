@@ -2,17 +2,19 @@ package metrics
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/valthaide/conops-private/internal/giterr"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/giterr"
+	"github.com/valthaide/tide/internal/gitrev"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
-const namespace = "conops"
+const namespace = "tide"
 
 // AppSnapshot is the app state exposed to Prometheus gauges.
 type AppSnapshot struct {
@@ -132,7 +134,7 @@ var (
 	FleetHostFileMissing = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "fleet_host_file_missing",
-		Help:      "1 while hosts/<CONOPS_FLEET_HOST>.yaml is absent from the fleet git checkout.",
+		Help:      "1 while hosts/<TIDE_FLEET_HOST>.yaml is absent from the fleet git checkout.",
 	})
 
 	AppReloadsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -197,11 +199,11 @@ var (
 		Help:      "Running digest differs from the pinned digest (1=drift).",
 	}, []string{"app", "service"})
 
-	fleetRevisionInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	fleetRevisionInfo = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "fleet_revision_info",
-		Help:      "Fleet checkout revision (value always 1).",
-	}, []string{"sha"})
+		Help:      "1 when a fleet checkout revision has been observed (SHA is omitted from labels).",
+	})
 
 	appVarsInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
@@ -236,13 +238,13 @@ var (
 	ImageGCRemoved = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "image_gc_removed_total",
-		Help:      "Images removed by ConOps image GC.",
+		Help:      "Images removed by Tide image GC.",
 	})
 
 	VolumesCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "volumes_created_total",
-		Help:      "External volumes created by ConOps.",
+		Help:      "External volumes created by Tide.",
 	}, []string{"volume"})
 
 	ReconcileTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -314,7 +316,7 @@ type ImageSample struct {
 
 var imageMu sync.Mutex
 
-// SetAppImages replaces conops_app_image_info with the images that are running now.
+// SetAppImages replaces tide_app_image_info with the images that are running now.
 func SetAppImages(samples []ImageSample) {
 	imageMu.Lock()
 	defer imageMu.Unlock()
@@ -363,9 +365,10 @@ func SetFleetRevision(sha string) {
 	fleetMu.Lock()
 	fleetSHA = sha
 	fleetMu.Unlock()
-	fleetRevisionInfo.Reset()
 	if sha != "" {
-		fleetRevisionInfo.WithLabelValues(sha).Set(1)
+		fleetRevisionInfo.Set(1)
+	} else {
+		fleetRevisionInfo.Set(0)
 	}
 }
 
@@ -425,9 +428,15 @@ func SetQueueOldest(wait time.Duration) {
 	QueueOldest.Set(wait.Seconds())
 }
 
-// SetQueueAppWaits replaces per-app queue waits. Apps that left the queue disappear.
-func SetQueueAppWaits(waits map[string]time.Duration) {
+// SetQueueAppWaits replaces per-app queue waits. When allApps is provided, idle apps emit 0.
+func SetQueueAppWaits(waits map[string]time.Duration, allApps ...string) {
 	QueueAppWait.Reset()
+	for _, name := range allApps {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			QueueAppWait.WithLabelValues(name).Set(0)
+		}
+	}
 	for app, wait := range waits {
 		app = strings.TrimSpace(app)
 		if app == "" {
@@ -620,13 +629,13 @@ func newAppsCollector(lister AppLister) *appsCollector {
 		rolledBackDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "app_rolled_back"),
 			"1 while a failed revision was rolled back and the last healthy revision is running.",
-			[]string{"app", "failed_revision", "running_revision", "reason"},
+			[]string{"app", "reason"},
 			nil,
 		),
 		revisionDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "app_revision"),
-			"Requested revision and the commit currently deployed (value always 1).",
-			[]string{"app", "ref", "sha"},
+			"Requested revision ref for the app (value always 1; commit SHAs are never placed in labels).",
+			[]string{"app", "ref"},
 			nil,
 		),
 		imageNotFoundDesc: prometheus.NewDesc(
@@ -707,23 +716,22 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.imageNotFoundDesc, prometheus.GaugeValue, snapshotImageNotFound(app), appLabel)
 
 		ref := strings.TrimSpace(app.Revision)
+		if gitrev.IsFullSHA(ref) || looksLikeHexSHA(ref) {
+			ref = "pinned"
+		}
 		if ref == "" {
 			ref = strings.TrimSpace(app.Branch)
 		}
 		if ref == "" {
 			ref = "main"
 		}
-		sha := strings.TrimSpace(app.LastSyncedCommit)
-		if sha == "" {
-			sha = strings.TrimSpace(app.LastSeenCommit)
-		}
-		ch <- prometheus.MustNewConstMetric(c.revisionDesc, prometheus.GaugeValue, 1, appLabel, ref, sha)
+		ch <- prometheus.MustNewConstMetric(c.revisionDesc, prometheus.GaugeValue, 1, appLabel, ref)
 
 		rejected := strings.TrimSpace(app.RejectedCommit)
 		healthy := strings.TrimSpace(app.LastHealthyCommit)
 		seen := strings.TrimSpace(app.LastSeenCommit)
 		if rejected != "" && healthy != "" && seen == rejected && strings.TrimSpace(app.LastSyncedCommit) == healthy {
-			ch <- prometheus.MustNewConstMetric(c.rolledBackDesc, prometheus.GaugeValue, 1, appLabel, rejected, healthy, rollbackReasonLabel(app.LastSyncError))
+			ch <- prometheus.MustNewConstMetric(c.rolledBackDesc, prometheus.GaugeValue, 1, appLabel, rollbackReasonLabel(app.LastSyncError))
 		}
 
 		var drift float64
@@ -804,7 +812,7 @@ func SetEnvDrift(app string, drifted bool) {
 	envDrift.WithLabelValues(app).Set(v)
 }
 
-// ObserveVolumeCreated counts one external volume ConOps created.
+// ObserveVolumeCreated counts one external volume Tide created.
 func ObserveVolumeCreated(name string) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -898,8 +906,39 @@ func rollbackReasonLabel(msg string) string {
 	return "health_timeout"
 }
 
+var (
+	metricPipelineIDRe = regexp.MustCompile(`(?i)\b(pipeline[\s_]*id|job[\s_]*id)\s*[=:]\s*\d+`)
+	metricUserRe       = regexp.MustCompile(`(?i)\b(user|user_id|actor|triggered_by)\s*[=:]\s*[^\s,;)]+`)
+	metricHexSHARe     = regexp.MustCompile(`\b[0-9a-fA-F]{7,64}\b`)
+)
+
+func looksLikeHexSHA(token string) bool {
+	if len(token) == 40 || len(token) == 64 {
+		return metricHexSHARe.MatchString(token)
+	}
+	if len(token) < 7 || len(token) > 64 || !metricHexSHARe.MatchString(token) {
+		return false
+	}
+	hasDigit := false
+	for _, r := range token {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			break
+		}
+	}
+	return hasDigit
+}
+
 func metricErrorText(msg string) string {
 	msg = strings.Join(strings.Fields(msg), " ")
+	msg = metricPipelineIDRe.ReplaceAllString(msg, "$1=redacted")
+	msg = metricUserRe.ReplaceAllString(msg, "$1=redacted")
+	msg = metricHexSHARe.ReplaceAllStringFunc(msg, func(tok string) string {
+		if looksLikeHexSHA(tok) {
+			return "<sha>"
+		}
+		return tok
+	})
 	if len(msg) > 180 {
 		msg = msg[:180]
 	}
@@ -1013,7 +1052,7 @@ func ObserveGitFetch(repo string, err error) {
 	}
 }
 
-// SetLastSyncTimestamp sets conops_last_sync_timestamp_seconds{app}.
+// SetLastSyncTimestamp sets tide_last_sync_timestamp_seconds{app}.
 func SetLastSyncTimestamp(app string) {
 	app = strings.TrimSpace(app)
 	if app == "" {
@@ -1036,7 +1075,7 @@ func repoLabel(raw string) string {
 	return raw
 }
 
-// SetFleetHostFileMissing sets conops_fleet_host_file_missing.
+// SetFleetHostFileMissing sets tide_fleet_host_file_missing.
 func SetFleetHostFileMissing(missing bool) {
 	if missing {
 		FleetHostFileMissing.Set(1)
@@ -1045,7 +1084,7 @@ func SetFleetHostFileMissing(missing bool) {
 	FleetHostFileMissing.Set(0)
 }
 
-// SetBuildInfo sets conops_build_info{version=...} 1.
+// SetBuildInfo sets tide_build_info{version=...} 1.
 func SetBuildInfo(version string) {
 	version = strings.TrimSpace(version)
 	if version == "" {

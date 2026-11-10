@@ -11,7 +11,7 @@ import (
 )
 
 func TestUpdateRepoResetsDirtyWorktree(t *testing.T) {
-	t.Setenv("CONOPS_DIRTY_WORKTREE", "refuse")
+	t.Setenv("TIDE_DIRTY_WORKTREE", "refuse")
 	origin := t.TempDir()
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -90,7 +90,7 @@ func TestUpdateRepoResetsFileMode(t *testing.T) {
 }
 
 func TestUpdateRepoResetDirtyWorktree(t *testing.T) {
-	t.Setenv("CONOPS_DIRTY_WORKTREE", "reset")
+	t.Setenv("TIDE_DIRTY_WORKTREE", "reset")
 	origin := t.TempDir()
 	run := func(dir string, args ...string) {
 		t.Helper()

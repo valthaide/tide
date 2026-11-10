@@ -3,14 +3,13 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/imagegc"
-	"github.com/valthaide/conops-private/internal/metrics"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/imagegc"
+	"github.com/valthaide/tide/internal/metrics"
 )
 
 func (r *Reconciler) maybeGC() {
@@ -35,7 +34,7 @@ func (r *Reconciler) gcDue() bool {
 		return true
 	}
 	interval := time.Hour
-	if raw := strings.TrimSpace(os.Getenv("CONOPS_IMAGE_GC_INTERVAL")); raw != "" {
+	if raw := envcompat.Getenv("TIDE_IMAGE_GC_INTERVAL"); raw != "" {
 		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
 			interval = parsed
 		}
@@ -50,16 +49,16 @@ func (r *Reconciler) gcDue() bool {
 }
 
 func imageGCEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("CONOPS_IMAGE_GC")), "on")
+	return strings.EqualFold(envcompat.Getenv("TIDE_IMAGE_GC"), "on")
 }
 
 func imageGCDry() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("CONOPS_IMAGE_GC_DRY_RUN")), "true")
+	return strings.EqualFold(envcompat.Getenv("TIDE_IMAGE_GC_DRY_RUN"), "true")
 }
 
 func imageGCKeep() int {
 	keep := 3
-	if raw := strings.TrimSpace(os.Getenv("CONOPS_IMAGE_GC_KEEP")); raw != "" {
+	if raw := envcompat.Getenv("TIDE_IMAGE_GC_KEEP"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			keep = n
 		}
@@ -69,7 +68,7 @@ func imageGCKeep() int {
 
 func imageGCMinAge() time.Duration {
 	age := 72 * time.Hour
-	if raw := strings.TrimSpace(os.Getenv("CONOPS_IMAGE_GC_MIN_AGE")); raw != "" {
+	if raw := envcompat.Getenv("TIDE_IMAGE_GC_MIN_AGE"); raw != "" {
 		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
 			age = parsed
 		}
@@ -78,7 +77,7 @@ func imageGCMinAge() time.Duration {
 }
 
 func diskAboveGCThreshold() bool {
-	raw := strings.TrimSpace(os.Getenv("CONOPS_IMAGE_GC_DISK_PCT"))
+	raw := envcompat.Getenv("TIDE_IMAGE_GC_DISK_PCT")
 	if raw == "" {
 		return false
 	}
@@ -86,16 +85,12 @@ func diskAboveGCThreshold() bool {
 	if err != nil || pct <= 0 {
 		return false
 	}
-	path := strings.TrimSpace(os.Getenv("CONOPS_IMAGE_GC_DISK_PATH"))
+	path := envcompat.Getenv("TIDE_IMAGE_GC_DISK_PATH")
 	if path == "" {
 		path = "/var/lib/docker"
 	}
-	var st syscall.Statfs_t
-	if syscall.Statfs(path, &st) != nil || st.Blocks == 0 {
-		return false
-	}
-	used := int((st.Blocks - st.Bavail) * 100 / st.Blocks)
-	return used >= pct
+	used, ok := diskUsagePct(path)
+	return ok && used >= pct
 }
 
 type imageLister interface {
@@ -103,7 +98,7 @@ type imageLister interface {
 	RemoveImage(ctx context.Context, id string) error
 }
 
-// RunImageGC removes unused ConOps images that are older than the minimum age and not in the kept revisions.
+// RunImageGC removes unused Tide images that are older than the minimum age and not in the kept revisions.
 func RunImageGC(reg *Registry, exec interface{}, dry bool) ([]imagegc.Image, error) {
 	lister, ok := exec.(imageLister)
 	if !ok || reg == nil {

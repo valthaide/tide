@@ -10,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
-const EncryptionKeyEnv = "CONOPS_ENCRYPTION_KEY"
-const EncryptionKeyFileEnv = "CONOPS_ENCRYPTION_KEY_FILE"
+const EncryptionKeyEnv = "TIDE_ENCRYPTION_KEY"
+const EncryptionKeyFileEnv = "TIDE_ENCRYPTION_KEY_FILE"
 
 // Service encrypts/decrypts sensitive values for at-rest storage.
 type Service struct {
@@ -23,10 +25,10 @@ type Service struct {
 
 // NewServiceFromEnv initializes the encryption service.
 // Priority:
-// 1. CONOPS_ENCRYPTION_KEY (raw/base64, 32 bytes)
-// 2. Key file (CONOPS_ENCRYPTION_KEY_FILE or default path), auto-generated on first run.
+// 1. TIDE_ENCRYPTION_KEY (raw/base64, 32 bytes)
+// 2. Key file (TIDE_ENCRYPTION_KEY_FILE or default path), auto-generated on first run.
 func NewServiceFromEnv(defaultKeyPath string) (*Service, error) {
-	raw := strings.TrimSpace(os.Getenv(EncryptionKeyEnv))
+	raw := envcompat.Getenv(EncryptionKeyEnv)
 	if raw != "" {
 		key, err := parseKey(raw, EncryptionKeyEnv)
 		if err != nil {
@@ -35,7 +37,7 @@ func NewServiceFromEnv(defaultKeyPath string) (*Service, error) {
 		return newServiceWithKey(key, "env:"+EncryptionKeyEnv)
 	}
 
-	keyPath := strings.TrimSpace(os.Getenv(EncryptionKeyFileEnv))
+	keyPath := envcompat.Getenv(EncryptionKeyFileEnv)
 	if keyPath == "" {
 		keyPath = defaultKeyPath
 	}

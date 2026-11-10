@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 )
 
 func (s *PostgresStore) InsertAppRevision(ctx context.Context, rev api.Revision) error {

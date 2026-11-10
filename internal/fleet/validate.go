@@ -9,11 +9,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/valthaide/conops-private/internal/compose"
-	"github.com/valthaide/conops-private/internal/fleetcheck"
+	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/fleetcheck"
 )
 
-// Report is the result of cps validate.
+// Report is the result of tidectl validate.
 type Report struct {
 	OK      bool               `json:"ok"`
 	Issues  []fleetcheck.Issue `json:"issues"`

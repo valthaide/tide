@@ -1,34 +1,35 @@
-version: '3.8'
+name: tide
 
 services:
-  conops:
-    image: conops:latest
-    container_name: conops
+  tide:
+    image: ghcr.io/valthaide/tide:latest
+    container_name: tide
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8443:8443"
+      - "127.0.0.1:8081:8081"
     environment:
       DB_TYPE: postgres
-      DB_CONNECTION_STRING: postgres://conops:password@postgres:5432/conops?sslmode=disable
-      CONOPS_RUNTIME_DIR: /tmp/conops-runtime
+      DB_CONNECTION_STRING: postgres://tide:password@postgres:5432/tide?sslmode=disable
+      TIDE_RUNTIME_DIR: /tmp/tide-runtime
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /tmp/conops-runtime:/tmp/conops-runtime
-      - conops_data:/data
+      - /tmp/tide-runtime:/tmp/tide-runtime
+      - tide_data:/data
     depends_on:
       - postgres
     restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
-    container_name: conops-postgres
+    container_name: tide-postgres
     environment:
-      POSTGRES_USER: conops
+      POSTGRES_USER: tide
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: conops
+      POSTGRES_DB: tide
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
 volumes:
-  conops_data:
+  tide_data:
   postgres_data:

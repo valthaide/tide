@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 )
 
 func TestQueueOrdersManualBeforePeriodic(t *testing.T) {
@@ -27,11 +27,11 @@ func TestQueueOrdersManualBeforePeriodic(t *testing.T) {
 }
 
 func TestAppReconcileIntervalRejectsShort(t *testing.T) {
-	t.Setenv("CONOPS_APP_RECONCILE_INTERVAL", "10s")
+	t.Setenv("TIDE_APP_RECONCILE_INTERVAL", "10s")
 	if _, err := LoadReconcilerConfigFromEnv(); err == nil {
 		t.Fatal("expected short interval to be rejected")
 	}
-	t.Setenv("CONOPS_APP_RECONCILE_INTERVAL", "off")
+	t.Setenv("TIDE_APP_RECONCILE_INTERVAL", "off")
 	cfg, err := LoadReconcilerConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)

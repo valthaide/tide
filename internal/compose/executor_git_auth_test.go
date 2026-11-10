@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/valthaide/conops-private/internal/repoauth"
+	"github.com/valthaide/tide/internal/repoauth"
 )
 
 func TestBuildGitAuthTokenKeepsCleanURL(t *testing.T) {

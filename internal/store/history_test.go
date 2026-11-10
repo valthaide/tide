@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 )
 
 func TestRevisionHistoryKeepsFive(t *testing.T) {

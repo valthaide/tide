@@ -9,15 +9,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/credentials"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/fleetcheck"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/redact"
-	"github.com/valthaide/conops-private/internal/repoauth"
-	"github.com/valthaide/conops-private/internal/store"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/credentials"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/fleetcheck"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/redact"
+	"github.com/valthaide/tide/internal/repoauth"
+	"github.com/valthaide/tide/internal/store"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 // App is aliased to api.App for compatibility, though we should prefer api.App.
@@ -384,7 +384,7 @@ func (r *Registry) GetDeployKey(id string) ([]byte, error) {
 }
 
 // ClearRepoSecret removes stored deploy key / git token ciphertext (keeps env credentials).
-// Used for fleet-managed token apps that must read CONOPS_GIT_TOKEN from the process env.
+// Used for fleet-managed token apps that must read TIDE_GIT_TOKEN from the process env.
 func (r *Registry) ClearRepoSecret(id string) error {
 	return r.store.ClearAppRepoSecret(context.Background(), id)
 }
@@ -741,6 +741,58 @@ func (r *Registry) ListRevisions(id string, limit int) ([]api.Revision, error) {
 		return nil, fmt.Errorf("app not found")
 	}
 	return r.store.ListAppRevisions(context.Background(), id, limit)
+}
+
+// UpdateRepository updates repository source metadata in-place without changing the app ID or compose project.
+func (r *Registry) UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath string) error {
+	if r == nil || r.store == nil || strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	return r.store.UpdateAppRepository(
+		context.Background(),
+		id,
+		strings.TrimSpace(repoURL),
+		repoauth.NormalizeMethod(repoAuthMethod),
+		strings.TrimSpace(branch),
+		strings.TrimSpace(revision),
+		strings.TrimSpace(composePath),
+	)
+}
+
+// UpdateCIStatus persists the latest CI gate check state for status inspection.
+func (r *Registry) UpdateCIStatus(id, ciStatus, ciReason, ciURL, ciSource string, ciPipelineID int64, checkedAt time.Time) error {
+	if r == nil || r.store == nil || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	return r.store.UpdateAppCIStatus(
+		context.Background(),
+		id,
+		strings.TrimSpace(ciStatus),
+		strings.TrimSpace(ciReason),
+		strings.TrimSpace(ciURL),
+		strings.TrimSpace(ciSource),
+		ciPipelineID,
+		checkedAt,
+	)
+}
+
+// RecordAudit writes a permanent security/operational audit record.
+func (r *Registry) RecordAudit(event api.AuditEvent) error {
+	if r == nil || r.store == nil {
+		return fmt.Errorf("audit store unavailable")
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	return r.store.InsertAuditEvent(context.Background(), event)
+}
+
+// ListAudit returns audit records newest-first (for one app when appID is non-empty, or across all apps).
+func (r *Registry) ListAudit(appID string, limit int) ([]api.AuditEvent, error) {
+	if r == nil || r.store == nil {
+		return nil, fmt.Errorf("audit store unavailable")
+	}
+	return r.store.ListAuditEvents(context.Background(), appID, limit)
 }
 
 func zeroBytes(value []byte) {

@@ -11,19 +11,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
-// Mode values for CONOPS_MODE.
+// Mode values for TIDE_MODE.
 const (
 	ModeStandalone = "standalone"
 	ModeAgent      = "agent"
 	ModeHub        = "hub"
 )
 
-// ResolveMode returns CONOPS_MODE or standalone.
+// ResolveMode returns TIDE_MODE or standalone.
 func ResolveMode() string {
-	m := strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_MODE")))
+	m := strings.ToLower(envcompat.Getenv("TIDE_MODE"))
 	switch m {
 	case ModeAgent, ModeHub, ModeStandalone:
 		return m
@@ -66,26 +67,23 @@ type Reporter struct {
 	Client   *http.Client
 }
 
-// NewReporterFromEnv builds an agent reporter when CONOPS_HUB_URL is set.
+// NewReporterFromEnv builds an agent reporter when TIDE_HUB_URL is set.
 func NewReporterFromEnv(apps AppLister, version string, logger *slog.Logger) *Reporter {
-	hub := strings.TrimRight(strings.TrimSpace(os.Getenv("CONOPS_HUB_URL")), "/")
+	hub := strings.TrimRight(envcompat.Getenv("TIDE_HUB_URL"), "/")
 	if hub == "" {
 		return nil
 	}
-	host := strings.TrimSpace(os.Getenv("CONOPS_AGENT_HOST"))
+	host := envcompat.Getenv("TIDE_AGENT_HOST")
 	if host == "" {
 		host, _ = os.Hostname()
 	}
 	interval := 30 * time.Second
-	if v := strings.TrimSpace(os.Getenv("CONOPS_AGENT_INTERVAL")); v != "" {
+	if v := envcompat.Getenv("TIDE_AGENT_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			interval = d
 		}
 	}
-	token := strings.TrimSpace(os.Getenv("CONOPS_HUB_TOKEN"))
-	if token == "" {
-		token = strings.TrimSpace(os.Getenv("CONOPS_API_TOKEN"))
-	}
+	token := envcompat.FirstEnv("TIDE_HUB_TOKEN", "TIDE_API_TOKEN")
 	return &Reporter{
 		HubURL:   hub,
 		Token:    token,

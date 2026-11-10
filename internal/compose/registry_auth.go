@@ -2,11 +2,11 @@ package compose
 
 import (
 	"fmt"
-	"os"
-	"strings"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
-// RegistryCreds is the registry login puppet passes into the process environment.
+// RegistryCreds is the registry login passed into the process environment.
 type RegistryCreds struct {
 	Host     string
 	Username string
@@ -14,12 +14,12 @@ type RegistryCreds struct {
 }
 
 // RegistryCredsFromEnv reads REGISTRY_HOST, REGISTRY_USERNAME and REGISTRY_PASSWORD.
-// CONOPS_REGISTRY_* is accepted as an alias. All empty means login is not configured.
+// TIDE_REGISTRY_* is accepted as an alias. All empty means login is not configured.
 // A partial set is an error.
 func RegistryCredsFromEnv() (RegistryCreds, bool, error) {
-	host := firstEnv("REGISTRY_HOST", "CONOPS_REGISTRY_HOST")
-	user := firstEnv("REGISTRY_USERNAME", "CONOPS_REGISTRY_USERNAME")
-	pass := firstEnv("REGISTRY_PASSWORD", "CONOPS_REGISTRY_PASSWORD")
+	host := envcompat.FirstEnv("REGISTRY_HOST", "TIDE_REGISTRY_HOST")
+	user := envcompat.FirstEnv("REGISTRY_USERNAME", "TIDE_REGISTRY_USERNAME")
+	pass := envcompat.FirstEnv("REGISTRY_PASSWORD", "TIDE_REGISTRY_PASSWORD")
 	if host == "" && user == "" && pass == "" {
 		return RegistryCreds{}, false, nil
 	}
@@ -27,13 +27,4 @@ func RegistryCredsFromEnv() (RegistryCreds, bool, error) {
 		return RegistryCreds{}, true, fmt.Errorf("registry_auth")
 	}
 	return RegistryCreds{Host: host, Username: user, Password: pass}, true, nil
-}
-
-func firstEnv(keys ...string) string {
-	for _, key := range keys {
-		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-			return v
-		}
-	}
-	return ""
 }

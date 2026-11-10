@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/compose"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 func (r *Reconciler) forcing(id string) bool {

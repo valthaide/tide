@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/deploypolicy"
 )
 
 func TestWatchFilesHashDirectoryChange(t *testing.T) {

@@ -2,9 +2,9 @@ package pollinterval
 
 import (
 	"math/rand/v2"
-	"os"
-	"strings"
 	"time"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
 const (
@@ -13,18 +13,18 @@ const (
 )
 
 // AppDefault is the poll interval used when an app does not set poll_interval.
-// CONOPS_POLL_INTERVAL overrides it. The built-in default is under 60s.
+// TIDE_POLL_INTERVAL overrides it. The built-in default is under 60s.
 func AppDefault() time.Duration {
-	if d, ok := parseEnv("CONOPS_POLL_INTERVAL"); ok {
+	if d, ok := parseEnv("TIDE_POLL_INTERVAL"); ok {
 		return d
 	}
 	return defaultApp
 }
 
 // Jitter is the extra random delay added to each poll.
-// CONOPS_POLL_JITTER overrides it. Zero disables the spread.
+// TIDE_POLL_JITTER overrides it. Zero disables the spread.
 func Jitter() time.Duration {
-	v := strings.TrimSpace(os.Getenv("CONOPS_POLL_JITTER"))
+	v := envcompat.Getenv("TIDE_POLL_JITTER")
 	if v == "" {
 		return defaultJitter
 	}
@@ -48,7 +48,7 @@ func WithJitter(base time.Duration) time.Duration {
 }
 
 func parseEnv(key string) (time.Duration, bool) {
-	v := strings.TrimSpace(os.Getenv(key))
+	v := envcompat.Getenv(key)
 	if v == "" {
 		return 0, false
 	}

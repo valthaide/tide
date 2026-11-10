@@ -12,14 +12,14 @@ import (
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/cigate"
-	"github.com/valthaide/conops-private/internal/compose"
-	"github.com/valthaide/conops-private/internal/credentials"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/store"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/cigate"
+	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/credentials"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/store"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 type fakeRuntime struct {
@@ -321,9 +321,9 @@ func TestReconcileSkipsWithoutSeenCommit(t *testing.T) {
 }
 
 func TestLoadReconcilerConfigFromEnv(t *testing.T) {
-	t.Setenv("CONOPS_RECONCILE_INTERVAL", "15s")
-	t.Setenv("CONOPS_SYNC_TIMEOUT", "2m")
-	t.Setenv("CONOPS_RETRY_ERRORS", "true")
+	t.Setenv("TIDE_RECONCILE_INTERVAL", "15s")
+	t.Setenv("TIDE_SYNC_TIMEOUT", "2m")
+	t.Setenv("TIDE_RETRY_ERRORS", "true")
 	cfg, err := LoadReconcilerConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
@@ -730,7 +730,7 @@ func (s *scriptGate) CheckCommit(context.Context, string, string) cigate.Result 
 	return s.results[i]
 }
 
-// CI finishes in the moment ConOps starts waiting. The next reconcile deploys.
+// CI finishes in the moment Tide starts waiting. The next reconcile deploys.
 // It must not sit in syncing until the sync-timeout recovery.
 func TestCISuccessOnNextCycleAfterWait(t *testing.T) {
 	reg := testRegistry(t)

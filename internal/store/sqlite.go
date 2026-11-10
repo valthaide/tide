@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 )
 
@@ -108,6 +108,18 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "rejected_vars TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	for _, col := range []string{
+		"ci_status TEXT NOT NULL DEFAULT ''",
+		"ci_reason TEXT NOT NULL DEFAULT ''",
+		"ci_url TEXT NOT NULL DEFAULT ''",
+		"ci_source TEXT NOT NULL DEFAULT ''",
+		"ci_pipeline_id INTEGER NOT NULL DEFAULT 0",
+		"ci_checked_at DATETIME",
+	} {
+		if err := addSQLiteColumnIfMissing(db, "apps", col); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS app_control (
 		app_id TEXT PRIMARY KEY,
@@ -162,6 +174,28 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	);
 	`); err != nil {
 		return nil, fmt.Errorf("failed to create deploy_events table: %w", err)
+	}
+	if _, err := db.Exec(`
+	CREATE TABLE IF NOT EXISTS audit_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at DATETIME NOT NULL,
+		kind TEXT NOT NULL,
+		actor TEXT NOT NULL DEFAULT '',
+		app_id TEXT NOT NULL DEFAULT '',
+		app_name TEXT NOT NULL DEFAULT '',
+		repo_url TEXT NOT NULL DEFAULT '',
+		target_repo_url TEXT NOT NULL DEFAULT '',
+		git_sha TEXT NOT NULL DEFAULT '',
+		pipeline_id INTEGER NOT NULL DEFAULT 0,
+		pipeline_source TEXT NOT NULL DEFAULT '',
+		pipeline_status TEXT NOT NULL DEFAULT '',
+		pipeline_url TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		decision TEXT NOT NULL DEFAULT '',
+		details_json TEXT NOT NULL DEFAULT ''
+	);
+	`); err != nil {
+		return nil, fmt.Errorf("failed to create audit_events table: %w", err)
 	}
 
 	credentialsQuery := `
@@ -265,12 +299,19 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		COALESCE(rejected_commit, ''),
 		COALESCE(revision, ''),
 		COALESCE(last_healthy_vars, ''),
-		COALESCE(rejected_vars, '')
+		COALESCE(rejected_vars, ''),
+		COALESCE(ci_status, ''),
+		COALESCE(ci_reason, ''),
+		COALESCE(ci_url, ''),
+		COALESCE(ci_source, ''),
+		COALESCE(ci_pipeline_id, 0),
+		ci_checked_at
 	FROM apps
 	WHERE id = ?
 	`
 	var app api.App
 	var suspended, operatorSuspended int
+	var ciChecked sql.NullTime
 	err := retryLock(ctx, func() error {
 		row := s.db.QueryRowContext(ctx, query, id)
 		return row.Scan(
@@ -299,10 +340,19 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 			&app.Revision,
 			&app.LastHealthyVars,
 			&app.RejectedVars,
+			&app.CIStatus,
+			&app.CIReason,
+			&app.CIURL,
+			&app.CISource,
+			&app.CIPipelineID,
+			&ciChecked,
 		)
 	})
 	if err != nil {
 		return nil, err
+	}
+	if ciChecked.Valid {
+		app.CICheckedAt = ciChecked.Time
 	}
 	applyRuntimeFlags(&app, suspended != 0, operatorSuspended != 0)
 	return &app, nil
@@ -335,7 +385,13 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(rejected_commit, ''),
 		COALESCE(revision, ''),
 		COALESCE(last_healthy_vars, ''),
-		COALESCE(rejected_vars, '')
+		COALESCE(rejected_vars, ''),
+		COALESCE(ci_status, ''),
+		COALESCE(ci_reason, ''),
+		COALESCE(ci_url, ''),
+		COALESCE(ci_source, ''),
+		COALESCE(ci_pipeline_id, 0),
+		ci_checked_at
 	FROM apps
 	`
 	rows, err := s.queryContext(ctx, query)
@@ -348,6 +404,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 	for rows.Next() {
 		var app api.App
 		var suspended, operatorSuspended int
+		var ciChecked sql.NullTime
 		if err := rows.Scan(
 			&app.ID,
 			&app.Name,
@@ -374,8 +431,17 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.Revision,
 			&app.LastHealthyVars,
 			&app.RejectedVars,
+			&app.CIStatus,
+			&app.CIReason,
+			&app.CIURL,
+			&app.CISource,
+			&app.CIPipelineID,
+			&ciChecked,
 		); err != nil {
 			continue
+		}
+		if ciChecked.Valid {
+			app.CICheckedAt = ciChecked.Time
 		}
 		applyRuntimeFlags(&app, suspended != 0, operatorSuspended != 0)
 		apps = append(apps, &app)

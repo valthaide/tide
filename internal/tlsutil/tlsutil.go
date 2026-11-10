@@ -11,14 +11,15 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
 // ResolveCertPaths returns TLS cert/key paths from env or dataDir/tls/.
 func ResolveCertPaths(dataDir string) (certFile, keyFile string) {
-	certFile = strings.TrimSpace(os.Getenv("CONOPS_TLS_CERT"))
-	keyFile = strings.TrimSpace(os.Getenv("CONOPS_TLS_KEY"))
+	certFile = envcompat.Getenv("TIDE_TLS_CERT")
+	keyFile = envcompat.Getenv("TIDE_TLS_KEY")
 	if certFile != "" && keyFile != "" {
 		return certFile, keyFile
 	}
@@ -51,7 +52,7 @@ func EnsureServerCert(dataDir string) (certFile, keyFile string, err error) {
 	host, _ := os.Hostname()
 	template := x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{Organization: []string{"ConOps"}, CommonName: host},
+		Subject:      pkix.Name{Organization: []string{"Tide"}, CommonName: host},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

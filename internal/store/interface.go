@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 )
 
 var ErrCredentialNotFound = errors.New("app credential not found")
@@ -17,6 +17,8 @@ type Store interface {
 	ListApps(ctx context.Context) ([]*api.App, error)
 	DeleteApp(ctx context.Context, id string) error
 	UpdateApp(ctx context.Context, id, name, branch, composePath, pollInterval string) error
+	UpdateAppRepository(ctx context.Context, id, repoURL, repoAuthMethod, branch, revision, composePath string) error
+	UpdateAppCIStatus(ctx context.Context, id, ciStatus, ciReason, ciURL, ciSource string, ciPipelineID int64, checkedAt time.Time) error
 	SetAppSuspended(ctx context.Context, id string, suspended bool) error
 	SetAppRevision(ctx context.Context, id, revision string) error
 	SetOperatorSuspended(ctx context.Context, id string, suspended bool) error
@@ -48,6 +50,8 @@ type Store interface {
 	ListAppRevisions(ctx context.Context, appID string, limit int) ([]api.Revision, error)
 	InsertDeployEvent(ctx context.Context, event api.DeployEvent) error
 	ListDeployEvents(ctx context.Context, appID string, limit int) ([]api.DeployEvent, error)
+	InsertAuditEvent(ctx context.Context, event api.AuditEvent) error
+	ListAuditEvents(ctx context.Context, appID string, limit int) ([]api.AuditEvent, error)
 	BumpDesiredGeneration(ctx context.Context, id string) (int64, error)
 	DesiredGeneration(ctx context.Context, id string) (int64, error)
 	SetRetryState(ctx context.Context, id string, attempt int, next time.Time) error

@@ -1,4 +1,4 @@
-module github.com/valthaide/conops-private
+module github.com/valthaide/tide
 
 go 1.25.5
 

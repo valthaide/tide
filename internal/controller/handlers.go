@@ -3,23 +3,26 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/cigate"
-	"github.com/valthaide/conops-private/internal/compose"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/fleetcheck"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/redact"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/apiauth"
+	"github.com/valthaide/tide/internal/cigate"
+	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/fleetcheck"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/redact"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 type registerAppRequest struct {
@@ -425,9 +428,9 @@ func (h *Handler) DeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	message := "App deleted successfully. Named volumes were kept. To remove them, set prune_volumes: true, wait until it is applied, then delete. Volumes labeled com.conops.keep are never removed."
+	message := "App deleted successfully. Named volumes were kept. To remove them, set prune_volumes: true, wait until it is applied, then delete. Volumes labeled com.tide.keep are never removed."
 	if app.Policy().PruneVolumes {
-		message = "App deleted successfully. Named volumes without com.conops.keep were removed. External volumes and com.conops.keep volumes were kept."
+		message = "App deleted successfully. Named volumes without com.tide.keep were removed. External volumes and com.tide.keep volumes were kept."
 	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(api.APIResponse{
@@ -599,7 +602,7 @@ func (h *Handler) ForceSyncApp(w http.ResponseWriter, r *http.Request) {
 }
 
 // RetryApp handles POST /api/v1/apps/{id}/retry.
-// It puts one app back on the work queue without restarting ConOps.
+// It puts one app back on the work queue without restarting Tide and does not bypass the CI gate.
 func (h *Handler) RetryApp(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	app, err := h.Registry.Get(id)
@@ -629,6 +632,14 @@ func (h *Handler) RetryApp(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(api.APIResponse{Message: "retry queued", Data: app})
 }
 
+type reconcileAppRequest struct {
+	Force  bool   `json:"force,omitempty"`
+	SHA    string `json:"sha,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	TTL    string `json:"ttl,omitempty"`
+	Actor  string `json:"actor,omitempty"`
+}
+
 // ReconcileApp handles POST /api/v1/apps/{id}/reconcile (asynchronous).
 // Returns 202 with operation_id; concurrent POSTs while running return the same id.
 func (h *Handler) ReconcileApp(w http.ResponseWriter, r *http.Request) {
@@ -647,9 +658,72 @@ func (h *Handler) ReconcileApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("force") == "true" || r.URL.Query().Get("force") == "1" {
-		if skip, ok := h.SyncGate.(interface{ SkipCI(string) }); ok {
-			skip.SkipCI(app.ID)
+	var reqBody reconcileAppRequest
+	if r.Body != nil {
+		if decErr := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&reqBody); decErr != nil && !errors.Is(decErr, io.EOF) {
+			http.Error(w, "invalid reconcile request body", http.StatusBadRequest)
+			return
+		}
+	}
+	forceRequested := reqBody.Force || r.URL.Query().Get("force") == "true" || r.URL.Query().Get("force") == "1"
+	if forceRequested {
+		actor := apiauth.ActorFromRequest(r)
+		if actor == "admin" && strings.TrimSpace(reqBody.Actor) != "" {
+			actor = strings.TrimSpace(reqBody.Actor)
+		}
+		sha := strings.TrimSpace(reqBody.SHA)
+		if sha == "" {
+			sha = strings.TrimSpace(r.URL.Query().Get("sha"))
+		}
+		reason := strings.TrimSpace(reqBody.Reason)
+		if reason == "" {
+			reason = strings.TrimSpace(r.URL.Query().Get("reason"))
+		}
+		if !apiauth.CanForceBypass(r) {
+			_ = h.Registry.RecordAudit(api.AuditEvent{
+				Kind:     "ci_force_bypass",
+				Actor:    actor,
+				AppID:    app.ID,
+				AppName:  app.Name,
+				RepoURL:  app.RepoURL,
+				GitSHA:   sha,
+				Reason:   reason,
+				Decision: "bypass_denied_unauthorized",
+			})
+			http.Error(w, "forbidden: token is not authorized for --force CI bypass", http.StatusForbidden)
+			return
+		}
+		var ttl time.Duration
+		rawTTL := strings.TrimSpace(reqBody.TTL)
+		if rawTTL == "" {
+			rawTTL = strings.TrimSpace(r.URL.Query().Get("ttl"))
+		}
+		if rawTTL != "" {
+			parsedTTL, parseErr := time.ParseDuration(rawTTL)
+			if parseErr != nil || parsedTTL <= 0 {
+				http.Error(w, "invalid bypass ttl", http.StatusBadRequest)
+				return
+			}
+			ttl = parsedTTL
+		}
+		granter, ok := h.SyncGate.(interface{ GrantBypass(BypassRequest) error })
+		if !ok || granter == nil {
+			http.Error(w, "CI bypass controller unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := granter.GrantBypass(BypassRequest{
+			AppID:  app.ID,
+			SHA:    sha,
+			Reason: reason,
+			Actor:  actor,
+			TTL:    ttl,
+		}); err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(strings.ToLower(err.Error()), "does not match") {
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
+			return
 		}
 	}
 	if note, ok := h.SyncGate.(interface{ NoteManual(*api.App) }); ok {
@@ -719,6 +793,89 @@ func (h *Handler) GetOperation(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(api.APIResponse{Data: op})
 }
 
+// ListAudit handles GET /api/v1/audit.
+func (h *Handler) ListAudit(w http.ResponseWriter, r *http.Request) {
+	h.serveAudit(w, r, "")
+}
+
+// ListAppAudit handles GET /api/v1/apps/{id}/audit.
+func (h *Handler) ListAppAudit(w http.ResponseWriter, r *http.Request) {
+	h.serveAudit(w, r, chi.URLParam(r, "id"))
+}
+
+func (h *Handler) serveAudit(w http.ResponseWriter, r *http.Request, appID string) {
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	events, err := h.Registry.ListAudit(appID, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.APIResponse{Data: events})
+}
+
+// MigrateAppRepo handles POST /api/v1/apps/{id}/migrate-repo.
+func (h *Handler) MigrateAppRepo(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	var req api.RepoMigrationRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid migration request JSON", http.StatusBadRequest)
+		return
+	}
+	if r.URL.Query().Get("dry_run") == "true" || r.URL.Query().Get("dry_run") == "1" {
+		req.DryRun = true
+	}
+	actor := apiauth.ActorFromRequest(r)
+	if actor == "admin" && strings.TrimSpace(req.Actor) != "" {
+		actor = strings.TrimSpace(req.Actor)
+	}
+	req.Actor = actor
+
+	migrator, ok := h.SyncGate.(interface {
+		MigrateRepo(ctx context.Context, existing *api.App, req api.RepoMigrationRequest, nextPolicyJSON string) (api.RepoMigrationPlan, error)
+	})
+	if !ok || migrator == nil {
+		http.Error(w, "repository migrator is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	plan, migErr := migrator.MigrateRepo(r.Context(), app, req, "")
+	if migErr != nil {
+		se := syncerr.Classify(migErr)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(httpStatusForSyncErr(se))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"message": se.Message,
+			"code":    se.Code,
+			"stage":   se.Stage,
+			"data":    plan,
+		})
+		return
+	}
+
+	msg := "repository migrated successfully"
+	if req.DryRun {
+		msg = "repository migration dry-run succeeded"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(api.APIResponse{
+		Message: msg,
+		Data:    plan,
+	})
+}
+
 func (h *Handler) runReconcileOperation(opID, appID string) {
 	h.Ops.MarkRunning(opID)
 	app, err := h.Registry.Get(appID)
@@ -746,7 +903,7 @@ func (h *Handler) syncTimeout() time.Duration {
 	timeout := h.SyncTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
-		if value := strings.TrimSpace(os.Getenv("CONOPS_SYNC_TIMEOUT")); value != "" {
+		if value := envcompat.Getenv("TIDE_SYNC_TIMEOUT"); value != "" {
 			if parsed, parseErr := time.ParseDuration(value); parseErr == nil && parsed > 0 {
 				timeout = parsed
 			}

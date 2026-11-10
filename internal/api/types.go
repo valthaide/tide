@@ -4,8 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/compose"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/gitrev"
 )
 
 // App represents a Git repository configuration to track.
@@ -35,6 +36,13 @@ type App struct {
 	RequirePipelineSuccess  bool                     `json:"require_pipeline_success"`
 	WatchFiles              []deploypolicy.WatchFile `json:"watch_files,omitempty"`
 	Status                  string                   `json:"status"` // e.g., "synced", "pending", "error"
+	// CI gate observability fields (persisted for status display).
+	CIStatus     string    `json:"ci_status,omitempty"`
+	CIReason     string    `json:"ci_reason,omitempty"`
+	CIURL        string    `json:"ci_url,omitempty"`
+	CISource     string    `json:"ci_source,omitempty"`
+	CIPipelineID int64     `json:"ci_pipeline_id,omitempty"`
+	CICheckedAt  time.Time `json:"ci_checked_at,omitempty"`
 	// Suspended is true when git or an operator pause blocks automatic reconcile.
 	Suspended         bool `json:"suspended"`
 	FleetSuspended    bool `json:"fleet_suspended"`
@@ -83,6 +91,25 @@ type App struct {
 	Priority int `json:"priority,omitempty"`
 }
 
+// EffectivePipelineRef returns the git ref expected on pipelines for this app,
+// or empty when tracking a raw commit SHA pin without an explicit pipeline_ref.
+func (a *App) EffectivePipelineRef() string {
+	if a == nil {
+		return ""
+	}
+	if explicit := strings.TrimSpace(a.Policy().PipelineRef); explicit != "" {
+		return explicit
+	}
+	rev := strings.TrimSpace(a.Revision)
+	if rev != "" {
+		if gitrev.IsFullSHA(rev) {
+			return ""
+		}
+		return rev
+	}
+	return strings.TrimSpace(a.Branch)
+}
+
 // VolumeRef is one named volume used by an app.
 type VolumeRef struct {
 	Name       string `json:"name"`
@@ -111,6 +138,63 @@ type DeployEvent struct {
 	Result    string    `json:"result"`
 	Trigger   string    `json:"trigger,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// AuditEvent is an immutable security/operational audit record persisted in the database.
+type AuditEvent struct {
+	ID             int64     `json:"id"`
+	CreatedAt      time.Time `json:"created_at"`
+	Kind           string    `json:"kind"` // ci_force_bypass | repo_migration
+	Actor          string    `json:"actor"`
+	AppID          string    `json:"app_id"`
+	AppName        string    `json:"app_name"`
+	RepoURL        string    `json:"repo_url"`
+	TargetRepoURL  string    `json:"target_repo_url,omitempty"`
+	GitSHA         string    `json:"git_sha,omitempty"`
+	PipelineID     int64     `json:"pipeline_id,omitempty"`
+	PipelineSource string    `json:"pipeline_source,omitempty"`
+	PipelineStatus string    `json:"pipeline_status,omitempty"`
+	PipelineURL    string    `json:"pipeline_url,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	Decision       string    `json:"decision"`
+	DetailsJSON    string    `json:"details_json,omitempty"`
+}
+
+// RepoMigrationRequest describes a production-safe repository URL / auth migration.
+type RepoMigrationRequest struct {
+	RepoURL        string            `json:"repo_url"`
+	RepoAuthMethod string            `json:"repo_auth_method,omitempty"`
+	DeployKey      string            `json:"deploy_key,omitempty"`
+	Branch         string            `json:"branch,omitempty"`
+	Revision       string            `json:"revision,omitempty"`
+	ComposePath    string            `json:"compose_path,omitempty"`
+	Vars           map[string]string `json:"vars,omitempty"`
+	DryRun         bool              `json:"dry_run,omitempty"`
+	Reason         string            `json:"reason,omitempty"`
+	Actor          string            `json:"actor,omitempty"`
+}
+
+// RepoMigrationPlan is returned by dry-run and completed repository migrations.
+type RepoMigrationPlan struct {
+	AppID          string   `json:"app_id"`
+	AppName        string   `json:"app_name"`
+	OldRepoURL     string   `json:"old_repo_url"`
+	NewRepoURL     string   `json:"new_repo_url"`
+	Branch         string   `json:"branch"`
+	Revision       string   `json:"revision,omitempty"`
+	TargetCommit   string   `json:"target_commit"`
+	ComposePath    string   `json:"compose_path"`
+	ComposeProject string   `json:"compose_project"`
+	CIStatus       string   `json:"ci_status"`
+	CIPipelineID   int64    `json:"ci_pipeline_id,omitempty"`
+	CIPipelineURL  string   `json:"ci_pipeline_url,omitempty"`
+	ToStop         []string `json:"to_stop"`
+	ToRemove       []string `json:"to_remove"`
+	KeptVolumes    []string `json:"kept_volumes"`
+	ToCreate       []string `json:"to_create"`
+	ImagesVerified []string `json:"images_verified"`
+	DryRun         bool     `json:"dry_run"`
+	Applied        bool     `json:"applied"`
 }
 
 // ImageRef is one running compose service image.

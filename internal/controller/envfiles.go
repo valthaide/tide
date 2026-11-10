@@ -6,7 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/valthaide/conops-private/internal/redact"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/redact"
 )
 
 func readEnvFiles(paths []string) (map[string]string, string) {
@@ -85,12 +86,13 @@ func mergeInterpolation(files, fleet map[string]string, appName, project string)
 	}
 	if appName != "" {
 		out["SLOT"] = appName
-		out["CONOPS_APP_NAME"] = appName
+		out["TIDE_APP_NAME"] = appName
 	}
 	if project != "" {
 		out["PROJECT"] = project
-		out["CONOPS_PROJECT"] = project
+		out["TIDE_PROJECT"] = project
 	}
+	envcompat.PopulateInterpolationAliases(out, appName, project)
 	for key, value := range fleet {
 		out[key] = value
 	}

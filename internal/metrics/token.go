@@ -5,16 +5,18 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
-// MetricsToken reads CONOPS_METRICS_TOKEN, or the trimmed contents of
-// CONOPS_METRICS_TOKEN_FILE when the env value is empty.
+// MetricsToken reads TIDE_METRICS_TOKEN, or the trimmed contents of
+// TIDE_METRICS_TOKEN_FILE when the env value is empty.
 // An empty result means the metrics endpoint stays open.
 func MetricsToken() string {
-	if v := strings.TrimSpace(os.Getenv("CONOPS_METRICS_TOKEN")); v != "" {
+	if v := envcompat.Getenv("TIDE_METRICS_TOKEN"); v != "" {
 		return v
 	}
-	path := strings.TrimSpace(os.Getenv("CONOPS_METRICS_TOKEN_FILE"))
+	path := envcompat.Getenv("TIDE_METRICS_TOKEN_FILE")
 	if path == "" {
 		return ""
 	}

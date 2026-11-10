@@ -5,8 +5,8 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/storage/memory"
-	"github.com/valthaide/conops-private/internal/gitrev"
-	"github.com/valthaide/conops-private/internal/repoauth"
+	"github.com/valthaide/tide/internal/gitrev"
+	"github.com/valthaide/tide/internal/repoauth"
 )
 
 // List is git ls-remote. Peeled tag commits are returned as refs/tags/<name>^{}.

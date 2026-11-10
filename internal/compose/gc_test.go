@@ -11,7 +11,7 @@ func TestParseImageInspectMarksUsed(t *testing.T) {
 }
 
 func TestVolumeInspectKept(t *testing.T) {
-	if !volumeInspectKept(`[{"Labels":{"com.conops.keep":"true"}}]`) {
+	if !volumeInspectKept(`[{"Labels":{"com.tide.keep":"true"}}]`) {
 		t.Fatal("keep label")
 	}
 	if volumeInspectKept(`[{"Labels":{"com.docker.compose.project":"demo"}}]`) {

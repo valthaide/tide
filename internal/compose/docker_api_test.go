@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 func TestDockerAPICompatible(t *testing.T) {

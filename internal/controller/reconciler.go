@@ -5,20 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/cigate"
-	"github.com/valthaide/conops-private/internal/compose"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/fleetcheck"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/cigate"
+	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/fleetcheck"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 type imageApplier interface {
@@ -36,11 +36,14 @@ type imageApplier interface {
 
 // gateWait is returned when CI is still running; sync should stay pending and retry.
 type gateWait struct {
-	msg        string
-	reason     string
-	status     string
-	source     string
-	pipelineID int64
+	msg         string
+	reason      string
+	detail      string
+	status      string
+	source      string
+	webURL      string
+	triggeredBy string
+	pipelineID  int64
 }
 
 func (e *gateWait) Error() string { return e.msg }
@@ -64,10 +67,10 @@ type ReconcilerConfig struct {
 // LoadReconcilerConfigFromEnv loads reconciler config from environment variables.
 func LoadReconcilerConfigFromEnv() (ReconcilerConfig, error) {
 	interval := 10 * time.Second
-	if value := strings.TrimSpace(os.Getenv("CONOPS_RECONCILE_INTERVAL")); value != "" {
+	if value := envcompat.Getenv("TIDE_RECONCILE_INTERVAL"); value != "" {
 		parsed, err := time.ParseDuration(value)
 		if err != nil {
-			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_RECONCILE_INTERVAL: %s", value)
+			return ReconcilerConfig{}, fmt.Errorf("invalid TIDE_RECONCILE_INTERVAL: %s", value)
 		}
 		if parsed > 0 {
 			interval = parsed
@@ -75,28 +78,28 @@ func LoadReconcilerConfigFromEnv() (ReconcilerConfig, error) {
 	}
 
 	timeout := 5 * time.Minute
-	if value := strings.TrimSpace(os.Getenv("CONOPS_SYNC_TIMEOUT")); value != "" {
+	if value := envcompat.Getenv("TIDE_SYNC_TIMEOUT"); value != "" {
 		parsed, err := time.ParseDuration(value)
 		if err != nil {
-			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_SYNC_TIMEOUT: %s", value)
+			return ReconcilerConfig{}, fmt.Errorf("invalid TIDE_SYNC_TIMEOUT: %s", value)
 		}
 		if parsed > 0 {
 			timeout = parsed
 		}
 	}
 
-	retryErrors := strings.EqualFold(os.Getenv("CONOPS_RETRY_ERRORS"), "true")
+	retryErrors := strings.EqualFold(envcompat.Getenv("TIDE_RETRY_ERRORS"), "true")
 
 	maxConcurrent := 2
-	parallelEnv := "CONOPS_RECONCILE_CONCURRENCY"
-	value := strings.TrimSpace(os.Getenv(parallelEnv))
+	parallelEnv := "TIDE_RECONCILE_CONCURRENCY"
+	value := envcompat.Getenv(parallelEnv)
 	if value == "" {
-		parallelEnv = "CONOPS_SYNC_PARALLEL"
-		value = strings.TrimSpace(os.Getenv(parallelEnv))
+		parallelEnv = "TIDE_SYNC_PARALLEL"
+		value = envcompat.Getenv(parallelEnv)
 	}
 	if value == "" {
-		parallelEnv = "CONOPS_MAX_CONCURRENT_SYNCS"
-		value = strings.TrimSpace(os.Getenv(parallelEnv))
+		parallelEnv = "TIDE_MAX_CONCURRENT_SYNCS"
+		value = envcompat.Getenv(parallelEnv)
 	}
 	if value != "" {
 		n, err := strconv.Atoi(value)
@@ -107,59 +110,59 @@ func LoadReconcilerConfigFromEnv() (ReconcilerConfig, error) {
 	}
 
 	pullParallel := 0
-	if value := strings.TrimSpace(os.Getenv("CONOPS_PULL_PARALLEL")); value != "" {
+	if value := envcompat.Getenv("TIDE_PULL_PARALLEL"); value != "" {
 		n, err := strconv.Atoi(value)
 		if err != nil || n < 1 {
-			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_PULL_PARALLEL: %s", value)
+			return ReconcilerConfig{}, fmt.Errorf("invalid TIDE_PULL_PARALLEL: %s", value)
 		}
 		pullParallel = n
 	}
 
 	appInterval := 5 * time.Minute
 	appOff := false
-	if value := strings.TrimSpace(os.Getenv("CONOPS_APP_RECONCILE_INTERVAL")); value != "" {
+	if value := envcompat.Getenv("TIDE_APP_RECONCILE_INTERVAL"); value != "" {
 		if value == "off" || value == "0" {
 			appOff = true
 		} else {
 			parsed, err := time.ParseDuration(value)
 			if err != nil || parsed < 30*time.Second {
-				return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_APP_RECONCILE_INTERVAL: %s", value)
+				return ReconcilerConfig{}, fmt.Errorf("invalid TIDE_APP_RECONCILE_INTERVAL: %s", value)
 			}
 			appInterval = parsed
 		}
 	}
 	var jitter time.Duration
-	if value := strings.TrimSpace(os.Getenv("CONOPS_RECONCILE_JITTER")); value != "" {
+	if value := envcompat.Getenv("TIDE_RECONCILE_JITTER"); value != "" {
 		parsed, err := time.ParseDuration(value)
 		if err != nil || parsed < 0 {
-			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_RECONCILE_JITTER: %s", value)
+			return ReconcilerConfig{}, fmt.Errorf("invalid TIDE_RECONCILE_JITTER: %s", value)
 		}
 		jitter = parsed
 	}
 	aging := 10 * time.Minute
-	if value := strings.TrimSpace(os.Getenv("CONOPS_QUEUE_AGING")); value != "" {
+	if value := envcompat.Getenv("TIDE_QUEUE_AGING"); value != "" {
 		parsed, err := time.ParseDuration(value)
 		if err != nil || parsed <= 0 {
-			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_QUEUE_AGING: %s", value)
+			return ReconcilerConfig{}, fmt.Errorf("invalid TIDE_QUEUE_AGING: %s", value)
 		}
 		aging = parsed
 	}
 	warnAfter := 15 * time.Minute
-	if value := strings.TrimSpace(os.Getenv("CONOPS_QUEUE_WARN_AFTER")); value != "" {
+	if value := envcompat.Getenv("TIDE_QUEUE_WARN_AFTER"); value != "" {
 		parsed, err := time.ParseDuration(value)
 		if err != nil || parsed <= 0 {
-			return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_QUEUE_WARN_AFTER: %s", value)
+			return ReconcilerConfig{}, fmt.Errorf("invalid TIDE_QUEUE_WARN_AFTER: %s", value)
 		}
 		warnAfter = parsed
 	}
 	slotRelease := false
 	var slotHold time.Duration
-	if value := strings.TrimSpace(os.Getenv("CONOPS_SLOT_HEALTH_HOLD")); value != "" && value != "until_healthy" {
+	if value := envcompat.Getenv("TIDE_SLOT_HEALTH_HOLD"); value != "" && value != "until_healthy" {
 		slotRelease = true
 		if value != "0" {
 			parsed, err := time.ParseDuration(value)
 			if err != nil || parsed < 0 {
-				return ReconcilerConfig{}, fmt.Errorf("invalid CONOPS_SLOT_HEALTH_HOLD: %s", value)
+				return ReconcilerConfig{}, fmt.Errorf("invalid TIDE_SLOT_HEALTH_HOLD: %s", value)
 			}
 			slotHold = parsed
 		}
@@ -216,13 +219,20 @@ type pipelineGate interface {
 	CheckCommit(ctx context.Context, repoURL, commitSHA string) cigate.Result
 }
 
+// richPipelineGate extends pipelineGate with ref, required_jobs, strict mode, and trusted web checks.
+type richPipelineGate interface {
+	pipelineGate
+	Check(ctx context.Context, req cigate.CheckRequest) cigate.Result
+}
+
 // Reconciler applies desired state directly on the host (monolith mode).
 type Reconciler struct {
-	Registry *Registry
-	Executor AppRuntime
-	Logger   *slog.Logger
-	Config   ReconcilerConfig
-	Gate     pipelineGate
+	Registry               *Registry
+	Executor               AppRuntime
+	Logger                 *slog.Logger
+	Config                 ReconcilerConfig
+	Gate                   pipelineGate
+	ResolveMigrationCommit ResolveCommitFunc
 
 	mu               sync.Mutex
 	scheduling       bool
@@ -248,7 +258,7 @@ type Reconciler struct {
 	lastAt           map[string]time.Time
 	running          []compose.RunningImage
 	warnedQueue      map[string]time.Time
-	skipCI           map[string]struct{}
+	bypasses         map[string]ciBypassGrant
 }
 
 // NewReconciler creates a new reconciler.
@@ -279,7 +289,7 @@ func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger,
 		nextAt:           map[string]time.Time{},
 		lastAt:           map[string]time.Time{},
 		warnedQueue:      map[string]time.Time{},
-		skipCI:           map[string]struct{}{},
+		bypasses:         map[string]ciBypassGrant{},
 	}
 }
 
@@ -438,10 +448,9 @@ func (r *Reconciler) dispatch() {
 		switch app.Status {
 		case "pending":
 		case "error":
-			// Always re-check CI-blocked apps until the seen commit is deployed
-			// (pipeline may flip pending→success or failed→success after retry).
-			if app.LastSyncErrorCode == syncerr.CodeBlockedByCI &&
-				app.LastSeenCommit != "" && app.LastSeenCommit != app.LastSyncedCommit {
+			// Always re-check CI-blocked apps (job retry on the same push pipeline
+			// flips failed -> running -> success without a new commit or controller restart).
+			if app.LastSyncErrorCode == syncerr.CodeBlockedByCI && app.LastSeenCommit != "" {
 				// fall through
 			} else if r.shouldRetryRejected(app, runtimeSnapshot) {
 				// fall through
@@ -1433,7 +1442,7 @@ func (r *Reconciler) Release() {
 }
 
 func bindPrefixes() []string {
-	raw := strings.TrimSpace(os.Getenv("CONOPS_ALLOWED_BIND_PREFIXES"))
+	raw := envcompat.Getenv("TIDE_ALLOWED_BIND_PREFIXES")
 	if raw == "" {
 		return nil
 	}
@@ -1479,52 +1488,159 @@ func revisionLabel(commit string, vars map[string]string, listed []string) strin
 	return strings.Join(parts, ", ")
 }
 
+func (r *Reconciler) evaluateCIGate(app *App, commitSHA string, repoSecret []byte) cigate.Result {
+	policy := app.Policy()
+	token := cigate.TokenFromEnv()
+	if token == "" && strings.EqualFold(app.RepoAuthMethod, "token") && len(repoSecret) > 0 {
+		token = strings.TrimSpace(string(repoSecret))
+	}
+	req := cigate.CheckRequest{
+		RepoURL:      app.RepoURL,
+		CommitSHA:    commitSHA,
+		Ref:          app.EffectivePipelineRef(),
+		StrictRef:    strings.TrimSpace(policy.PipelineRef) != "",
+		Sources:      policy.RequirePipelineSources,
+		Strict:       policy.StrictPipelineGate,
+		RequiredJobs: policy.EffectiveRequiredJobs(),
+		TrustedWeb:   policy.TrustedWebPipelines,
+		Token:        token,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if r.Gate != nil {
+		if rich, ok := r.Gate.(richPipelineGate); ok {
+			return rich.Check(ctx, req)
+		}
+		return r.Gate.CheckCommit(ctx, app.RepoURL, commitSHA)
+	}
+	return (&cigate.Checker{
+		Token:   req.Token,
+		Sources: req.Sources,
+		Strict:  req.Strict,
+	}).Check(ctx, req)
+}
+
 func (r *Reconciler) checkPipelineGate(app *App) error {
 	if app == nil {
 		return nil
 	}
 	policy := app.Policy()
-	if r.consumeSkipCI(app.ID) {
-		return nil
-	}
 	if !policy.RequirePipelineSuccess {
 		return nil
 	}
-	// Only gate when deploying a new commit (or first sync).
-	if app.LastSeenCommit != "" && app.LastSeenCommit == app.LastSyncedCommit {
+	// Only gate when deploying a new commit, first sync, or re-evaluating a previously CI-blocked app.
+	if app.LastSeenCommit != "" && app.LastSeenCommit == app.LastSyncedCommit && app.LastSyncErrorCode != syncerr.CodeBlockedByCI {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	var res cigate.Result
-	if r.Gate != nil {
-		res = r.Gate.CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
-	} else {
-		res = (&cigate.Checker{
-			Token:   cigate.TokenFromEnv(),
-			Sources: policy.RequirePipelineSources,
-		}).CheckCommit(ctx, app.RepoURL, app.LastSeenCommit)
+
+	var repoSecret []byte
+	if r.Registry != nil {
+		repoSecret, _ = r.Registry.GetRepoSecret(app.ID)
 	}
+	defer zeroBytes(repoSecret)
+
+	res := r.evaluateCIGate(app, app.LastSeenCommit, repoSecret)
+	checkedAt := time.Now()
+
+	if grant, bypassed := r.consumeBypass(app, app.LastSeenCommit, res); bypassed {
+		if r.Registry != nil {
+			_ = r.Registry.UpdateCIStatus(app.ID, "bypassed", "force bypass ("+grant.Actor+"): "+grant.Reason, res.WebURL, res.Source, res.PipelineID, checkedAt)
+		}
+		if r.Logger != nil {
+			r.Logger.Warn("CI gate bypassed for single reconcile",
+				"app", app.Name,
+				"commit", app.LastSeenCommit,
+				"actor", grant.Actor,
+				"reason", grant.Reason,
+				"pipeline_id", res.PipelineID,
+				"pipeline_source", res.Source,
+				"pipeline_status", res.Status,
+				"triggered_by", res.TriggeredBy,
+				"decision", "bypassed",
+			)
+		}
+		return nil
+	}
+
 	switch res.Outcome {
 	case cigate.OutcomeAllow, "":
 		if res.Allowed {
-			if len(res.Ignored) > 0 && r.Logger != nil {
-				r.Logger.Info("Deploy allowed without a counted pipeline", "app", app.Name, "commit", app.LastSeenCommit, "ignored_pipelines", cigate.FormatPipelines(res.Ignored))
+			detail := strings.TrimSpace(res.Detail)
+			if detail == "" {
+				detail = "ok"
+			}
+			if r.Registry != nil {
+				_ = r.Registry.UpdateCIStatus(app.ID, "allowed", detail, res.WebURL, res.Source, res.PipelineID, checkedAt)
+			}
+			if r.Logger != nil {
+				if len(res.Ignored) > 0 {
+					r.Logger.Info("Deploy allowed without a counted pipeline",
+						"app", app.Name,
+						"commit", app.LastSeenCommit,
+						"decision", "allow",
+						"ignored_pipelines", cigate.FormatPipelines(res.Ignored),
+					)
+				} else {
+					r.Logger.Info("CI gate allowed deploy",
+						"app", app.Name,
+						"commit", app.LastSeenCommit,
+						"pipeline_id", res.PipelineID,
+						"pipeline_source", res.Source,
+						"pipeline_status", res.Status,
+						"triggered_by", res.TriggeredBy,
+						"decision", "allow",
+					)
+				}
 			}
 			return nil
 		}
 	case cigate.OutcomeWait:
-		msg := fmt.Sprintf("deploy waiting: pipeline id=%d source=%s status=%s reason=%s", res.PipelineID, res.Source, res.Status, res.Reason)
-		return &gateWait{msg: msg, reason: res.Reason, status: res.Status, source: res.Source, pipelineID: res.PipelineID}
+		detail := strings.TrimSpace(res.Detail)
+		if detail == "" {
+			detail = res.Reason
+		}
+		if r.Registry != nil {
+			_ = r.Registry.UpdateCIStatus(app.ID, "waiting", detail, res.WebURL, res.Source, res.PipelineID, checkedAt)
+		}
+		msg := fmt.Sprintf("deploy waiting: pipeline id=%d source=%s status=%s reason=%s (%s)", res.PipelineID, res.Source, res.Status, res.Reason, detail)
+		return &gateWait{
+			msg:         msg,
+			reason:      res.Reason,
+			detail:      detail,
+			status:      res.Status,
+			source:      res.Source,
+			webURL:      res.WebURL,
+			triggeredBy: res.TriggeredBy,
+			pipelineID:  res.PipelineID,
+		}
 	}
+
 	reason := res.Reason
 	if reason == "" {
 		reason = cigate.ReasonCIFailed
 	}
-	msg := fmt.Sprintf("deploy blocked: pipeline id=%d source=%s status=%s reason=%s", res.PipelineID, res.Source, res.Status, reason)
+	detail := strings.TrimSpace(res.Detail)
+	if detail == "" {
+		detail = reason
+	}
+	if r.Registry != nil {
+		_ = r.Registry.UpdateCIStatus(app.ID, "blocked", detail, res.WebURL, res.Source, res.PipelineID, checkedAt)
+	}
+	msg := fmt.Sprintf("deploy blocked: pipeline id=%d source=%s status=%s reason=%s (%s)", res.PipelineID, res.Source, res.Status, reason, detail)
 	metrics.ObserveDeployBlocked(app.Name, reason, res.Source)
 	if r.Logger != nil {
-		r.Logger.Warn("Deploy blocked by CI gate", "app", app.Name, "commit", app.LastSeenCommit, "reason", reason, "pipeline_id", res.PipelineID, "pipeline_source", res.Source, "pipeline_status", res.Status)
+		r.Logger.Warn("Deploy blocked by CI gate",
+			"app", app.Name,
+			"commit", app.LastSeenCommit,
+			"reason", reason,
+			"detail", detail,
+			"pipeline_id", res.PipelineID,
+			"pipeline_source", res.Source,
+			"pipeline_status", res.Status,
+			"triggered_by", res.TriggeredBy,
+			"url", res.WebURL,
+			"decision", "deny",
+		)
 	}
 	return syncerr.New(syncerr.CodeBlockedByCI, syncerr.StageCIGate, msg)
 }

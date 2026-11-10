@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
 const minSecretLen = 8
@@ -16,18 +18,6 @@ var (
 	userinfoURL = regexp.MustCompile(`(?i)(https?://)([^/@\s]+)@`)
 	gitlabToken = regexp.MustCompile(`(?i)\b(glpat|gldt|glrt|glcbt)-[A-Za-z0-9_\-]+`)
 )
-
-// secretEnvKeys are process env vars whose values must never appear in logs/API.
-var secretEnvKeys = []string{
-	"CONOPS_API_TOKEN",
-	"CONOPS_TOKEN",
-	"CONOPS_GIT_TOKEN",
-	"CONOPS_FLEET_TOKEN",
-	"CONOPS_VAULT_TOKEN",
-	"REGISTRY_PASSWORD",
-	"CONOPS_SOPS_AGE_KEY",
-	"CONOPS_ENCRYPTION_KEY",
-}
 
 // Redactor masks secrets and URL userinfo in strings.
 type Redactor struct {
@@ -53,7 +43,7 @@ func (r *Redactor) ReloadFromEnv() {
 		return
 	}
 	var secrets []string
-	for _, key := range secretEnvKeys {
+	for _, key := range envcompat.SecretEnvKeys() {
 		if v := strings.TrimSpace(os.Getenv(key)); len(v) >= minSecretLen {
 			secrets = append(secrets, v)
 		}

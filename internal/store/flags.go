@@ -1,6 +1,6 @@
 package store
 
-import "github.com/valthaide/conops-private/internal/api"
+import "github.com/valthaide/tide/internal/api"
 
 // applyRuntimeFlags sets pause and remediation fields loaded from the database.
 // Suspended is the effective pause: fleet git or an operator suspend.

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 )
 
 func TestSQLiteLockRetryLogsDebug(t *testing.T) {

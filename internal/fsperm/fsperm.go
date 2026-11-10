@@ -7,7 +7,7 @@ import (
 )
 
 // EnsurePrivateDir creates path at 0700 and chmods it if it already exists.
-// Used for ConOps-owned secret/data dirs (not app checkouts).
+// Used for Tide-owned secret/data dirs (not app checkouts).
 func EnsurePrivateDir(path string) error {
 	if path == "" {
 		return nil
@@ -41,7 +41,7 @@ func EnsureSharedDir(path string) error {
 	return os.Chmod(path, 0755)
 }
 
-// HardenPrivateSubtree locks a ConOps-owned tree (secrets, .git, .ssh, .envs).
+// HardenPrivateSubtree locks a Tide-owned tree (secrets, .git, .ssh, .envs).
 func HardenPrivateSubtree(root string) error {
 	if root == "" {
 		return nil
@@ -101,7 +101,7 @@ func RelaxCheckoutTree(repoDir string) error {
 	})
 }
 
-// MigrateRuntimePermissions fixes checkouts left 0700/0600 by ConOps v1.0.3.
+// MigrateRuntimePermissions fixes checkouts left 0700/0600 by legacy v1.0.3 releases.
 // For each runtime/<app>/repo: relax worktree; keep .git/.ssh/.envs private.
 func MigrateRuntimePermissions(runtimeDir string) error {
 	if runtimeDir == "" {

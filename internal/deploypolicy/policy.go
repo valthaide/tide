@@ -2,9 +2,10 @@ package deploypolicy
 
 import (
 	"encoding/json"
-	"os"
 	"sort"
 	"strings"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
 const (
@@ -21,20 +22,35 @@ type WatchFile struct {
 	ReloadCommand string `json:"reload_command,omitempty" yaml:"reload_command"`
 }
 
+// TrustedWebPolicy controls optional acceptance of manual (`web`) GitLab pipelines.
+// Disabled by default. Requires Maintainer API read access to inspect pipeline variables.
+type TrustedWebPolicy struct {
+	Enabled          bool     `json:"enabled" yaml:"enabled"`
+	AllowedUsers     []string `json:"allowed_users,omitempty" yaml:"allowed_users"`
+	AllowedVariables []string `json:"allowed_variables,omitempty" yaml:"allowed_variables"`
+	RequiredJobs     []string `json:"required_jobs,omitempty" yaml:"required_jobs"`
+}
+
 // Policy is per-app deploy behaviour from fleet YAML.
 type Policy struct {
-	RequirePipelineSuccess bool `json:"require_pipeline_success" yaml:"require_pipeline_success"`
+	Tenant                 string `json:"tenant,omitempty" yaml:"tenant"`
+	RequirePipelineSuccess bool   `json:"require_pipeline_success" yaml:"require_pipeline_success"`
 	// RequirePipelineSources limits which GitLab pipeline sources decide the gate.
 	// Empty means push and merge_request_event.
-	RequirePipelineSources []string    `json:"require_pipeline_sources,omitempty" yaml:"require_pipeline_sources"`
-	WatchFiles             []WatchFile `json:"watch_files,omitempty" yaml:"watch_files"`
+	RequirePipelineSources []string          `json:"require_pipeline_sources,omitempty" yaml:"require_pipeline_sources"`
+	StrictPipelineGate     bool              `json:"strict_pipeline_gate,omitempty" yaml:"strict_pipeline_gate"`
+	PipelineRef            string            `json:"pipeline_ref,omitempty" yaml:"pipeline_ref"`
+	RequiredJobs           []string          `json:"required_jobs,omitempty" yaml:"required_jobs"`
+	SharedRequiredJobs     []string          `json:"shared_required_jobs,omitempty" yaml:"shared_required_jobs"`
+	TrustedWebPipelines    *TrustedWebPolicy `json:"trusted_web_pipelines,omitempty" yaml:"trusted_web_pipelines"`
+	WatchFiles             []WatchFile       `json:"watch_files,omitempty" yaml:"watch_files"`
 	// PruneVolumes removes this app's named compose volumes when the app is deleted.
 	// Images used only by this app are always removed; volumes stay unless this is set.
 	PruneVolumes bool `json:"prune_volumes" yaml:"prune_volumes"`
 	// HealthTimeout is how long a new revision may take to become healthy before rollback.
 	// Empty means the controller default (120s).
 	HealthTimeout string `json:"health_timeout,omitempty" yaml:"health_timeout"`
-	// Build is "allowed" or "forbidden". Empty inherits CONOPS_BUILD, which defaults to allowed.
+	// Build is "allowed" or "forbidden". Empty inherits TIDE_BUILD, which defaults to allowed.
 	Build string `json:"build,omitempty" yaml:"build"`
 	// Vars are passed to docker compose for ${NAME} interpolation.
 	Vars map[string]string `json:"vars,omitempty" yaml:"vars"`
@@ -81,6 +97,21 @@ func (p *Policy) Normalize() {
 	if p == nil {
 		return
 	}
+	p.Tenant = strings.TrimSpace(p.Tenant)
+	p.PipelineRef = strings.TrimSpace(p.PipelineRef)
+	p.RequiredJobs = normalizeStringList(p.RequiredJobs)
+	p.SharedRequiredJobs = normalizeStringList(p.SharedRequiredJobs)
+	if p.TrustedWebPipelines != nil {
+		p.TrustedWebPipelines.AllowedUsers = normalizeStringList(p.TrustedWebPipelines.AllowedUsers)
+		p.TrustedWebPipelines.AllowedVariables = normalizeStringList(p.TrustedWebPipelines.AllowedVariables)
+		p.TrustedWebPipelines.RequiredJobs = normalizeStringList(p.TrustedWebPipelines.RequiredJobs)
+		if !p.TrustedWebPipelines.Enabled &&
+			len(p.TrustedWebPipelines.AllowedUsers) == 0 &&
+			len(p.TrustedWebPipelines.AllowedVariables) == 0 &&
+			len(p.TrustedWebPipelines.RequiredJobs) == 0 {
+			p.TrustedWebPipelines = nil
+		}
+	}
 	p.HealthTimeout = strings.TrimSpace(p.HealthTimeout)
 	p.Build = NormalizeBuild(p.Build)
 	p.Vars = NormalizeVars(p.Vars)
@@ -103,6 +134,34 @@ func (p *Policy) Normalize() {
 	p.WatchFiles = out
 }
 
+// EffectiveRequiredJobs returns deduplicated shared_required_jobs followed by required_jobs.
+func (p Policy) EffectiveRequiredJobs() []string {
+	var combined []string
+	combined = append(combined, p.SharedRequiredJobs...)
+	combined = append(combined, p.RequiredJobs...)
+	return normalizeStringList(combined)
+}
+
+func normalizeStringList(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	var out []string
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
 // Encode serializes policy for DB storage.
 func Encode(p Policy) string {
 	p.Normalize()
@@ -111,6 +170,20 @@ func Encode(p Policy) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+// Decode parses stored policy JSON (empty/invalid → zero Policy).
+func Decode(raw string) Policy {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return Policy{}
+	}
+	var p Policy
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return Policy{}
+	}
+	p.Normalize()
+	return p
 }
 
 // NormalizeBuild returns allowed, forbidden, or empty when the value is unset.
@@ -125,7 +198,7 @@ func NormalizeBuild(v string) string {
 	}
 }
 
-// EffectiveBuild resolves app policy, then CONOPS_BUILD, then allowed.
+// EffectiveBuild resolves app policy, then TIDE_BUILD, then allowed.
 func (p Policy) EffectiveBuild() string {
 	switch NormalizeBuild(p.Build) {
 	case BuildForbidden:
@@ -133,7 +206,7 @@ func (p Policy) EffectiveBuild() string {
 	case BuildAllowed:
 		return BuildAllowed
 	default:
-		if strings.EqualFold(strings.TrimSpace(os.Getenv("CONOPS_BUILD")), BuildForbidden) {
+		if strings.EqualFold(envcompat.Getenv("TIDE_BUILD"), BuildForbidden) {
 			return BuildForbidden
 		}
 		return BuildAllowed
@@ -185,7 +258,7 @@ func DecodeVars(raw string) map[string]string {
 	return NormalizeVars(m)
 }
 
-// VarsEqual reports whether two var maps interpolate the same way.
+// VarsEqual reports whether two var maps have the same normalized entries.
 func VarsEqual(a, b map[string]string) bool {
 	return EncodeVars(a) == EncodeVars(b)
 }
@@ -205,19 +278,5 @@ func VarsLabel(vars map[string]string) string {
 	for _, k := range keys {
 		parts = append(parts, k+"="+m[k])
 	}
-	return strings.Join(parts, ", ")
-}
-
-// Decode parses policy JSON; empty → zero policy.
-func Decode(raw string) Policy {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return Policy{}
-	}
-	var p Policy
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return Policy{}
-	}
-	p.Normalize()
-	return p
+	return strings.Join(parts, " ")
 }

@@ -15,7 +15,7 @@ type Image struct {
 	Used    bool
 }
 
-// Select returns images that are unused, old, not part of a kept revision, and owned by ConOps apps.
+// Select returns images that are unused, old, not part of a kept revision, and owned by Tide apps.
 // Images whose repository is not in ownRepos are left alone.
 func Select(images []Image, protected, ownRepos map[string]struct{}, minAge time.Duration, now time.Time) []Image {
 	if ownRepos == nil {

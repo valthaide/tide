@@ -1,9 +1,9 @@
 #!/bin/sh
-# Install cps CLI from the latest private release
+# Install tidectl CLI from the latest release (with transitional cps symlink alias)
 
 set -e
 
-REPO="valthaide/conops-private"
+REPO="valthaide/tide"
 
 get_latest_release() {
   curl -Ls -o /dev/null -w %{url_effective} "https://github.com/$REPO/releases/latest" | rev | cut -d'/' -f1 | rev
@@ -32,23 +32,25 @@ case "$ARCH" in
     *) echo "Unsupported Architecture: $ARCH"; exit 1 ;;
 esac
 
-FILENAME="cps_${OS}_${ARCH}.tar.gz"
+FILENAME="tidectl_${OS}_${ARCH}.tar.gz"
 URL="https://github.com/$REPO/releases/download/$VERSION/$FILENAME"
 
 echo "Downloading $VERSION for $OS/$ARCH..."
 curl -sfL "$URL" -o "/tmp/$FILENAME"
 
 echo "Extracting..."
-tar -xzf "/tmp/$FILENAME" -C /tmp cps
+tar -xzf "/tmp/$FILENAME" -C /tmp tidectl
 
 echo "Installing to /usr/local/bin..."
 if [ -w /usr/local/bin ]; then
-    mv "/tmp/cps" "/usr/local/bin/"
+    mv "/tmp/tidectl" "/usr/local/bin/tidectl"
+    ln -sf "/usr/local/bin/tidectl" "/usr/local/bin/cps"
 else
-    sudo mv "/tmp/cps" "/usr/local/bin/"
+    sudo mv "/tmp/tidectl" "/usr/local/bin/tidectl"
+    sudo ln -sf "/usr/local/bin/tidectl" "/usr/local/bin/cps"
 fi
-chmod +x /usr/local/bin/cps
+chmod +x /usr/local/bin/tidectl
 
 rm "/tmp/$FILENAME"
 
-echo "Successfully installed cps $VERSION!"
+echo "Successfully installed tidectl $VERSION!"

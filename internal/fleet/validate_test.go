@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/valthaide/conops-private/internal/fleetcheck"
+	"github.com/valthaide/tide/internal/fleetcheck"
 )
 
 func boolPtr(v bool) *bool { return &v }

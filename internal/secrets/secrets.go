@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
 // Config controls optional Vault integration.
@@ -22,14 +23,14 @@ type Config struct {
 	HTTPClient     *http.Client
 }
 
-// LoadConfigFromEnv reads CONOPS_SOPS / CONOPS_VAULT_*.
+// LoadConfigFromEnv reads TIDE_SOPS / TIDE_VAULT_*.
 func LoadConfigFromEnv() Config {
-	sopsMode := strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_SOPS")))
-	vaultMode := strings.ToLower(strings.TrimSpace(os.Getenv("CONOPS_VAULT")))
+	sopsMode := strings.ToLower(envcompat.Getenv("TIDE_SOPS"))
+	vaultMode := strings.ToLower(envcompat.Getenv("TIDE_VAULT"))
 	cfg := Config{
-		VaultAddr:      strings.TrimRight(strings.TrimSpace(os.Getenv("CONOPS_VAULT_ADDR")), "/"),
-		VaultToken:     strings.TrimSpace(os.Getenv("CONOPS_VAULT_TOKEN")),
-		VaultNamespace: strings.TrimSpace(os.Getenv("CONOPS_VAULT_NAMESPACE")),
+		VaultAddr:      strings.TrimRight(envcompat.Getenv("TIDE_VAULT_ADDR"), "/"),
+		VaultToken:     envcompat.Getenv("TIDE_VAULT_TOKEN"),
+		VaultNamespace: envcompat.Getenv("TIDE_VAULT_NAMESPACE"),
 		HTTPClient:     &http.Client{Timeout: 30 * time.Second},
 	}
 	switch sopsMode {
@@ -38,7 +39,7 @@ func LoadConfigFromEnv() Config {
 	default:
 		cfg.SOPSEnabled = false
 	}
-	if strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY")) != "" || strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY_FILE")) != "" {
+	if envcompat.Getenv("TIDE_SOPS_AGE_KEY") != "" || envcompat.Getenv("TIDE_SOPS_AGE_KEY_FILE") != "" {
 		cfg.SOPSEnabled = true
 	}
 	switch vaultMode {
@@ -55,14 +56,14 @@ func LoadConfigFromEnv() Config {
 // Warnings returns human-readable warnings for leftover/removed config (non-fatal).
 func (c Config) Warnings() []string {
 	var out []string
-	if c.SOPSEnabled || strings.TrimSpace(os.Getenv("CONOPS_SOPS")) != "" {
-		out = append(out, "CONOPS_SOPS is set but SOPS support was removed; unset CONOPS_SOPS / AGE key env vars (use hiera-eyaml → secrets.env)")
+	if c.SOPSEnabled || envcompat.Getenv("TIDE_SOPS") != "" {
+		out = append(out, "TIDE_SOPS is set but SOPS support was removed; unset TIDE_SOPS / AGE key env vars (use hiera-eyaml -> secrets.env)")
 	}
-	if strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY")) != "" {
-		out = append(out, "CONOPS_SOPS_AGE_KEY is set but ignored; unset it")
+	if envcompat.Getenv("TIDE_SOPS_AGE_KEY") != "" {
+		out = append(out, "TIDE_SOPS_AGE_KEY is set but ignored; unset it")
 	}
-	if strings.TrimSpace(os.Getenv("CONOPS_SOPS_AGE_KEY_FILE")) != "" {
-		out = append(out, "CONOPS_SOPS_AGE_KEY_FILE is set but ignored; unset it")
+	if envcompat.Getenv("TIDE_SOPS_AGE_KEY_FILE") != "" {
+		out = append(out, "TIDE_SOPS_AGE_KEY_FILE is set but ignored; unset it")
 	}
 	return out
 }

@@ -9,6 +9,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
 // Issue is one fleet or compose validation problem.
@@ -238,7 +240,7 @@ func SummarizeCompose(raw []byte) (Summary, error) {
 			}
 		}
 		sum.Security = append(sum.Security, sec)
-		if strings.EqualFold(strings.TrimSpace(svc.Labels["com.conops.oneshot"]), "rerun") {
+		if envcompat.HasOneshotRerunLabel(svc.Labels) {
 			sum.Rerun = append(sum.Rerun, name)
 		}
 	}

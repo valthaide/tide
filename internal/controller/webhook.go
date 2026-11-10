@@ -8,8 +8,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
+
+	"github.com/valthaide/tide/internal/envcompat"
 )
 
 // WebhookHandler handles optional git push webhooks (GitLab/GitHub).
@@ -20,9 +21,9 @@ type WebhookHandler struct {
 	Secret   string
 }
 
-// NewWebhookHandlerFromEnv returns a handler when CONOPS_WEBHOOK_SECRET is set.
+// NewWebhookHandlerFromEnv returns a handler when TIDE_WEBHOOK_SECRET is set.
 func NewWebhookHandlerFromEnv(registry *Registry, logger *slog.Logger) *WebhookHandler {
-	secret := strings.TrimSpace(os.Getenv("CONOPS_WEBHOOK_SECRET"))
+	secret := envcompat.Getenv("TIDE_WEBHOOK_SECRET")
 	if secret == "" {
 		return nil
 	}
@@ -88,11 +89,11 @@ func (h *WebhookHandler) authorized(r *http.Request, body []byte) bool {
 	if tok := strings.TrimSpace(r.Header.Get("X-Gitlab-Token")); tok != "" {
 		return hmac.Equal([]byte(tok), []byte(h.Secret))
 	}
-	// Generic: Bearer or X-Conops-Webhook-Token
+	// Generic: Bearer or X-Tide-Webhook-Token
 	if authz := r.Header.Get("Authorization"); strings.HasPrefix(strings.ToLower(authz), "bearer ") {
 		return hmac.Equal([]byte(strings.TrimSpace(authz[7:])), []byte(h.Secret))
 	}
-	if tok := strings.TrimSpace(r.Header.Get("X-Conops-Webhook-Token")); tok != "" {
+	if tok := envcompat.WebhookTokenHeader(r.Header.Get); tok != "" {
 		return hmac.Equal([]byte(tok), []byte(h.Secret))
 	}
 	// GitHub: X-Hub-Signature-256 = sha256=...

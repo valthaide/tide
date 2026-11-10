@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
+	"github.com/valthaide/tide/internal/api"
 )
 
 func (s *SQLiteStore) InsertAppRevision(ctx context.Context, rev api.Revision) error {

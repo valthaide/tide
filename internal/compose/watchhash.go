@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/valthaide/conops-private/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/deploypolicy"
 )
 
 // WatchHashError is a stable, actionable failure while hashing watch_files.

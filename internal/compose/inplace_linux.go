@@ -14,7 +14,7 @@ import (
 // existing regular files. A container that bind-mounts one file (for example
 // prometheus.yml) keeps that inode and sees the new bytes after reload.
 func (e *ComposeExecutor) materializeInPlace(ctx context.Context, repoLog *strings.Builder, repoDir, rev string, gitEnv map[string]string) error {
-	tmp, err := os.MkdirTemp("", "conops-wt-")
+	tmp, err := os.MkdirTemp("", "tide-wt-")
 	if err != nil {
 		return err
 	}

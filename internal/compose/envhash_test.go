@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 func TestExternalEnvHash(t *testing.T) {
@@ -44,7 +44,7 @@ func TestExternalEnvHash(t *testing.T) {
 
 func TestExternalEnvHashMissing(t *testing.T) {
 	repo := t.TempDir()
-	compose := "services:\n  web:\n    image: nginx\n    env_file:\n      - /nonexistent/conops-env-test.env\n"
+	compose := "services:\n  web:\n    image: nginx\n    env_file:\n      - /nonexistent/tide-env-test.env\n"
 	if err := os.WriteFile(filepath.Join(repo, "compose.yaml"), []byte(compose), 0600); err != nil {
 		t.Fatal(err)
 	}

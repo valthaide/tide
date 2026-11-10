@@ -10,17 +10,16 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# VERSION is the image tag (v1.0.6) from CI. Empty stays "dev".
+# VERSION is the image tag from CI. Empty stays "dev".
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -ldflags "-s -w -X main.Version=${VERSION}" \
-      -o /app/conops ./cmd/conops \
+      -o /app/tide ./cmd/tide \
  && CGO_ENABLED=0 GOOS=linux go build \
-      -ldflags "-s -w -X github.com/valthaide/conops-private/cmd/cps/cmd.Version=${VERSION}" \
-      -o /app/cps ./cmd/cps
+      -ldflags "-s -w -X github.com/valthaide/tide/cmd/tidectl/cmd.Version=${VERSION}" \
+      -o /app/tidectl ./cmd/tidectl
 
-# Final stage. CLI and Compose come from docker:27-cli (API 1.47), the same
-# image the platform runner already pulls. Nothing is fetched from download.docker.com.
+# Final stage. CLI and Compose come from docker:27-cli (API 1.47).
 FROM docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c AS dockercli
 
 FROM alpine:3.19
@@ -39,12 +38,12 @@ RUN apk add --no-cache git openssh-client ca-certificates \
       || { echo "docker client API ${api} is below 1.44" >&2; exit 1; } \
  && docker compose version
 
-# Copy the binaries from builder. cps is on PATH for `cps version`.
-COPY --from=builder /app/conops .
-COPY --from=builder /app/cps /usr/local/bin/cps
+# Copy binaries from builder. Transitional compatibility alias symlinks are kept for one release.
+COPY --from=builder /app/tide /app/tide
+COPY --from=builder /app/tidectl /usr/local/bin/tidectl
+RUN ln -s /usr/local/bin/tidectl /usr/local/bin/cps \
+ && ln -s /app/tide /usr/local/bin/tide
 
-# Expose port
-EXPOSE 8080
+EXPOSE 8443 8081
 
-# Command to run
-CMD ["./conops"]
+ENTRYPOINT ["/app/tide"]

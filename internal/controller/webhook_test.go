@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/credentials"
-	"github.com/valthaide/conops-private/internal/store"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/credentials"
+	"github.com/valthaide/tide/internal/store"
 )
 
 func TestWebhookGitLabPushMatchesApp(t *testing.T) {

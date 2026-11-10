@@ -1,7 +1,8 @@
 version: 2
-project_name: cps
+project_name: tidectl
 builds:
-  - env:
+  - id: tidectl
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
@@ -10,15 +11,31 @@ builds:
     goarch:
       - amd64
       - arm64
-    main: ./cmd/cps
-    binary: cps
+    main: ./cmd/tidectl
+    binary: tidectl
     ldflags:
-      - -s -w -X github.com/valthaide/conops-private/cmd/cps/cmd.Version={{.Tag}}
+      - -s -w -X github.com/valthaide/tide/cmd/tidectl/cmd.Version={{.Tag}}
+  - id: tide
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/tide
+    binary: tide
+    ldflags:
+      - -s -w -X main.Version={{.Tag}}
 
 archives:
-  - format: tar.gz
+  - id: tidectl-archive
+    builds:
+      - tidectl
+    format: tar.gz
     name_template: >-
-      {{ .ProjectName }}_
+      tidectl_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
@@ -27,6 +44,17 @@ archives:
     format_overrides:
       - goos: windows
         format: zip
+  - id: tide-archive
+    builds:
+      - tide
+    format: tar.gz
+    name_template: >-
+      tide_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
 
 checksum:
   name_template: 'checksums.txt'

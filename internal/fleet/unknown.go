@@ -9,7 +9,7 @@ import (
 
 const supportedSchema = 1
 
-// StrictMode is CONOPS_FLEET_STRICT. Empty and warn keep unknown fields.
+// StrictMode is TIDE_FLEET_STRICT. Empty and warn keep unknown fields.
 // enforce rejects the host file before any app is changed.
 func StrictMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -46,7 +46,10 @@ func UnknownFields(data []byte) ([]string, error) {
 					return nil, fmt.Errorf("unknown_field: schema %d is newer than %d", n, supportedSchema)
 				}
 			}
-		case "host", "build", "require_digest", "allowed_registries", "reconcile_interval", "reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources", "create_volumes", "volume_name_pattern":
+		case "host", "build", "require_digest", "allowed_registries", "reconcile_interval",
+			"reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources",
+			"strict_pipeline_gate", "shared_required_jobs", "trusted_web_pipelines", "tenants",
+			"create_volumes", "volume_name_pattern":
 		case "apps":
 			unknown = append(unknown, unknownAppFields(val)...)
 		default:
@@ -61,10 +64,11 @@ func unknownAppFields(seq *yaml.Node) []string {
 		return nil
 	}
 	known := map[string]struct{}{
-		"name": {}, "repo_url": {}, "branch": {}, "revision": {}, "compose_path": {},
+		"name": {}, "tenant": {}, "repo_url": {}, "branch": {}, "revision": {}, "compose_path": {},
 		"repo_auth_method": {}, "poll_interval": {}, "deploy_key_file": {}, "suspended": {},
 		"prune_volumes": {}, "health_timeout": {}, "require_pipeline_success": {}, "require_pipeline_sources": {},
-		"watch_files": {}, "build": {}, "vars": {}, "project": {},
+		"strict_pipeline_gate": {}, "pipeline_ref": {}, "required_jobs": {}, "shared_required_jobs": {},
+		"trusted_web_pipelines": {}, "watch_files": {}, "build": {}, "vars": {}, "project": {},
 		"sync_timeout": {}, "pull_timeout": {}, "oneshot_timeout": {},
 		"require_digest": {}, "public_vars": {}, "allowed_registries": {},
 		"env_files": {}, "policy_exceptions": {},

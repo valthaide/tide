@@ -36,7 +36,7 @@ func TestSummarizeCompose(t *testing.T) {
 	      "container_name": "web",
 	      "ports": [{"published": "7777", "target": 80}],
 	      "volumes": [{"type": "bind", "source": "/var/lib/data", "target": "/data"}],
-	      "labels": {"com.conops.oneshot": "rerun"}
+	      "labels": {"com.tide.oneshot": "rerun"}
 	    },
 	    "db": {"image": "postgres:16"}
 	  },

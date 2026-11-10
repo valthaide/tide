@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 // externalVolumeAction decides what to do with one external volume name.
@@ -63,7 +63,7 @@ func (e *ComposeExecutor) ensureExternalVolume(ctx context.Context, syncLog *str
 		}
 		appendLogLine(syncLog, "volume_created: "+name)
 		if e.Logger != nil {
-			e.Logger.Info("Created external volume", "volume", name, "label", "com.conops.managed=true")
+			e.Logger.Info("Created external volume", "volume", name, "label", "com.tide.managed=true")
 		}
 		metrics.ObserveVolumeCreated(name)
 		if opts.OnVolumeCreated != nil {
@@ -78,6 +78,6 @@ func (e *ComposeExecutor) ensureExternalVolume(ctx context.Context, syncLog *str
 }
 
 func (e *ComposeExecutor) createExternalVolume(ctx context.Context, name string) error {
-	_, err := e.runCommand(ctx, "docker", []string{"volume", "create", "--label", "com.conops.managed=true", name}, e.runtimeWorkDir(), nil, nil)
+	_, err := e.runCommand(ctx, "docker", []string{"volume", "create", "--label", "com.tide.managed=true", name}, e.runtimeWorkDir(), nil, nil)
 	return err
 }

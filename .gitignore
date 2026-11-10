@@ -1,9 +1,9 @@
-.conops-*
+.tide-*
 bin
 .agents
 .cursor
 .launch
 .DS_Store
 /bin/
-/cps
-/conops
+/tidectl
+/tide

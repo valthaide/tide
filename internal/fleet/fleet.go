@@ -8,31 +8,52 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/pollinterval"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/pollinterval"
 	"go.yaml.in/yaml/v3"
 )
 
 // HostDocument describes apps that should run on one host.
 type HostDocument struct {
-	Schema                 int       `yaml:"schema"`
-	Host                   string    `yaml:"host"`
-	Build                  string    `yaml:"build"`
-	RequireDigest          *bool     `yaml:"require_digest"`
-	AllowedRegistries      []string  `yaml:"allowed_registries"`
-	ReconcileInterval      string    `yaml:"reconcile_interval"`
-	ReconcileConcurrency   int       `yaml:"reconcile_concurrency"`
-	RetryRejected          string    `yaml:"retry_rejected"`
-	Priority               *int      `yaml:"priority"`
-	RequirePipelineSources []string  `yaml:"require_pipeline_sources"`
-	CreateVolumes          bool      `yaml:"create_volumes"`
-	VolumeNamePattern      string    `yaml:"volume_name_pattern"`
-	Apps                   []AppSpec `yaml:"apps"`
+	Schema                 int                   `yaml:"schema"`
+	Host                   string                `yaml:"host"`
+	Build                  string                `yaml:"build"`
+	RequireDigest          *bool                 `yaml:"require_digest"`
+	AllowedRegistries      []string              `yaml:"allowed_registries"`
+	ReconcileInterval      string                `yaml:"reconcile_interval"`
+	ReconcileConcurrency   int                   `yaml:"reconcile_concurrency"`
+	RetryRejected          string                `yaml:"retry_rejected"`
+	Priority               *int                  `yaml:"priority"`
+	RequirePipelineSources []string              `yaml:"require_pipeline_sources"`
+	StrictPipelineGate     *bool                 `yaml:"strict_pipeline_gate"`
+	SharedRequiredJobs     []string              `yaml:"shared_required_jobs"`
+	TrustedWebPipelines    *TrustedWebSpec       `yaml:"trusted_web_pipelines"`
+	Tenants                map[string]TenantSpec `yaml:"tenants"`
+	CreateVolumes          bool                  `yaml:"create_volumes"`
+	VolumeNamePattern      string                `yaml:"volume_name_pattern"`
+	Apps                   []AppSpec             `yaml:"apps"`
+}
+
+// TenantSpec groups CI gate rules shared across apps belonging to one tenant.
+type TenantSpec struct {
+	RequiredJobs        []string        `yaml:"required_jobs"`
+	SharedRequiredJobs  []string        `yaml:"shared_required_jobs"`
+	TrustedWebPipelines *TrustedWebSpec `yaml:"trusted_web_pipelines"`
+}
+
+// TrustedWebSpec configures optional acceptance of manual (`web`) GitLab pipelines.
+type TrustedWebSpec struct {
+	Enabled          bool     `yaml:"enabled"`
+	AllowedUsers     []string `yaml:"allowed_users"`
+	AllowedVariables []string `yaml:"allowed_variables"`
+	RequiredJobs     []string `yaml:"required_jobs"`
 }
 
 // AppSpec is a desired application registration from fleet git.
 type AppSpec struct {
 	Name                   string            `yaml:"name"`
+	Tenant                 string            `yaml:"tenant"`
 	RepoURL                string            `yaml:"repo_url"`
 	Branch                 string            `yaml:"branch"`
 	Revision               string            `yaml:"revision"`
@@ -45,6 +66,11 @@ type AppSpec struct {
 	HealthTimeout          string            `yaml:"health_timeout"`
 	RequirePipelineSuccess bool              `yaml:"require_pipeline_success"`
 	RequirePipelineSources []string          `yaml:"require_pipeline_sources"`
+	StrictPipelineGate     *bool             `yaml:"strict_pipeline_gate"`
+	PipelineRef            string            `yaml:"pipeline_ref"`
+	RequiredJobs           []string          `yaml:"required_jobs"`
+	SharedRequiredJobs     []string          `yaml:"shared_required_jobs"`
+	TrustedWebPipelines    *TrustedWebSpec   `yaml:"trusted_web_pipelines"`
 	WatchFiles             []WatchFileSpec   `yaml:"watch_files"`
 	Build                  string            `yaml:"build"`
 	Vars                   map[string]string `yaml:"vars"`
@@ -94,12 +120,12 @@ type Config struct {
 // LoadConfigFromEnv reads fleet settings. Empty RepoURL means fleet disabled.
 func LoadConfigFromEnv(dataDir string) (Config, error) {
 	cfg := Config{
-		RepoURL:       strings.TrimSpace(os.Getenv("CONOPS_FLEET_REPO_URL")),
-		Branch:        strings.TrimSpace(os.Getenv("CONOPS_FLEET_BRANCH")),
-		Host:          strings.TrimSpace(os.Getenv("CONOPS_FLEET_HOST")),
-		AuthMethod:    strings.TrimSpace(os.Getenv("CONOPS_FLEET_AUTH_METHOD")),
-		Token:         strings.TrimSpace(os.Getenv("CONOPS_FLEET_TOKEN")),
-		KeyFile:       strings.TrimSpace(os.Getenv("CONOPS_FLEET_DEPLOY_KEY_FILE")),
+		RepoURL:       envcompat.Getenv("TIDE_FLEET_REPO_URL"),
+		Branch:        envcompat.Getenv("TIDE_FLEET_BRANCH"),
+		Host:          envcompat.Getenv("TIDE_FLEET_HOST"),
+		AuthMethod:    envcompat.Getenv("TIDE_FLEET_AUTH_METHOD"),
+		Token:         envcompat.Getenv("TIDE_FLEET_TOKEN"),
+		KeyFile:       envcompat.Getenv("TIDE_FLEET_DEPLOY_KEY_FILE"),
 		CacheDir:      filepath.Join(dataDir, "fleet-cache"),
 		Interval:      60 * time.Second,
 		MissingCycles: 3,
@@ -120,17 +146,17 @@ func LoadConfigFromEnv(dataDir string) (Config, error) {
 			cfg.AuthMethod = "public"
 		}
 	}
-	if v := strings.TrimSpace(os.Getenv("CONOPS_FLEET_MISSING_CYCLES")); v != "" {
+	if v := envcompat.Getenv("TIDE_FLEET_MISSING_CYCLES"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
-			return cfg, fmt.Errorf("invalid CONOPS_FLEET_MISSING_CYCLES: %s", v)
+			return cfg, fmt.Errorf("invalid TIDE_FLEET_MISSING_CYCLES: %s", v)
 		}
 		cfg.MissingCycles = n
 	}
-	if v := strings.TrimSpace(os.Getenv("CONOPS_FLEET_INTERVAL")); v != "" {
+	if v := envcompat.Getenv("TIDE_FLEET_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return cfg, fmt.Errorf("invalid CONOPS_FLEET_INTERVAL: %w", err)
+			return cfg, fmt.Errorf("invalid TIDE_FLEET_INTERVAL: %w", err)
 		}
 		if d > 0 {
 			cfg.Interval = d
@@ -138,7 +164,7 @@ func LoadConfigFromEnv(dataDir string) (Config, error) {
 	}
 	// Global git token fallback for fleet HTTPS
 	if cfg.Token == "" {
-		cfg.Token = strings.TrimSpace(os.Getenv("CONOPS_GIT_TOKEN"))
+		cfg.Token = envcompat.Getenv("TIDE_GIT_TOKEN")
 	}
 	return cfg, nil
 }
@@ -158,6 +184,7 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 	doc.Build = deploypolicy.NormalizeBuild(doc.Build)
 	for i := range doc.Apps {
 		doc.Apps[i].Name = strings.TrimSpace(doc.Apps[i].Name)
+		doc.Apps[i].Tenant = strings.TrimSpace(doc.Apps[i].Tenant)
 		doc.Apps[i].RepoURL = strings.TrimSpace(doc.Apps[i].RepoURL)
 		if doc.Apps[i].Branch == "" {
 			doc.Apps[i].Branch = "main"
@@ -166,6 +193,7 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 			doc.Apps[i].ComposePath = "docker-compose.yml"
 		}
 		doc.Apps[i].Revision = strings.TrimSpace(doc.Apps[i].Revision)
+		doc.Apps[i].PipelineRef = strings.TrimSpace(doc.Apps[i].PipelineRef)
 		if doc.Apps[i].PollInterval == "" {
 			doc.Apps[i].PollInterval = pollinterval.AppDefault().String()
 		}

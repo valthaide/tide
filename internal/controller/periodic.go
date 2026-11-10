@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/valthaide/conops-private/internal/api"
-	"github.com/valthaide/conops-private/internal/compose"
-	"github.com/valthaide/conops-private/internal/deploypolicy"
-	"github.com/valthaide/conops-private/internal/metrics"
-	"github.com/valthaide/conops-private/internal/syncerr"
+	"github.com/valthaide/tide/internal/api"
+	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/syncerr"
 )
 
 // QueueItem is one app waiting for an apply slot.
@@ -618,7 +618,7 @@ func (r *Reconciler) restoreQueue() {
 	}
 }
 
-// RetryApp puts one app back on the work queue without restarting ConOps.
+// RetryApp puts one app back on the work queue without restarting Tide.
 func (r *Reconciler) RetryApp(app *api.App) error {
 	if r == nil || app == nil {
 		return fmt.Errorf("app is nil")
@@ -806,7 +806,15 @@ func (r *Reconciler) publishQueue() {
 			}
 		}
 	}
-	metrics.SetQueueAppWaits(waits)
+	var allNames []string
+	if r.Registry != nil {
+		for _, a := range r.Registry.List() {
+			if a != nil && a.Name != "" {
+				allNames = append(allNames, a.Name)
+			}
+		}
+	}
+	metrics.SetQueueAppWaits(waits, allNames...)
 	metrics.SetQueueOldest(oldest)
 	running := 0
 	r.mu.Lock()
@@ -859,25 +867,6 @@ func (r *Reconciler) SetLimit(n int) {
 	}
 	r.limit = n
 	r.mu.Unlock()
-}
-
-func (r *Reconciler) SkipCI(id string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.skipCI == nil {
-		r.skipCI = map[string]struct{}{}
-	}
-	r.skipCI[id] = struct{}{}
-}
-
-func (r *Reconciler) consumeSkipCI(id string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.skipCI[id]; !ok {
-		return false
-	}
-	delete(r.skipCI, id)
-	return true
 }
 
 func (r *Reconciler) currentTrigger(id string) string {
