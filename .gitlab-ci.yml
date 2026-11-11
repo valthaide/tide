@@ -63,10 +63,7 @@ pull-github:
       umask 077
       export HOME="$(mktemp -d)"
       export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
-      printf '%s' "$GITHUB_PULL_KEY_B64" | base64 -d > "$HOME/key"
-      printf 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n' > "$HOME/known_hosts"
-      export GIT_SSH_COMMAND="ssh -i $HOME/key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/known_hosts -o HostKeyAlgorithms=ssh-ed25519"
-      gh="git@github.com:valthaide/tide.git"
+      gh="https://github.com/valthaide/tide.git"
       gl="https://${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
       auth="Authorization: Basic $(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64 | tr -d '\n')"
       git init -q "$HOME/work"
