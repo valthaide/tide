@@ -43,6 +43,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Publish the generated fleet host schema as a release asset:
+      #   versioned: https://github.com/valthaide/tide/releases/download/<tag>/host.schema.json
+      #   latest:    https://github.com/valthaide/tide/releases/latest/download/host.schema.json
+      - name: Publish host schema asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          go run ./cmd/tide schema host --version "${GITHUB_REF_NAME}" > host.schema.json
+          gh release upload "${GITHUB_REF_NAME}" host.schema.json --clobber
+
   image:
     needs: test
     runs-on: ubuntu-latest

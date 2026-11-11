@@ -37,6 +37,11 @@ func main() {
 }
 
 func runController(args []string, stdout, stderr io.Writer) int {
+	// Offline subcommands (schema/validate) run before any server setup:
+	// no lock, DB, Docker, or network.
+	if code, handled := runOfflineCommand(args, Version, stdout, stderr); handled {
+		return code
+	}
 	opts := parseServerArgs(args, Version, stdout, stderr)
 	if opts.Exit {
 		return opts.Code
@@ -174,6 +179,9 @@ func runController(args []string, stdout, stderr io.Writer) int {
 		}
 		if fleetCfg.Enabled() {
 			logger.Info("Fleet reconciler enabled", "repo", fleetCfg.RepoURL, "host", fleetCfg.Host, "interval", fleetCfg.Interval.String())
+			// Template-sourced apps read templates/<name>/compose.yaml from the
+			// fleet checkout the fleet reconciler keeps in fleet-cache/repo.
+			executor.FleetCheckoutDir = filepath.Join(fleetCfg.CacheDir, "repo")
 			fleetReconciler := fleet.NewReconciler(fleetCfg, registry, executor, logger)
 			fleetReconciler.RepoMigrator = reconciler
 			fleetReconciler.OnHost = func(doc *fleet.HostDocument) {

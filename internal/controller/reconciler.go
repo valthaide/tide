@@ -204,6 +204,83 @@ type EnvFileHasher interface {
 	ExternalEnvHashForApp(appID, composePath string) (string, error)
 }
 
+// sourceEnvFileHasher is the template-aware variant: env_file entries are
+// read from the fleet template plus the app override as well.
+type sourceEnvFileHasher interface {
+	ExternalEnvHashForSource(appID, composePath, template string) (string, error)
+}
+
+// templateHasher optionally hashes the effective template source of an app.
+type templateHasher interface {
+	TemplateHashForApp(appID, template string) (string, error)
+}
+
+func (r *Reconciler) externalEnvHash(app *App) (string, error) {
+	if app == nil || r.Executor == nil {
+		return "", nil
+	}
+	if hasher, ok := r.Executor.(sourceEnvFileHasher); ok {
+		return hasher.ExternalEnvHashForSource(app.ID, app.ComposePath, app.Template)
+	}
+	hasher, ok := r.Executor.(EnvFileHasher)
+	if !ok {
+		return "", nil
+	}
+	return hasher.ExternalEnvHashForApp(app.ID, app.ComposePath)
+}
+
+// templateHash returns the current template + override source hash, or ""
+// when the app does not use a template or the source cannot be read.
+func (r *Reconciler) templateHash(app *App) string {
+	if app == nil || strings.TrimSpace(app.Template) == "" || r.Executor == nil {
+		return ""
+	}
+	hasher, ok := r.Executor.(templateHasher)
+	if !ok {
+		return ""
+	}
+	hash, err := hasher.TemplateHashForApp(app.ID, app.Template)
+	if err != nil {
+		return ""
+	}
+	return hash
+}
+
+// templateDriftReason requeues a synced app whose fleet template (or its
+// override) changed since the last successful apply. The first observation
+// after upgrade only records the hash, without forcing a redeploy.
+func (r *Reconciler) templateDriftReason(app *App) string {
+	if app == nil || strings.TrimSpace(app.Template) == "" {
+		return ""
+	}
+	hash := r.templateHash(app)
+	if hash == "" {
+		return ""
+	}
+	if strings.TrimSpace(app.LastAppliedTemplateHash) == "" {
+		_ = r.Registry.UpdateTemplateHash(app.ID, hash)
+		app.LastAppliedTemplateHash = hash
+		return ""
+	}
+	if hash != app.LastAppliedTemplateHash {
+		if r.Logger != nil {
+			r.Logger.Info("fleet template or app override changed", "app_id", app.ID, "template", app.Template)
+		}
+		return "template_changed"
+	}
+	return ""
+}
+
+func (r *Reconciler) recordAppliedTemplateHash(app *App) {
+	if app == nil || strings.TrimSpace(app.Template) == "" {
+		return
+	}
+	if hash := r.templateHash(app); hash != "" {
+		_ = r.Registry.UpdateTemplateHash(app.ID, hash)
+		app.LastAppliedTemplateHash = hash
+	}
+}
+
 // WatchFileManager hashes watch_files and applies restart/reload actions.
 type WatchFileManager interface {
 	WatchFilesHashForApp(appID string, files []deploypolicy.WatchFile) (string, error)
@@ -437,6 +514,11 @@ func (r *Reconciler) dispatch() {
 			}
 		}
 		if app.Status == "synced" {
+			if reason := r.templateDriftReason(app); reason != "" {
+				r.requeuePending(app, reason)
+			}
+		}
+		if app.Status == "synced" {
 			r.handleWatchFileDrift(app)
 		}
 		if app.Status == "synced" || app.Status == "failed" || app.Status == "image_not_found" {
@@ -576,11 +658,15 @@ func (r *Reconciler) runtimeDriftReason(project string, snapshot map[string]comp
 }
 
 func (r *Reconciler) envFileDriftReason(app *App) string {
-	hasher, ok := r.Executor.(EnvFileHasher)
-	if !ok || app == nil {
+	if app == nil || r.Executor == nil {
 		return ""
 	}
-	hash, err := hasher.ExternalEnvHashForApp(app.ID, app.ComposePath)
+	if _, ok := r.Executor.(EnvFileHasher); !ok {
+		if _, ok := r.Executor.(sourceEnvFileHasher); !ok {
+			return ""
+		}
+	}
+	hash, err := r.externalEnvHash(app)
 	if err != nil {
 		se := syncerr.Classify(err)
 		if se.Code == syncerr.CodeEnvFileMissing {
@@ -917,6 +1003,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	}
 	_ = r.Registry.UpdateRollback(app.ID, target, rejected, deploypolicy.EncodeVars(fleetVars), rejectedVars)
 	r.recordAppliedEnvHash(app)
+	r.recordAppliedTemplateHash(app)
 	r.recordAppliedWatchHash(app)
 	if syncErr == "" {
 		r.clearTransient(app.ID)
@@ -1216,6 +1303,7 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 					_ = r.Registry.UpdateRollback(app.ID, prev, failedRevision, app.LastHealthyVars, failedVars)
 					r.noteDeploy(app, "rolled_back", prev, app.LastHealthyVars, revisionImages(r, app), "reconcile")
 					r.recordAppliedEnvHash(app)
+					r.recordAppliedTemplateHash(app)
 					r.recordAppliedWatchHash(app)
 					metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
 					return se
@@ -1235,6 +1323,12 @@ func (r *Reconciler) rollbackUnhealthy(ctx context.Context, app *App, failedRevi
 func (r *Reconciler) applyRuntime(ctx context.Context, app *App, envVars map[string]string, repoSecret []byte, commit string, opts compose.ApplyOptions, onProgress func(string)) (string, error) {
 	if app == nil {
 		return "", fmt.Errorf("app is nil")
+	}
+	// The compose project name comes only from opts.Project / the app, never
+	// from the compose source, so switching compose_path <-> template never
+	// renames the project or its volumes.
+	if strings.TrimSpace(opts.Template) == "" && strings.TrimSpace(app.Template) != "" {
+		opts.Template = app.Template
 	}
 	if ia, ok := r.Executor.(imageApplier); ok {
 		return ia.ApplyImages(ctx, app.ID, "", envVars, app.RepoURL, app.Branch, app.ComposePath, commit, app.RepoAuthMethod, repoSecret, opts, onProgress)
@@ -1809,11 +1903,10 @@ func (r *Reconciler) logWatchResult(app, action, path, reloadURL, service string
 }
 
 func (r *Reconciler) recordAppliedEnvHash(app *App) {
-	hasher, ok := r.Executor.(EnvFileHasher)
-	if !ok || app == nil {
+	if app == nil || r.Executor == nil {
 		return
 	}
-	hash, err := hasher.ExternalEnvHashForApp(app.ID, app.ComposePath)
+	hash, err := r.externalEnvHash(app)
 	if err != nil || hash == "" {
 		return
 	}

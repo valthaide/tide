@@ -5,6 +5,8 @@ Tide is a single-host GitOps controller for Docker Compose stacks, paired with t
 ## Overview
 
 - **Fleet-driven desired state**: One fleet repository declares the applications running on a host (`hosts/<fqdn>.yaml`), while each application tracks its own tenant or service Git repository (`repo_url`), branch/tag/SHA, and compose configuration.
+- **Fleet template compose source (v2.2)**: An app may set `template: <name>` instead of `compose_path`. Tide then uses `templates/<template>/compose.yaml` from its fleet checkout as the base compose file and merges the app's optional `compose.override.yaml` (in the app folder of its own repository; silently skipped when absent) after it, with Tide's own files last: `docker compose --project-directory <app folder> -p <project> -f <template> [-f <override>] …`. Relative paths, `.env`, and `env_file` resolve from the app folder, and the compose project name never depends on the source. Setting both `template` and `compose_path` is a validation error. App commits and changes under `templates/<template>/` both trigger synchronization, recreating only services whose rendered configuration changed; switching between `compose_path` and `template` with an unchanged rendered configuration is adopted without recreating any container (`no_restart`).
+- **Generated fleet schema & offline validation (v2.3)**: The JSON Schema for host files is generated from the fleet parser structs (`tide schema host --version v2.3.0 > schemas/host.schema.json`; a test keeps the committed `schemas/host.schema.json` in sync — never edit it by hand). Each release publishes it at `https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json` (`.../releases/latest/download/host.schema.json` tracks the newest release), and it ships in the controller image. Host files reference it via `$schema:` (see `examples/fleet/hosts/example.yaml`) for editor completion and highlighting. The image also carries `tide validate <files>` — fully offline (no controller, DB, or network) schema + cross-field validation (mutually exclusive fields, unique app names, template references) with `file: field.path: reason` output, `-o json` for CI, and non-zero exit on error. Fleet CI pins the Tide image of the host's version and runs `tide validate hosts/*.yaml` (see `examples/fleet/validate-ci.yaml`); the controller loads fleet files through the identical validation, so an offline-valid file cannot be rejected for format. The format version is `schema: 1`; unknown versions are rejected with a clear `unsupported_fleet_schema` error, and breaking format changes will raise it.
 - **Multi-tenant CI gate**:
   - Per-application repository, commit SHA, and ref isolation.
   - Optional `required_jobs` and `shared_required_jobs` (including parent-linked child pipeline bridges verified by exact SHA and ref) for shared repositories.
@@ -52,6 +54,11 @@ tidectl get app <name>
 tidectl retry <name>
 tidectl reconcile app <name> --force --sha <40-char-sha> --reason "incident-123"
 tidectl migrate-repo <name> --repo-url https://git.example/tenant/app.git --dry-run
+tidectl migrate-repo <name> --template web --dry-run
+tidectl check-template --fleet-dir /path/to/fleet-checkout --template web --app-dir /path/to/app
 tidectl audit
 tidectl validate --fleet-file hosts/example.yaml
+tide schema host --version v2.3.0
+tide validate hosts/*.yaml
+tide validate -o json hosts/*.yaml
 ```

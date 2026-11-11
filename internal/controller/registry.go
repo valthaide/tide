@@ -85,11 +85,25 @@ func (r *Registry) AddWithDeployKeyAndEnvs(app *api.App, secret string, serviceE
 		return fmt.Errorf("encryption support is unavailable: set %s", credentials.EncryptionKeyEnv)
 	}
 
+	app.Template = strings.TrimSpace(app.Template)
+	app.ComposePath = strings.TrimSpace(app.ComposePath)
+	if app.Template != "" && app.ComposePath != "" {
+		return fmt.Errorf("template_compose_path_conflict: set template or compose_path, not both")
+	}
+	if app.Template != "" {
+		if issue := fleetcheck.CheckTemplateName(app.Template); issue != nil {
+			return fmt.Errorf("%s", issue.Message)
+		}
+		// Template mode stores an empty compose_path. The compose project name
+		// never depends on the source, so switching sources keeps it stable.
+		app.ComposePath = ""
+	}
+
 	// Set defaults if missing
 	if app.Branch == "" {
 		app.Branch = "main"
 	}
-	if app.ComposePath == "" {
+	if app.ComposePath == "" && app.Template == "" {
 		app.ComposePath = "compose.yaml"
 	}
 	if app.PollInterval == "" {
@@ -277,9 +291,8 @@ func (r *Registry) UpdateApp(id, name, branch, composePath, pollInterval string,
 	if strings.TrimSpace(branch) == "" {
 		return fmt.Errorf("branch is required")
 	}
-	if strings.TrimSpace(composePath) == "" {
-		return fmt.Errorf("compose path is required")
-	}
+	// composePath may be empty for template-sourced apps; the template lives
+	// in its own column and is updated through UpdateRepository.
 	if strings.TrimSpace(pollInterval) == "" {
 		return fmt.Errorf("poll interval is required")
 	}
@@ -744,9 +757,19 @@ func (r *Registry) ListRevisions(id string, limit int) ([]api.Revision, error) {
 }
 
 // UpdateRepository updates repository source metadata in-place without changing the app ID or compose project.
-func (r *Registry) UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath string) error {
+func (r *Registry) UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath, template string) error {
 	if r == nil || r.store == nil || strings.TrimSpace(id) == "" {
 		return fmt.Errorf("app id is required")
+	}
+	template = strings.TrimSpace(template)
+	composePath = strings.TrimSpace(composePath)
+	if template != "" && composePath != "" {
+		return fmt.Errorf("template_compose_path_conflict: set template or compose_path, not both")
+	}
+	if template != "" {
+		if issue := fleetcheck.CheckTemplateName(template); issue != nil {
+			return fmt.Errorf("%s", issue.Message)
+		}
 	}
 	return r.store.UpdateAppRepository(
 		context.Background(),
@@ -755,8 +778,34 @@ func (r *Registry) UpdateRepository(id, repoURL, repoAuthMethod, branch, revisio
 		repoauth.NormalizeMethod(repoAuthMethod),
 		strings.TrimSpace(branch),
 		strings.TrimSpace(revision),
-		strings.TrimSpace(composePath),
+		composePath,
+		template,
 	)
+}
+
+// SetTemplate switches only the compose source of an app (used when the
+// repository migrator is not wired, e.g. unit tests).
+func (r *Registry) SetTemplate(id, template string) error {
+	if r == nil || strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	app, err := r.Get(id)
+	if err != nil {
+		return err
+	}
+	composePath := app.ComposePath
+	if strings.TrimSpace(template) != "" {
+		composePath = ""
+	}
+	return r.UpdateRepository(id, app.RepoURL, app.RepoAuthMethod, app.Branch, app.Revision, composePath, template)
+}
+
+// UpdateTemplateHash stores the template + override source hash applied last.
+func (r *Registry) UpdateTemplateHash(id, hash string) error {
+	if r == nil || r.store == nil || strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	return r.store.UpdateAppTemplateHash(context.Background(), id, hash)
 }
 
 // UpdateCIStatus persists the latest CI gate check state for status inspection.

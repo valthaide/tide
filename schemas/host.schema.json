@@ -1,0 +1,409 @@
+{
+  "$defs": {
+    "AppSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_registries": {
+          "description": "Registry allowlist for this app.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "branch": {
+          "description": "Branch to track. Default: main.",
+          "type": "string"
+        },
+        "build": {
+          "description": "Build policy for this app: allowed or forbidden.",
+          "type": "string"
+        },
+        "compose_path": {
+          "description": "Compose file inside the app repository. Mutually exclusive with template.",
+          "type": "string"
+        },
+        "deploy_key_file": {
+          "description": "Path to the SSH deploy key for repo_auth_method deploy_key.",
+          "type": "string"
+        },
+        "env_files": {
+          "description": "External env files on the host whose changes trigger reconciliation.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "health_timeout": {
+          "description": "How long to wait for containers to become healthy, e.g. 45s.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Application name, unique on the host.",
+          "type": "string"
+        },
+        "oneshot_timeout": {
+          "description": "Timeout for one-shot services, e.g. DB migrations.",
+          "type": "string"
+        },
+        "pipeline_ref": {
+          "description": "Git ref whose pipeline gates deployment.",
+          "type": "string"
+        },
+        "policy_exceptions": {
+          "description": "Per-service compose policy exceptions.",
+          "items": {
+            "$ref": "#/$defs/PolicyException"
+          },
+          "type": "array"
+        },
+        "poll_interval": {
+          "description": "Git poll interval, e.g. 30s.",
+          "type": "string"
+        },
+        "priority": {
+          "description": "Queue priority for this app (higher runs first).",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "Explicit Compose project name (adopts a pre-existing stack).",
+          "type": "string"
+        },
+        "prune_volumes": {
+          "description": "Prune named volumes when the app is removed.",
+          "type": "boolean"
+        },
+        "public_vars": {
+          "description": "Vars safe to show in status output.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pull_timeout": {
+          "description": "Timeout for image pulls of this app.",
+          "type": "string"
+        },
+        "reconcile_interval": {
+          "description": "Reconcile interval for this app, e.g. 5m.",
+          "type": "string"
+        },
+        "repo_auth_method": {
+          "description": "Repository auth: public, token, or deploy_key.",
+          "type": "string"
+        },
+        "repo_url": {
+          "description": "Git repository of the application.",
+          "type": "string"
+        },
+        "require_digest": {
+          "description": "Require @sha256 image digest pinning for this app.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "require_pipeline_sources": {
+          "description": "Pipeline sources that gate this app.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "require_pipeline_success": {
+          "description": "Require a green CI pipeline for the deployed commit.",
+          "type": "boolean"
+        },
+        "required_jobs": {
+          "description": "CI jobs that must succeed for this app.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "retry_rejected": {
+          "description": "Retry policy for rejected commits of this app.",
+          "type": "string"
+        },
+        "revision": {
+          "description": "Pinned tag or commit SHA; overrides branch tracking.",
+          "type": "string"
+        },
+        "shared_required_jobs": {
+          "description": "Required CI jobs shared with other apps from the same repository.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strict_pipeline_gate": {
+          "description": "Strict CI gate for this app.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "suspended": {
+          "description": "Fleet-level pause: keep the app registered but do not deploy.",
+          "type": "boolean"
+        },
+        "sync_timeout": {
+          "description": "Timeout for one sync of this app.",
+          "type": "string"
+        },
+        "template": {
+          "description": "Fleet template name: templates/<template>/compose.yaml from the fleet checkout, merged with the app's compose.override.yaml. Mutually exclusive with compose_path.",
+          "type": "string"
+        },
+        "tenant": {
+          "description": "Tenant this app belongs to (see tenants).",
+          "type": "string"
+        },
+        "trusted_web_pipelines": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/TrustedWebSpec"
+            }
+          ],
+          "description": "Acceptance rules for manual (web) pipelines for this app."
+        },
+        "vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Compose interpolation variables for this app.",
+          "type": "object"
+        },
+        "watch_files": {
+          "description": "Files watched for in-place reload instead of recreate.",
+          "items": {
+            "$ref": "#/$defs/WatchFileSpec"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "PolicyException": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "description": "Why the exception exists (audited).",
+          "type": "string"
+        },
+        "rule": {
+          "description": "Policy rule being excepted.",
+          "type": "string"
+        },
+        "service": {
+          "description": "Compose service the exception applies to.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TenantSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "required_jobs": {
+          "description": "CI jobs that must succeed for apps of this tenant.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shared_required_jobs": {
+          "description": "Required CI jobs shared across the tenant's apps.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trusted_web_pipelines": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/TrustedWebSpec"
+            }
+          ],
+          "description": "Acceptance rules for manual (web) pipelines for this tenant."
+        }
+      },
+      "type": "object"
+    },
+    "TrustedWebSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_users": {
+          "description": "GitLab users allowed to start trusted web pipelines.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowed_variables": {
+          "description": "Pipeline variables allowed on trusted web pipelines.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "description": "Accept manual (web) pipelines when they satisfy the rules below.",
+          "type": "boolean"
+        },
+        "required_jobs": {
+          "description": "CI jobs that must succeed on a trusted web pipeline.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "WatchFileSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "On change: restart or reload.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path inside the app checkout to watch.",
+          "type": "string"
+        },
+        "reload_command": {
+          "description": "Command executed in the container on reload, e.g. kill -HUP 1.",
+          "type": "string"
+        },
+        "reload_url": {
+          "description": "HTTP endpoint called on reload.",
+          "type": "string"
+        },
+        "service": {
+          "description": "Service to restart/reload.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Applications that should run on one host, declared in hosts/<fqdn>.yaml of a fleet repository. Generated from the Tide fleet parser structs; do not edit by hand.",
+  "properties": {
+    "$schema": {
+      "description": "URL of the published JSON Schema for this document, e.g. https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json. Used by editors; Tide only checks it is a known field.",
+      "type": "string"
+    },
+    "allowed_registries": {
+      "description": "Registry allowlist inherited by apps.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "apps": {
+      "description": "Applications that should run on this host.",
+      "items": {
+        "$ref": "#/$defs/AppSpec"
+      },
+      "type": "array"
+    },
+    "build": {
+      "description": "Host build policy: allowed or forbidden. Inherited by apps.",
+      "type": "string"
+    },
+    "create_volumes": {
+      "description": "Allow Tide to create missing external Docker volumes.",
+      "type": "boolean"
+    },
+    "host": {
+      "description": "Hostname (FQDN) this file describes. Defaults to the controller host when empty.",
+      "type": "string"
+    },
+    "priority": {
+      "description": "Default queue priority inherited by apps (higher runs first).",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "reconcile_concurrency": {
+      "description": "Max concurrent stack applies on this host.",
+      "type": "integer"
+    },
+    "reconcile_interval": {
+      "description": "Host-wide reconcile interval, e.g. 5m.",
+      "type": "string"
+    },
+    "require_digest": {
+      "description": "Require @sha256 image digest pinning for all apps on this host.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "require_pipeline_sources": {
+      "description": "Pipeline sources that gate deployments, inherited by apps.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "retry_rejected": {
+      "description": "Retry policy for rejected commits: never, on_new_commit, or interval like 30m.",
+      "type": "string"
+    },
+    "schema": {
+      "description": "Fleet format version. Supported version: 1. Omit to use the default. Unknown or newer versions are rejected.",
+      "enum": [
+        1
+      ],
+      "type": "integer"
+    },
+    "shared_required_jobs": {
+      "description": "Required CI jobs shared by all apps on this host.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "strict_pipeline_gate": {
+      "description": "Strict CI gate: absence of a trusted pipeline holds deployment.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "tenants": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TenantSpec"
+      },
+      "description": "Per-tenant CI gate rules, keyed by tenant name.",
+      "type": "object"
+    },
+    "trusted_web_pipelines": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TrustedWebSpec"
+        }
+      ],
+      "description": "Acceptance rules for manual (web) pipelines, inherited by apps."
+    },
+    "volume_name_pattern": {
+      "description": "Regex external volume names must match when create_volumes is on.",
+      "type": "string"
+    }
+  },
+  "title": "Tide fleet host document",
+  "type": "object",
+  "x-tide": {
+    "fleet_format_version": 1,
+    "latest_schema": "https://github.com/valthaide/tide/releases/latest/download/host.schema.json",
+    "tide_version": "v2.3.0"
+  }
+}

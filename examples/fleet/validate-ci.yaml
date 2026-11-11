@@ -1,0 +1,9 @@
+# Fleet repository CI: validate host files with the Tide image of the same
+# version that runs on the hosts. No controller, DB, or network needed,
+# and no local copy of the schema or validator.
+validate-fleet:
+  image: ghcr.io/valthaide/tide:v2.3.0
+  script:
+    - tide validate hosts/*.yaml
+    # Machine-readable output for CI tooling:
+    # - tide validate -o json hosts/*.yaml

@@ -86,12 +86,38 @@ func (r *Reconciler) MigrateRepo(
 	if !req.FromFleet && req.Revision == "" && req.Branch == "" {
 		revision = existing.Revision
 	}
+	// Compose source: fleet template XOR compose_path. Fleet requests carry
+	// the authoritative template (possibly empty = back to compose_path);
+	// API requests either name a template, keep the current source, or switch
+	// back by naming a compose_path for a template-sourced app.
+	template := strings.TrimSpace(existing.Template)
+	switch {
+	case req.FromFleet:
+		template = strings.TrimSpace(req.Template)
+	case strings.TrimSpace(req.Template) != "":
+		template = strings.TrimSpace(req.Template)
+	case strings.TrimSpace(req.ComposePath) != "" && template != "":
+		template = ""
+	}
 	composePath := strings.TrimSpace(req.ComposePath)
-	if composePath == "" {
+	if template != "" {
+		composePath = ""
+	} else if composePath == "" {
 		composePath = existing.ComposePath
 	}
-	if composePath == "" {
+	if composePath == "" && template == "" {
 		composePath = "docker-compose.yml"
+	}
+	if template != "" && strings.TrimSpace(req.ComposePath) != "" && !req.FromFleet {
+		if strings.TrimSpace(req.Template) != "" {
+			return plan, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, "template_compose_path_conflict: set template or compose_path, not both")
+		}
+		// Naming only a compose_path switches a template app back (handled above).
+		composePath = strings.TrimSpace(req.ComposePath)
+		template = ""
+	}
+	if issue := fleetcheck.CheckTemplateName(template); issue != nil {
+		return plan, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issue.Message)
 	}
 	pollInterval := strings.TrimSpace(req.PollInterval)
 	if pollInterval == "" {
@@ -131,6 +157,8 @@ func (r *Reconciler) MigrateRepo(
 		Revision:       revision,
 		OldComposePath: existing.ComposePath,
 		ComposePath:    composePath,
+		OldTemplate:    existing.Template,
+		Template:       template,
 		ComposeProject: existingProject,
 		DryRun:         req.DryRun,
 	}
@@ -143,6 +171,9 @@ func (r *Reconciler) MigrateRepo(
 			"new_branch":         branch,
 			"old_compose_path":   existing.ComposePath,
 			"new_compose_path":   composePath,
+			"old_template":       existing.Template,
+			"new_template":       template,
+			"has_override":       plan.HasOverride,
 			"mode":               plan.Mode,
 			"strategy":           plan.Strategy,
 			"migration_reason":   plan.Reason,
@@ -237,6 +268,7 @@ func (r *Reconciler) MigrateRepo(
 	candidateApp.Branch = branch
 	candidateApp.Revision = revision
 	candidateApp.ComposePath = composePath
+	candidateApp.Template = template
 	candidateApp.DeployPolicyJSON = deploypolicy.Encode(policy)
 	candidateApp.ApplyPolicy()
 
@@ -312,6 +344,7 @@ func (r *Reconciler) MigrateRepo(
 
 	applyOpts := compose.ApplyOptions{
 		Vars:              mergeInterpolation(fileVars, policy.Vars, existing.Name, existingProject),
+		Template:          template,
 		BuildMode:         policy.EffectiveBuild(),
 		Project:           existingProject,
 		RequireDigest:     policy.RequireDigest,
@@ -339,6 +372,7 @@ func (r *Reconciler) MigrateRepo(
 			NewBranch:      branch,
 			TargetCommit:   targetSHA,
 			NewComposePath: composePath,
+			NewTemplate:    template,
 			EnvVars:        envVars,
 			Opts:           applyOpts,
 			DryRun:         req.DryRun,
@@ -353,6 +387,7 @@ func (r *Reconciler) MigrateRepo(
 			return plan, se
 		}
 		defer prepared.Release()
+		plan.HasOverride = prepared.HasOverride
 		plan.Mode = prepared.Mode
 		plan.Strategy = prepared.Strategy
 		plan.Reason = prepared.Reason
@@ -420,7 +455,7 @@ func (r *Reconciler) MigrateRepo(
 	if pollInterval != "" && pollInterval != existing.PollInterval {
 		_ = r.Registry.UpdateApp(existing.ID, existing.Name, branch, composePath, pollInterval, nil)
 	}
-	if err := r.Registry.UpdateRepository(existing.ID, newRepoURL, method, branch, revision, composePath); err != nil {
+	if err := r.Registry.UpdateRepository(existing.ID, newRepoURL, method, branch, revision, composePath, template); err != nil {
 		recordOutcome("cutover_failed_db", compose.MigrationModeFailed, "db_error", ciRes, err)
 		return plan, err
 	}
@@ -462,14 +497,20 @@ func (r *Reconciler) MigrateRepo(
 	// 6A. Zero-restart path: rendered configuration matches running containers 1:1.
 	if prepared.Equivalent {
 		now := time.Now()
-		adoptOutput := fmt.Sprintf("source adopted without container restart: repo=%s branch=%s compose_path=%s commit=%s reason=%s",
-			newRepoURL, branch, composePath, targetSHA, plan.Reason)
+		sourceDesc := "compose_path=" + composePath
+		if template != "" {
+			sourceDesc = fmt.Sprintf("template=%s override=%v", template, prepared.HasOverride)
+		}
+		adoptOutput := fmt.Sprintf("source adopted without container restart: repo=%s branch=%s %s commit=%s reason=%s",
+			newRepoURL, branch, sourceDesc, targetSHA, plan.Reason)
 		_ = r.Registry.UpdateSyncResult(updatedApp.ID, "synced", now, targetSHA, "", adoptOutput, "")
 		_ = r.Registry.UpdateRollback(updatedApp.ID, targetSHA, "", deploypolicy.EncodeVars(policy.Vars), "")
 		_ = r.Registry.ClearRetry(updatedApp.ID)
 		r.clearTransient(updatedApp.ID)
 		r.dequeue(updatedApp.ID)
 		r.recordAppliedEnvHash(updatedApp)
+		r.recordAppliedTemplateHash(updatedApp)
+		r.recordAppliedTemplateHash(updatedApp)
 		r.recordAppliedWatchHash(updatedApp)
 		if plan.CIStatus == cigate.OutcomeAllow {
 			_ = r.Registry.UpdateCIStatus(updatedApp.ID, "allowed", "ok", ciRes.WebURL, ciRes.Source, ciRes.PipelineID, now)
@@ -526,6 +567,7 @@ func (r *Reconciler) MigrateRepo(
 	r.clearTransient(updatedApp.ID)
 	r.dequeue(updatedApp.ID)
 	r.recordAppliedEnvHash(updatedApp)
+	r.recordAppliedTemplateHash(updatedApp)
 	r.recordAppliedWatchHash(updatedApp)
 	if plan.CIStatus == cigate.OutcomeAllow {
 		_ = r.Registry.UpdateCIStatus(updatedApp.ID, "allowed", "ok", ciRes.WebURL, ciRes.Source, ciRes.PipelineID, now)

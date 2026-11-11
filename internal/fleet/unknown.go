@@ -7,7 +7,25 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const supportedSchema = 1
+// SupportedSchemaVersion is the fleet format version (`schema:` field) this
+// Tide understands. Adding optional fields keeps the version; removing or
+// repurposing fields raises it and must be described in the release notes.
+const SupportedSchemaVersion = 1
+
+const supportedSchema = SupportedSchemaVersion
+
+// CheckSchemaVersion rejects a fleet format version this Tide does not
+// support. Zero means "not specified" and is accepted as the current
+// version; anything newer or negative is a clear, actionable error.
+func CheckSchemaVersion(v int) error {
+	if v == 0 {
+		return nil
+	}
+	if v < 0 || v > SupportedSchemaVersion {
+		return fmt.Errorf("unsupported_fleet_schema: schema version %d is not supported by this Tide (supported: %d; set `schema: %d` or omit the field)", v, SupportedSchemaVersion, SupportedSchemaVersion)
+	}
+	return nil
+}
 
 // StrictMode is TIDE_FLEET_STRICT. Empty and warn keep unknown fields.
 // enforce rejects the host file before any app is changed.
@@ -43,10 +61,10 @@ func UnknownFields(data []byte) ([]string, error) {
 			if val.Kind == yaml.ScalarNode {
 				var n int
 				if _, err := fmt.Sscan(val.Value, &n); err == nil && n > supportedSchema {
-					return nil, fmt.Errorf("unknown_field: schema %d is newer than %d", n, supportedSchema)
+					return nil, CheckSchemaVersion(n)
 				}
 			}
-		case "host", "build", "require_digest", "allowed_registries", "reconcile_interval",
+		case "$schema", "host", "build", "require_digest", "allowed_registries", "reconcile_interval",
 			"reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources",
 			"strict_pipeline_gate", "shared_required_jobs", "trusted_web_pipelines", "tenants",
 			"create_volumes", "volume_name_pattern":
@@ -64,7 +82,7 @@ func unknownAppFields(seq *yaml.Node) []string {
 		return nil
 	}
 	known := map[string]struct{}{
-		"name": {}, "tenant": {}, "repo_url": {}, "branch": {}, "revision": {}, "compose_path": {},
+		"name": {}, "tenant": {}, "repo_url": {}, "branch": {}, "revision": {}, "compose_path": {}, "template": {},
 		"repo_auth_method": {}, "poll_interval": {}, "deploy_key_file": {}, "suspended": {},
 		"prune_volumes": {}, "health_timeout": {}, "require_pipeline_success": {}, "require_pipeline_sources": {},
 		"strict_pipeline_gate": {}, "pipeline_ref": {}, "required_jobs": {}, "shared_required_jobs": {},

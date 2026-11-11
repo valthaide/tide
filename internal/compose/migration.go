@@ -27,9 +27,12 @@ type MigrationPrepParams struct {
 	NewBranch      string
 	TargetCommit   string
 	NewComposePath string
-	EnvVars        map[string]string
-	Opts           ApplyOptions
-	DryRun         bool
+	// NewTemplate selects the fleet template source for the target. It is an
+	// alternative to NewComposePath; Opts.Template carries the same value.
+	NewTemplate string
+	EnvVars     map[string]string
+	Opts        ApplyOptions
+	DryRun      bool
 }
 
 // MigrationPrepared holds the verified staging artifacts, equivalence diff, and plan summary before cutover.
@@ -49,6 +52,10 @@ type MigrationPrepared struct {
 	ToCreate          []string
 	ImagesVerified    []string
 	Prep              imagePrep
+	// Template is the target fleet template (empty in compose_path mode) and
+	// HasOverride whether the staged app checkout provides an override.
+	Template    string
+	HasOverride bool
 }
 
 // Release cleans up temporary staging files when dry-running or aborting before cutover.
@@ -117,18 +124,33 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 	}
 
 	composeRel := strings.TrimSpace(p.NewComposePath)
-	if composeRel == "" {
+	template := strings.TrimSpace(p.NewTemplate)
+	if template == "" {
+		template = strings.TrimSpace(p.Opts.Template)
+	}
+	if template != "" && composeRel != "" {
+		return out, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, "template_compose_path_conflict: set template or compose_path, not both")
+	}
+	if composeRel == "" && template == "" {
 		composeRel = "docker-compose.yml"
 	}
-	composeFullPath := filepath.Join(stagingRepoDir, composeRel)
-	composeDir := filepath.Dir(composeFullPath)
-	composeFileName := filepath.Base(composeFullPath)
-	if info, statErr := os.Stat(composeFullPath); statErr != nil || info.IsDir() {
-		return out, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, fmt.Sprintf("compose file not found in new repository: %s", composeRel))
+	opts := p.Opts
+	opts.Template = template
+	// Resolve the target source exactly as a deploy would: fleet template +
+	// staged app override (project directory = staged app folder), or the
+	// staged compose_path file. This is the preflight render; a failure here
+	// leaves the live stack untouched.
+	inv, invErr := e.ResolveInvocation(stagingRepoDir, composeRel, opts)
+	if invErr != nil {
+		return out, invErr
 	}
+	out.Template = inv.Template
+	out.HasOverride = inv.HasOverride
+	composeFullPath := inv.Primary
+	composeDir := inv.ProjectDir
 
 	// Verify any external host env_files referenced by compose exist before proceeding.
-	if _, extErr := ExternalEnvHash(stagingRepoDir, composeRel); extErr != nil {
+	if _, extErr := ExternalEnvHashFiles(composeDir, inv.Files); extErr != nil {
 		return out, extErr
 	}
 
@@ -144,9 +166,8 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 	}
 
 	var syncLog strings.Builder
-	opts := p.Opts
 	opts.Project = projectName
-	prep, prepErr := e.prepareImageSync(ctx, &syncLog, projectName, composeFileName, composeDir, composeFullPath, overrideArgs, opts, func(string) {})
+	prep, prepErr := e.prepareImageSync(ctx, &syncLog, projectName, inv, overrideArgs, opts, func(string) {})
 	if prepErr != nil {
 		prep.clean()
 		return out, prepErr
@@ -160,7 +181,7 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 
 	// 3. Verify that all images (including digest pins) are reachable BEFORE touching the running stack.
 	if len(prep.images) > 0 && !e.pinnedDigestsLocal(ctx, prep.images) {
-		if err := e.verifyOrPullImages(ctx, composeDir, projectName, composeFileName, overrideArgs, prep, opts, p.DryRun); err != nil {
+		if err := e.verifyOrPullImages(ctx, inv, projectName, overrideArgs, prep, opts, p.DryRun); err != nil {
 			return out, err
 		}
 	}
@@ -299,6 +320,14 @@ func (e *ComposeExecutor) CommitRepoMigration(ctx context.Context, appID, oldCom
 		return err
 	}
 	_ = fsperm.RelaxCheckoutTree(targetRepoDir)
+	// The fleet template itself does not move (it lives in the fleet
+	// checkout); only the app checkout changed, so re-resolve and remember
+	// the target source for later down/restart/exec calls.
+	if prepared.Template != "" {
+		if inv, invErr := e.ResolveInvocation(targetRepoDir, "", ApplyOptions{Template: prepared.Template}); invErr == nil {
+			e.rememberSource(appID, inv)
+		}
+	}
 	return nil
 }
 
@@ -470,12 +499,14 @@ func moveOrCopyDir(src, dst string) error {
 
 func (e *ComposeExecutor) verifyOrPullImages(
 	ctx context.Context,
-	composeDir, projectName, composeFileName string,
+	inv Invocation,
+	projectName string,
 	overrideArgs []string,
 	prep imagePrep,
 	opts ApplyOptions,
 	dryRun bool,
 ) error {
+	composeDir := inv.ProjectDir
 	if dryRun {
 		for _, img := range prep.images {
 			if _, err := e.runCommand(ctx, "docker", []string{"image", "inspect", img}, composeDir, prep.env, nil); err == nil {
@@ -495,11 +526,7 @@ func (e *ComposeExecutor) verifyOrPullImages(
 	}
 	defer pullRelease()
 
-	pullArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
-	if len(overrideArgs) > 0 {
-		pullArgs = append(pullArgs, overrideArgs...)
-	}
-	pullArgs = append(pullArgs, "pull")
+	pullArgs := inv.Args(projectName, overrideArgs, "pull")
 	var transcript strings.Builder
 	pullOut, err := e.runCommandWithTranscript(pullCtx, &transcript, "docker", pullArgs, composeDir, prep.env, func(string) {
 		bumpPull()

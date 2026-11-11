@@ -41,6 +41,9 @@ RUN apk add --no-cache git openssh-client ca-certificates \
 # Copy binaries from builder. Transitional compatibility alias symlinks are kept for one release.
 COPY --from=builder /app/tide /app/tide
 COPY --from=builder /app/tidectl /usr/local/bin/tidectl
+# The generated fleet host JSON Schema ships in the image; `tide schema host`
+# prints the same bytes for the running version.
+COPY schemas/host.schema.json /app/schemas/host.schema.json
 RUN ln -s /usr/local/bin/tidectl /usr/local/bin/cps \
  && ln -s /app/tide /usr/local/bin/tide
 

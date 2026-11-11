@@ -162,7 +162,13 @@ func printAppDetail(app api.App) {
 	fmt.Printf("Auth:           %s\n", app.RepoAuthMethod)
 	fmt.Printf("Branch:         %s\n", app.Branch)
 	fmt.Printf("Revision:       %s\n", orDash(app.Revision))
-	fmt.Printf("Compose:        %s\n", app.ComposePath)
+	if app.Template != "" {
+		fmt.Printf("Template:       %s\n", app.Template)
+		fmt.Printf("Override:       %s\n", map[bool]string{true: "compose.override.yaml", false: "(none)"}[app.HasOverride])
+	} else {
+		fmt.Printf("Compose:        %s\n", app.ComposePath)
+	}
+	fmt.Printf("Fleet Commit:   %s\n", orDash(app.FleetRevision))
 	fmt.Printf("Poll Interval:  %s\n", app.PollInterval)
 	fmt.Printf("Seen Commit:    %s\n", orDash(app.LastSeenCommit))
 	fmt.Printf("Seen Message:   %s\n", orDash(app.LastSeenCommitMessage))

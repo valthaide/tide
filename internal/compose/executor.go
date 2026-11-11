@@ -34,6 +34,12 @@ type ComposeExecutor struct {
 	WorkDir string
 	Logger  *slog.Logger
 	Secrets *secrets.Manager
+	// FleetCheckoutDir is the fleet checkout root holding templates/<name>/.
+	// It is wired from the fleet reconciler; TIDE_FLEET_CHECKOUT_DIR is a fallback.
+	FleetCheckoutDir string
+
+	sourcesMu sync.Mutex
+	sources   map[string]Invocation
 
 	toolchainMu      sync.Mutex
 	dockerResolution dockerCommandResolution
@@ -153,11 +159,17 @@ func (e *ComposeExecutor) ApplyImages(
 		emitProgress()
 		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("repo url is empty")
 	}
-	if strings.TrimSpace(composePath) == "" {
+	if strings.TrimSpace(composePath) == "" && strings.TrimSpace(opts.Template) == "" {
 		appendLogSection(&syncLog, "Validation")
 		appendLogLine(&syncLog, "compose path is empty")
 		emitProgress()
 		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("compose path is empty")
+	}
+	if strings.TrimSpace(opts.Template) != "" && strings.TrimSpace(composePath) != "" {
+		appendLogSection(&syncLog, "Validation")
+		appendLogLine(&syncLog, "template and compose_path are both set; set only one compose source")
+		emitProgress()
+		return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, "template_compose_path_conflict: set template or compose_path, not both")
 	}
 	if strings.TrimSpace(branch) == "" {
 		branch = "main"
@@ -222,22 +234,34 @@ func (e *ComposeExecutor) ApplyImages(
 		emitProgress()
 	}
 
-	composeFullPath := filepath.Join(repoDir, composePath)
-	composeDir := filepath.Dir(composeFullPath)
-	if _, err := os.Stat(composeDir); err != nil {
-		appendLogSection(&syncLog, "Compose file")
-		appendLogLine(&syncLog, fmt.Sprintf("compose directory does not exist: %s", composeDir))
-		appendLogLine(&syncLog, err.Error())
+	// Resolve the compose source. Template mode reads the base file from the
+	// fleet checkout and the optional override from the app folder; the app
+	// folder (checkout root) becomes --project-directory so relative paths,
+	// `.env` and `env_file` resolve from the app, exactly as for compose_path.
+	inv, invErr := e.ResolveInvocation(repoDir, composePath, opts)
+	if invErr != nil {
+		appendLogSection(&syncLog, "Compose source")
+		appendLogLine(&syncLog, invErr.Error())
 		emitProgress()
-		return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("compose dir not found: %w", err)
+		return redact.String(strings.TrimSpace(syncLog.String())), invErr
 	}
+	composeDir := inv.ProjectDir
+	composeFullPath := inv.Primary
+	e.rememberSource(appID, inv)
 
-	// Prepare env var override files if needed (must happen after composeDir is determined)
+	// Prepare env var override files if needed (must happen after the project
+	// directory is determined). Tide's own files always merge last.
 	var envFilesCleanup func()
 	var overrideArgs []string
 
 	wroteCompose := false
 	if strings.TrimSpace(content) != "" {
+		if inv.Template != "" {
+			appendLogSection(&syncLog, "Compose source")
+			appendLogLine(&syncLog, "compose content from the request cannot replace a fleet template")
+			emitProgress()
+			return redact.String(strings.TrimSpace(syncLog.String())), syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, "template_compose_content: request compose content is not allowed with template")
+		}
 		if err := os.WriteFile(composeFullPath, []byte(content), 0644); err != nil {
 			appendLogSection(&syncLog, "Compose file")
 			appendLogLine(&syncLog, fmt.Sprintf("failed to write compose file: %s", composeFullPath))
@@ -246,23 +270,14 @@ func (e *ComposeExecutor) ApplyImages(
 			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("failed to write compose file: %w", err)
 		}
 		wroteCompose = true
-	} else {
-		if _, err := os.Stat(composeFullPath); err != nil {
-			appendLogSection(&syncLog, "Compose file")
-			appendLogLine(&syncLog, fmt.Sprintf("compose file not found: %s", composeFullPath))
-			appendLogLine(&syncLog, err.Error())
-			emitProgress()
-			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("compose file not found: %w", err)
-		}
 	}
-	composeFileName := filepath.Base(composeFullPath)
 	projectName := strings.TrimSpace(opts.Project)
 	if projectName == "" {
 		projectName = e.projectFor(appID)
 	}
 	e.RememberProject(appID, projectName)
 
-	// Prepare env var override files if needed (must use composeDir as base)
+	// Prepare env var override files if needed (must use the project directory as base)
 	if len(envVars) > 0 {
 		var envErr error
 		overrideArgs, envFilesCleanup, envErr = e.prepareEnvOverrides(composeDir, envVars)
@@ -276,22 +291,25 @@ func (e *ComposeExecutor) ApplyImages(
 		defer envFilesCleanup()
 	}
 
-	appendLogSection(&syncLog, "Compose file")
-	appendLogLine(&syncLog, fmt.Sprintf("path: %s", composeFullPath))
+	appendLogSection(&syncLog, "Compose source")
+	appendLogLine(&syncLog, inv.Describe())
 	appendLogLine(&syncLog, fmt.Sprintf("written_from_request: %t", wroteCompose))
 	emitProgress()
 
 	if e.Logger != nil {
 		e.Logger.Info(
-			"Compose file ready",
+			"Compose source ready",
 			"app_id", appID,
-			"path", composeFullPath,
+			"source", inv.Describe(),
 			"bytes", len(content),
 			"written", wroteCompose,
 		)
 	}
 
-	prep, prepErr := e.prepareImageSync(ctx, &syncLog, projectName, composeFileName, composeDir, composeFullPath, overrideArgs, opts, func(string) {})
+	// Preflight: `docker compose config` over template + override + Tide files
+	// runs inside prepareImageSync, before any pull or `up`. A failure here
+	// aborts the deploy with the app left in an error state; nothing starts.
+	prep, prepErr := e.prepareImageSync(ctx, &syncLog, projectName, inv, overrideArgs, opts, func(string) {})
 	emitProgress()
 	if prepErr != nil {
 		prep.clean()
@@ -310,11 +328,7 @@ func (e *ComposeExecutor) ApplyImages(
 		if e.Logger != nil {
 			e.Logger.Info("Pulling images", "app_id", appID)
 		}
-		pullArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
-		if len(overrideArgs) > 0 {
-			pullArgs = append(pullArgs, overrideArgs...)
-		}
-		pullArgs = append(pullArgs, "pull")
+		pullArgs := inv.Args(projectName, overrideArgs, "pull")
 
 		// The idle clock starts after a pull slot is acquired. Time spent
 		// waiting for TIDE_PULL_PARALLEL is not pull silence.
@@ -356,11 +370,7 @@ func (e *ComposeExecutor) ApplyImages(
 	}
 	if len(prep.oneshots) > 0 {
 		shotCtx, shotCancel := context.WithTimeout(context.Background(), shotTimeout)
-		oneArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
-		if len(overrideArgs) > 0 {
-			oneArgs = append(oneArgs, overrideArgs...)
-		}
-		oneArgs = append(oneArgs, "up", "-d")
+		oneArgs := inv.Args(projectName, overrideArgs, "up", "-d")
 		if !prep.noBuild {
 			oneArgs = append(oneArgs, "--build")
 		}
@@ -376,11 +386,7 @@ func (e *ComposeExecutor) ApplyImages(
 			return redact.String(strings.TrimSpace(syncLog.String())), fmt.Errorf("up failed: %w", oneErr)
 		}
 		if len(prep.rerun) > 0 {
-			reArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
-			if len(overrideArgs) > 0 {
-				reArgs = append(reArgs, overrideArgs...)
-			}
-			reArgs = append(reArgs, "up", "-d", "--no-deps", "--force-recreate")
+			reArgs := inv.Args(projectName, overrideArgs, "up", "-d", "--no-deps", "--force-recreate")
 			reArgs = append(reArgs, prep.rerun...)
 			_, _ = e.runCommandWithTranscript(shotCtx, &syncLog, "docker", reArgs, composeDir, prep.env, onProgress)
 		}
@@ -409,11 +415,7 @@ func (e *ComposeExecutor) ApplyImages(
 		e.Logger.Info("Applying configuration", "app_id", appID)
 	}
 
-	upArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
-	if len(overrideArgs) > 0 {
-		upArgs = append(upArgs, overrideArgs...)
-	}
-	upArgs = append(upArgs, "up", "-d", "--remove-orphans")
+	upArgs := inv.Args(projectName, overrideArgs, "up", "-d", "--remove-orphans")
 	if !prep.noBuild {
 		upArgs = append(upArgs, "--build")
 	}
@@ -447,21 +449,15 @@ func (e *ComposeExecutor) RestartService(ctx context.Context, appID, composePath
 		return "", fmt.Errorf("service name is required for restart")
 	}
 	projectName := e.projectFor(appID)
-	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
+	inv, err := e.invocationForRuntime(appID, composePath)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(composePath) == "" {
-		composePath = "compose.yaml"
-	}
-	composeFullPath := filepath.Join(appDirAbs, "repo", composePath)
-	composeDir := filepath.Dir(composeFullPath)
-	composeFileName := filepath.Base(composeFullPath)
 	out, err := e.runCommand(
 		ctx,
 		"docker",
-		[]string{"compose", "-p", projectName, "-f", composeFileName, "restart", service},
-		composeDir,
+		inv.Args(projectName, nil, "restart", service),
+		inv.ProjectDir,
 		nil,
 		nil,
 	)
@@ -476,20 +472,12 @@ func (e *ComposeExecutor) ExecService(ctx context.Context, appID, composePath, s
 		return fmt.Errorf("reload command requires service and command")
 	}
 	projectName := e.projectFor(appID)
-	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
+	inv, err := e.invocationForRuntime(appID, composePath)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(composePath) == "" {
-		composePath = "compose.yaml"
-	}
-	composeFullPath := filepath.Join(appDirAbs, "repo", composePath)
-	composeDir := filepath.Dir(composeFullPath)
-	composeFileName := filepath.Base(composeFullPath)
-	_, err = e.runCommand(ctx, "docker", []string{
-		"compose", "-p", projectName, "-f", composeFileName,
-		"exec", "-T", service, "sh", "-c", command,
-	}, composeDir, nil, nil)
+	args := inv.Args(projectName, nil, "exec", "-T", service, "sh", "-c", command)
+	_, err = e.runCommand(ctx, "docker", args, inv.ProjectDir, nil, nil)
 	return err
 }
 
@@ -526,13 +514,12 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 		return "", fmt.Errorf("resolve app dir failed: %w", err)
 	}
 
-	repoDir := filepath.Join(appDirAbs, "repo")
-	if strings.TrimSpace(composePath) == "" {
-		composePath = "compose.yaml"
+	inv, invErr := e.invocationForRuntime(appID, composePath)
+	if invErr != nil {
+		return "", invErr
 	}
-	composeFullPath := filepath.Join(repoDir, composePath)
-	composeDir := filepath.Dir(composeFullPath)
-	composeFileName := filepath.Base(composeFullPath)
+	composeFullPath := inv.Primary
+	composeDir := inv.ProjectDir
 
 	var outputs []string
 	downAttempted := false
@@ -542,13 +529,24 @@ func (e *ComposeExecutor) Destroy(ctx context.Context, appID, composePath string
 		keptVolumes = e.projectVolumeNames(ctx, projectName)
 	}
 
-	if fileInfo, statErr := os.Stat(composeFullPath); statErr == nil && !fileInfo.IsDir() {
+	composeFilesExist := len(inv.Files) > 0
+	for _, f := range inv.Files {
+		if info, statErr := os.Stat(f); statErr != nil || info.IsDir() {
+			composeFilesExist = false
+			break
+		}
+	}
+	if composeFilesExist {
 		downAttempted = true
-		e.Logger.Info("Stopping app stack", "app_id", appID, "project", projectName, "compose_file", composeFullPath, "prune_volumes", pruneVolumes)
+		if e.Logger != nil {
+			e.Logger.Info("Stopping app stack", "app_id", appID, "project", projectName, "compose_file", composeFullPath, "prune_volumes", pruneVolumes)
+		}
+		// Volume pruning stays with pruneProjectVolumes below, as before.
+		downArgs := inv.Args(projectName, nil, "down", "--remove-orphans")
 		downOut, downErr := e.runCommand(
 			ctx,
 			"docker",
-			composeDownArgs(projectName, composeFileName, pruneVolumes),
+			downArgs,
 			composeDir,
 			envVars,
 			nil,

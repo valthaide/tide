@@ -55,6 +55,14 @@ type ApplyOptions struct {
 	VolumeNamePattern string
 	// OnVolumeCreated reports a volume this apply created.
 	OnVolumeCreated func(name string)
+	// Template selects templates/<Template>/compose.yaml from the fleet
+	// checkout as the base compose file, merged with the app's optional
+	// compose.override.yaml. Empty means the app's compose_path file is used.
+	// Template and a compose_path must never be combined by callers.
+	Template string
+	// FleetCheckoutDir is the fleet checkout root holding templates/.
+	// Empty falls back to the executor's configured checkout.
+	FleetCheckoutDir string
 }
 
 // SlotGate limits how many image pulls run at once.
@@ -311,32 +319,39 @@ func sortStrings(values []string) {
 
 // prepareImageSync validates interpolation and build policy, then logs into
 // the registry. It does not pull or start containers.
+//
+// This is the preflight for every deploy: the resolved invocation (fleet
+// template + app override + Tide files, or the app's compose_path file) must
+// render through `docker compose config` here, before any pull or `up`.
 func (e *ComposeExecutor) prepareImageSync(
 	ctx context.Context,
 	syncLog *strings.Builder,
-	projectName, composeFileName, composeDir, composeFullPath string,
+	projectName string,
+	inv Invocation,
 	overrideArgs []string,
 	opts ApplyOptions,
 	onProgress func(string),
 ) (imagePrep, error) {
 	mode, noBuild := resolveBuild(opts)
-	data, err := os.ReadFile(composeFullPath)
-	if err != nil {
-		return imagePrep{}, fmt.Errorf("read compose file: %w", err)
+	composeDir := inv.ProjectDir
+	var combined strings.Builder
+	for _, file := range inv.Files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return imagePrep{}, fmt.Errorf("read compose file: %w", err)
+		}
+		combined.Write(data)
+		combined.WriteByte('\n')
 	}
 	env := interpolationEnv(composeDir, opts.Vars)
-	if missing := MissingInterpolations(string(data), env); len(missing) > 0 {
+	if missing := MissingInterpolations(combined.String(), env); len(missing) > 0 {
 		appendLogSection(syncLog, "Validation")
 		appendLogLine(syncLog, "unset_var: "+strings.Join(missing, ","))
 		return imagePrep{}, unsetVarError(missing)
 	}
 
 	appendLogSection(syncLog, "Compose config")
-	configArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
-	if len(overrideArgs) > 0 {
-		configArgs = append(configArgs, overrideArgs...)
-	}
-	configArgs = append(configArgs, "config", "--format", "json")
+	configArgs := inv.Args(projectName, overrideArgs, "config", "--format", "json")
 	configOut, configErr := e.runCommand(ctx, "docker", configArgs, composeDir, copyVars(opts.Vars), onProgress)
 	if names := unsetVarsInOutput(configOut); len(names) > 0 {
 		appendLogLine(syncLog, "unset_var: "+strings.Join(names, ","))
@@ -348,6 +363,18 @@ func (e *ComposeExecutor) prepareImageSync(
 		lower := strings.ToLower(configOut + " " + configErr.Error())
 		if strings.Contains(lower, "variable") && (strings.Contains(lower, "not set") || strings.Contains(lower, "missing")) {
 			return imagePrep{}, unsetVarError([]string{"unknown"})
+		}
+		if inv.Template != "" {
+			detail := strings.TrimSpace(configOut)
+			if len(detail) > 600 {
+				detail = detail[:600]
+			}
+			msg := fmt.Sprintf("template_compose_invalid: template %q with override=%v failed `docker compose config`", inv.Template, inv.HasOverride)
+			if detail != "" {
+				msg += ": " + detail
+			}
+			appendLogLine(syncLog, msg)
+			return imagePrep{}, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, msg)
 		}
 		return imagePrep{}, fmt.Errorf("compose config failed: %w", configErr)
 	}

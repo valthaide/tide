@@ -15,7 +15,10 @@ import (
 
 // Issue is one fleet or compose validation problem.
 type Issue struct {
-	App     string `json:"app,omitempty"`
+	App string `json:"app,omitempty"`
+	// Path is the field path inside the host file, e.g. apps[1].template.
+	// Empty means the whole document.
+	Path    string `json:"path,omitempty"`
 	Rule    string `json:"rule"`
 	Message string `json:"message"`
 }

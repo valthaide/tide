@@ -17,7 +17,8 @@ type Store interface {
 	ListApps(ctx context.Context) ([]*api.App, error)
 	DeleteApp(ctx context.Context, id string) error
 	UpdateApp(ctx context.Context, id, name, branch, composePath, pollInterval string) error
-	UpdateAppRepository(ctx context.Context, id, repoURL, repoAuthMethod, branch, revision, composePath string) error
+	UpdateAppRepository(ctx context.Context, id, repoURL, repoAuthMethod, branch, revision, composePath, template string) error
+	UpdateAppTemplateHash(ctx context.Context, id, hash string) error
 	UpdateAppCIStatus(ctx context.Context, id, ciStatus, ciReason, ciURL, ciSource string, ciPipelineID int64, checkedAt time.Time) error
 	SetAppSuspended(ctx context.Context, id string, suspended bool) error
 	SetAppRevision(ctx context.Context, id, revision string) error

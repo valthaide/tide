@@ -33,6 +33,7 @@ type registerAppRequest struct {
 	GitToken       string            `json:"git_token"`
 	Branch         string            `json:"branch"`
 	ComposePath    string            `json:"compose_path"`
+	Template       string            `json:"template,omitempty"`
 	PollInterval   string            `json:"poll_interval"`
 	ServiceEnvs    map[string]string `json:"service_envs"`
 }
@@ -41,6 +42,7 @@ type updateAppRequest struct {
 	Name         *string            `json:"name,omitempty"`
 	Branch       *string            `json:"branch,omitempty"`
 	ComposePath  *string            `json:"compose_path,omitempty"`
+	Template     *string            `json:"template,omitempty"`
 	PollInterval *string            `json:"poll_interval,omitempty"`
 	ServiceEnvs  *map[string]string `json:"service_envs,omitempty"`
 }
@@ -171,6 +173,7 @@ func (h *Handler) RegisterApp(w http.ResponseWriter, r *http.Request) {
 		RepoAuthMethod: strings.TrimSpace(req.RepoAuthMethod),
 		Branch:         strings.TrimSpace(req.Branch),
 		ComposePath:    strings.TrimSpace(req.ComposePath),
+		Template:       strings.TrimSpace(req.Template),
 		PollInterval:   strings.TrimSpace(req.PollInterval),
 	}
 
@@ -248,6 +251,14 @@ func (h *Handler) attachRunningImages(ctx context.Context, apps []*api.App) {
 func (h *Handler) decorate(ctx context.Context, apps []*api.App) {
 	h.attachRunningImages(ctx, apps)
 	h.attachOneshot(ctx, apps)
+	// Status shows whether the app checkout provides compose.override.yaml.
+	if inspector, ok := h.Inspector.(interface{ HasOverrideForApp(appID string) bool }); ok && inspector != nil {
+		for _, app := range apps {
+			if app != nil && app.Template != "" {
+				app.HasOverride = inspector.HasOverrideForApp(app.ID)
+			}
+		}
+	}
 	if q, ok := h.SyncGate.(interface{ Annotate([]*api.App) }); ok {
 		q.Annotate(apps)
 	}
@@ -461,9 +472,11 @@ func (h *Handler) UpdateApp(w http.ResponseWriter, r *http.Request) {
 	pollInterval := app.PollInterval
 	var serviceEnvs map[string]string
 
+	template := app.Template
 	// Track if sync-affecting fields changed
 	branchChanged := false
 	composePathChanged := false
+	templateChanged := false
 	envVarsChanged := false
 
 	if req.Name != nil {
@@ -483,6 +496,16 @@ func (h *Handler) UpdateApp(w http.ResponseWriter, r *http.Request) {
 		}
 		composePath = newPath
 	}
+	if req.Template != nil {
+		newTemplate := strings.TrimSpace(*req.Template)
+		if newTemplate != app.Template {
+			templateChanged = true
+		}
+		template = newTemplate
+		if newTemplate != "" {
+			composePath = ""
+		}
+	}
 	if req.PollInterval != nil {
 		pollInterval = strings.TrimSpace(*req.PollInterval)
 	}
@@ -494,7 +517,7 @@ func (h *Handler) UpdateApp(w http.ResponseWriter, r *http.Request) {
 	migrator, hasMigrator := h.SyncGate.(interface {
 		MigrateRepo(ctx context.Context, existing *api.App, req api.RepoMigrationRequest, nextPolicyJSON string) (api.RepoMigrationPlan, error)
 	})
-	if (branchChanged || composePathChanged) && !envVarsChanged && hasMigrator && migrator != nil {
+	if (branchChanged || composePathChanged || templateChanged) && !envVarsChanged && hasMigrator && migrator != nil {
 		if name != app.Name || pollInterval != app.PollInterval {
 			if err := h.Registry.UpdateApp(id, name, app.Branch, app.ComposePath, pollInterval, nil); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -508,6 +531,7 @@ func (h *Handler) UpdateApp(w http.ResponseWriter, r *http.Request) {
 			Branch:         branch,
 			Revision:       app.Revision,
 			ComposePath:    composePath,
+			Template:       template,
 			PollInterval:   pollInterval,
 			Reason:         "api patch source updated",
 			Actor:          actor,
@@ -552,8 +576,15 @@ func (h *Handler) UpdateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if templateChanged {
+		if err := h.Registry.SetTemplate(id, template); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Trigger sync if sync-affecting fields changed
-	needsSync := branchChanged || composePathChanged || envVarsChanged
+	needsSync := branchChanged || composePathChanged || templateChanged || envVarsChanged
 	if needsSync {
 		if err := h.Registry.UpdateStatus(id, "pending", nil); err != nil && h.Logger != nil {
 			h.Logger.Warn("Failed to mark app pending after update", "id", id, "error", err)
@@ -1037,6 +1068,7 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 	progress := newSyncProgressReporter(h.Registry, h.Logger, app.ID, syncProgressFlushInterval)
 	opts := compose.ApplyOptions{
 		Vars:              app.Policy().Vars,
+		Template:          app.Template,
 		BuildMode:         app.Policy().EffectiveBuild(),
 		Project:           app.ComposeProject(),
 		CreateVolumes:     app.Policy().CreateVolumes,
@@ -1085,9 +1117,22 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 		h.Logger.Warn("Failed to update sync status after force sync", "id", app.ID, "error", err)
 	}
 	_ = h.Registry.UpdateRollback(app.ID, app.LastSeenCommit, "", deploypolicy.EncodeVars(opts.Vars), "")
-	if hasher, ok := h.Applier.(EnvFileHasher); ok {
+	if hasher, ok := h.Applier.(interface {
+		ExternalEnvHashForSource(appID, composePath, template string) (string, error)
+	}); ok {
+		if hash, hashErr := hasher.ExternalEnvHashForSource(app.ID, app.ComposePath, app.Template); hashErr == nil && hash != "" {
+			_ = h.Registry.UpdateEnvHash(app.ID, hash)
+		}
+	} else if hasher, ok := h.Applier.(EnvFileHasher); ok {
 		if hash, hashErr := hasher.ExternalEnvHashForApp(app.ID, app.ComposePath); hashErr == nil && hash != "" {
 			_ = h.Registry.UpdateEnvHash(app.ID, hash)
+		}
+	}
+	if hasher, ok := h.Applier.(interface {
+		TemplateHashForApp(appID, template string) (string, error)
+	}); ok && app.Template != "" {
+		if hash, hashErr := hasher.TemplateHashForApp(app.ID, app.Template); hashErr == nil && hash != "" {
+			_ = h.Registry.UpdateTemplateHash(app.ID, hash)
 		}
 	}
 	return nil

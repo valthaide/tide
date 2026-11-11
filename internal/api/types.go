@@ -18,8 +18,19 @@ type App struct {
 	RepoAuthMethod string `json:"repo_auth_method"`
 	Branch         string `json:"branch"`
 	// Revision is an optional fleet ref: branch name, tag, or full SHA. Empty tracks Branch.
-	Revision                string                   `json:"revision,omitempty"`
-	ComposePath             string                   `json:"compose_path"`
+	Revision    string `json:"revision,omitempty"`
+	ComposePath string `json:"compose_path"`
+	// Template selects templates/<Template>/compose.yaml from the fleet
+	// checkout as the compose source, merged with the app's optional
+	// compose.override.yaml. Mutually exclusive with ComposePath: a template
+	// app stores an empty ComposePath. Empty means compose_path mode.
+	Template string `json:"template,omitempty"`
+	// LastAppliedTemplateHash is the hash of the template + override source
+	// at the last successful apply (template mode only).
+	LastAppliedTemplateHash string `json:"-"`
+	// HasOverride reports whether the app checkout currently provides
+	// compose.override.yaml. Filled on read, not stored.
+	HasOverride             bool                     `json:"has_override,omitempty"`
 	PollInterval            string                   `json:"poll_interval"` // Duration string e.g. "30s"
 	LastSeenCommit          string                   `json:"last_seen_commit"`
 	LastSeenCommitMessage   string                   `json:"last_seen_commit_message"`
@@ -162,32 +173,41 @@ type AuditEvent struct {
 
 // RepoMigrationRequest describes a production-safe repository / source migration.
 type RepoMigrationRequest struct {
-	RepoURL        string            `json:"repo_url"`
-	RepoAuthMethod string            `json:"repo_auth_method,omitempty"`
-	DeployKey      string            `json:"deploy_key,omitempty"`
-	Branch         string            `json:"branch,omitempty"`
-	Revision       string            `json:"revision,omitempty"`
-	ComposePath    string            `json:"compose_path,omitempty"`
-	PollInterval   string            `json:"poll_interval,omitempty"`
-	Vars           map[string]string `json:"vars,omitempty"`
-	DryRun         bool              `json:"dry_run,omitempty"`
-	Reason         string            `json:"reason,omitempty"`
-	Actor          string            `json:"actor,omitempty"`
-	FromFleet      bool              `json:"-"`
+	RepoURL        string `json:"repo_url"`
+	RepoAuthMethod string `json:"repo_auth_method,omitempty"`
+	DeployKey      string `json:"deploy_key,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	Revision       string `json:"revision,omitempty"`
+	ComposePath    string `json:"compose_path,omitempty"`
+	// Template switches the compose source to a fleet template (alternative
+	// to ComposePath). FromFleet requests treat it as authoritative,
+	// including empty (switch back to compose_path).
+	Template     string            `json:"template,omitempty"`
+	PollInterval string            `json:"poll_interval,omitempty"`
+	Vars         map[string]string `json:"vars,omitempty"`
+	DryRun       bool              `json:"dry_run,omitempty"`
+	Reason       string            `json:"reason,omitempty"`
+	Actor        string            `json:"actor,omitempty"`
+	FromFleet    bool              `json:"-"`
 }
 
 // RepoMigrationPlan is returned by dry-run and completed repository migrations.
 type RepoMigrationPlan struct {
-	AppID             string   `json:"app_id"`
-	AppName           string   `json:"app_name"`
-	OldRepoURL        string   `json:"old_repo_url"`
-	NewRepoURL        string   `json:"new_repo_url"`
-	OldBranch         string   `json:"old_branch,omitempty"`
-	Branch            string   `json:"branch"`
-	Revision          string   `json:"revision,omitempty"`
-	TargetCommit      string   `json:"target_commit"`
-	OldComposePath    string   `json:"old_compose_path,omitempty"`
-	ComposePath       string   `json:"compose_path"`
+	AppID          string `json:"app_id"`
+	AppName        string `json:"app_name"`
+	OldRepoURL     string `json:"old_repo_url"`
+	NewRepoURL     string `json:"new_repo_url"`
+	OldBranch      string `json:"old_branch,omitempty"`
+	Branch         string `json:"branch"`
+	Revision       string `json:"revision,omitempty"`
+	TargetCommit   string `json:"target_commit"`
+	OldComposePath string `json:"old_compose_path,omitempty"`
+	ComposePath    string `json:"compose_path"`
+	OldTemplate    string `json:"old_template,omitempty"`
+	Template       string `json:"template,omitempty"`
+	// HasOverride reports whether the target app checkout provides
+	// compose.override.yaml (template mode).
+	HasOverride       bool     `json:"has_override,omitempty"`
 	ComposeProject    string   `json:"compose_project"`
 	CIStatus          string   `json:"ci_status"`
 	CIPipelineID      int64    `json:"ci_pipeline_id,omitempty"`

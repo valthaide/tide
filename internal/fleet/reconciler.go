@@ -16,6 +16,7 @@ import (
 	"github.com/valthaide/tide/internal/api"
 	"github.com/valthaide/tide/internal/deploypolicy"
 	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/fleetcheck"
 	"github.com/valthaide/tide/internal/gitremote"
 	"github.com/valthaide/tide/internal/gitrev"
 	"github.com/valthaide/tide/internal/metrics"
@@ -60,6 +61,12 @@ type Reconciler struct {
 	Logger        *slog.Logger
 	OnHost        func(*HostDocument)
 	missingStreak int
+	// fleetRoot is the current fleet checkout (holds templates/<name>/).
+	fleetRoot string
+	// templateHashes remembers the last seen content hash per template so a
+	// fleet commit that only changes templates/<template>/ requeues exactly
+	// the apps using that template.
+	templateHashes map[string]string
 }
 
 // NewReconciler creates a fleet reconciler.
@@ -160,24 +167,33 @@ func (r *Reconciler) loadDesired(ctx context.Context) (*HostDocument, error) {
 	if err != nil {
 		return nil, err
 	}
-	unknown, unknownErr := UnknownFields(data)
-	if unknownErr != nil {
-		return nil, unknownErr
-	}
+	// The controller validates a host file exactly like `tide validate`
+	// does offline (ValidateDocument: generated schema + cross-field
+	// rules). A file that passed offline validation cannot be rejected
+	// here for format.
 	mode := StrictMode(envcompat.Getenv("TIDE_FLEET_STRICT"))
-	if len(unknown) > 0 && mode == "enforce" {
-		return nil, fmt.Errorf("unknown_field: %s", strings.Join(unknown, ","))
+	report, doc, validateErr := ValidateDocument(data, ValidateOptions{FleetDir: root, Strict: mode})
+	if validateErr != nil {
+		return nil, validateErr
 	}
-	if len(unknown) > 0 && r.Logger != nil {
-		r.Logger.Warn("Unknown fleet fields ignored", "fields", strings.Join(unknown, ","))
+	if len(report.Unknown) > 0 && r.Logger != nil {
+		r.Logger.Warn("Unknown fleet fields ignored", "fields", strings.Join(report.Unknown, ","))
 	}
-	doc, err := ParseHostDocument(data)
-	if err != nil {
-		return nil, err
+	if !report.OK {
+		parts := make([]string, 0, len(report.Issues))
+		for _, issue := range report.Issues {
+			where := issue.Path
+			if where == "" {
+				where = "(document)"
+			}
+			parts = append(parts, where+": "+issue.Message)
+		}
+		return nil, fmt.Errorf("fleet validation failed for %s: %s", path, strings.Join(parts, "; "))
 	}
 	if doc.Host == "" {
 		doc.Host = r.Config.Host
 	}
+	r.fleetRoot = root
 	return doc, nil
 }
 
@@ -321,6 +337,8 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 		}
 	}
 
+	r.enqueueTemplateChanges(doc)
+
 	for _, app := range r.Apps.List() {
 		if app == nil {
 			continue
@@ -354,6 +372,13 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 		return err
 	}
 
+	if strings.TrimSpace(spec.Template) != "" && strings.TrimSpace(spec.ComposePath) != "" {
+		return fmt.Errorf("template_compose_path_conflict: app %s sets both template and compose_path; set only one", spec.Name)
+	}
+	if issue := fleetcheck.CheckTemplateName(spec.Template); issue != nil {
+		return fmt.Errorf("%s (app %s)", issue.Message, spec.Name)
+	}
+
 	existing := r.Apps.FindByName(spec.Name)
 	if existing == nil {
 		app := &api.App{
@@ -363,6 +388,7 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 			Branch:         spec.Branch,
 			Revision:       spec.Revision,
 			ComposePath:    spec.ComposePath,
+			Template:       spec.Template,
 			PollInterval:   spec.PollInterval,
 			Suspended:      spec.Suspended,
 		}
@@ -389,8 +415,10 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 	// skips container restart when rendered configuration is identical, and leaves old source untouched on error).
 	repoChanged := !strings.EqualFold(strings.TrimSpace(existing.RepoURL), strings.TrimSpace(spec.RepoURL)) ||
 		repoauth.NormalizeMethod(existing.RepoAuthMethod) != method
+	templateChanged := strings.TrimSpace(existing.Template) != strings.TrimSpace(spec.Template)
 	sourceLocChanged := strings.TrimSpace(existing.Branch) != strings.TrimSpace(spec.Branch) ||
-		strings.TrimSpace(existing.ComposePath) != strings.TrimSpace(spec.ComposePath)
+		strings.TrimSpace(existing.ComposePath) != strings.TrimSpace(spec.ComposePath) ||
+		templateChanged
 
 	if repoChanged || (sourceLocChanged && r.RepoMigrator != nil) {
 		nextPolicy := policyJSONFromSpec(spec, doc)
@@ -401,6 +429,8 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 				migReason = "fleet repo_url updated"
 			case strings.TrimSpace(existing.Branch) != strings.TrimSpace(spec.Branch):
 				migReason = "fleet branch updated"
+			case templateChanged:
+				migReason = "fleet template updated"
 			case strings.TrimSpace(existing.ComposePath) != strings.TrimSpace(spec.ComposePath):
 				migReason = "fleet compose_path updated"
 			}
@@ -411,6 +441,7 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 				Branch:         spec.Branch,
 				Revision:       spec.Revision,
 				ComposePath:    spec.ComposePath,
+				Template:       spec.Template,
 				PollInterval:   spec.PollInterval,
 				Vars:           spec.Vars,
 				Reason:         migReason,
@@ -428,9 +459,9 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 
 		// Unit-test fallback when RepoMigrator is not wired: preserve app ID, compose project, and running containers.
 		if updater, ok := r.Apps.(interface {
-			UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath string) error
+			UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath, template string) error
 		}); ok {
-			if err := updater.UpdateRepository(existing.ID, spec.RepoURL, method, spec.Branch, spec.Revision, spec.ComposePath); err != nil {
+			if err := updater.UpdateRepository(existing.ID, spec.RepoURL, method, spec.Branch, spec.Revision, spec.ComposePath, spec.Template); err != nil {
 				return err
 			}
 			if err := r.Apps.UpdateDeployPolicy(existing.ID, nextPolicy); err != nil {
@@ -450,6 +481,7 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 		existing.Branch = spec.Branch
 		existing.Revision = spec.Revision
 		existing.ComposePath = spec.ComposePath
+		existing.Template = spec.Template
 		_ = r.Apps.UpdateApp(existing.ID, spec.Name, spec.Branch, spec.ComposePath, spec.PollInterval, nil)
 		_ = r.Apps.SetRevision(existing.ID, spec.Revision)
 		_ = r.Apps.UpdateDeployPolicy(existing.ID, nextPolicy)
@@ -460,6 +492,26 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 
 	if err := r.Apps.UpdateApp(existing.ID, spec.Name, spec.Branch, spec.ComposePath, spec.PollInterval, nil); err != nil {
 		return err
+	}
+	if templateChanged {
+		// No RepoMigrator wired: switch the stored source and requeue. The
+		// apply itself still renders template + override through preflight
+		// and `compose up` recreates only services whose config changed.
+		if setter, ok := r.Apps.(interface {
+			SetTemplate(id, template string) error
+		}); ok {
+			if err := setter.SetTemplate(existing.ID, spec.Template); err != nil {
+				return err
+			}
+		} else {
+			existing.Template = spec.Template
+		}
+		if err := r.Apps.MarkPending(existing.ID); err != nil {
+			return err
+		}
+		if r.Logger != nil {
+			r.Logger.Info("Fleet template updated", "name", spec.Name, "template", spec.Template)
+		}
 	}
 	varsChanged := !deploypolicy.VarsEqual(existing.Policy().Vars, spec.Vars)
 	if err := r.Apps.UpdateDeployPolicy(existing.ID, policyJSONFromSpec(spec, doc)); err != nil {

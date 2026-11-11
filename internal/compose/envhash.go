@@ -26,6 +26,88 @@ func (e *ComposeExecutor) ExternalEnvHashForApp(appID, composePath string) (stri
 	return ExternalEnvHash(repoDir, composePath)
 }
 
+// ExternalEnvHashForSource is ExternalEnvHashForApp for either compose
+// source: a compose_path file, or a fleet template plus the app override.
+// Relative env_file entries resolve from the project directory (the app
+// folder in template mode), matching the deploy invocation.
+func (e *ComposeExecutor) ExternalEnvHashForSource(appID, composePath, template string) (string, error) {
+	if e == nil {
+		return "", fmt.Errorf("compose executor is nil")
+	}
+	repoDir := filepath.Join(e.WorkDir, appID, "repo")
+	if strings.TrimSpace(template) == "" {
+		if strings.TrimSpace(composePath) == "" {
+			composePath = "compose.yaml"
+		}
+		return ExternalEnvHash(repoDir, composePath)
+	}
+	inv, err := e.ResolveInvocation(repoDir, "", ApplyOptions{Template: template})
+	if err != nil {
+		return "", err
+	}
+	return ExternalEnvHashFiles(inv.ProjectDir, inv.Files)
+}
+
+// ExternalEnvHashFiles hashes absolute env_file paths referenced by any of
+// the given compose files. Relative entries resolve from projectDir.
+func ExternalEnvHashFiles(projectDir string, files []string) (string, error) {
+	var paths []string
+	seen := map[string]struct{}{}
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		found, err := extractAbsoluteEnvFiles(data, projectDir)
+		if err != nil {
+			return "", err
+		}
+		for _, p := range found {
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			paths = append(paths, p)
+		}
+	}
+	repoAbs := ""
+	if len(files) > 0 {
+		// External means outside every compose file's tree is too strict for
+		// template mode (the template lives in the fleet checkout); treat the
+		// project directory as the app tree instead.
+		repoAbs, _ = filepath.Abs(projectDir)
+	}
+	var external []string
+	for _, p := range paths {
+		abs := p
+		if !filepath.IsAbs(abs) {
+			continue
+		}
+		if repoAbs != "" && (abs == repoAbs || strings.HasPrefix(abs, repoAbs+string(os.PathSeparator))) {
+			continue
+		}
+		external = append(external, abs)
+	}
+	sort.Strings(external)
+
+	h := sha256.New()
+	for _, p := range external {
+		content, readErr := os.ReadFile(p)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				return "", syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageCompose, fmt.Sprintf("env_file missing: %s", p))
+			}
+			return "", readErr
+		}
+		sum := sha256.Sum256(content)
+		fmt.Fprintf(h, "%s=%s\n", p, hex.EncodeToString(sum[:]))
+	}
+	if len(external) == 0 {
+		return "", nil
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // ExternalEnvHash computes a stable hash of absolute env_file paths referenced
 // by the compose file that live outside the repository checkout.
 // Missing required env files return CodeEnvFileMissing.

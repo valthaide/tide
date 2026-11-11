@@ -10,13 +10,13 @@ import (
 	"github.com/valthaide/tide/internal/api"
 )
 
-func (s *SQLiteStore) UpdateAppRepository(ctx context.Context, id, repoURL, repoAuthMethod, branch, revision, composePath string) error {
+func (s *SQLiteStore) UpdateAppRepository(ctx context.Context, id, repoURL, repoAuthMethod, branch, revision, composePath, template string) error {
 	query := `
 	UPDATE apps
-	SET repo_url = ?, repo_auth_method = ?, branch = ?, revision = ?, compose_path = ?
+	SET repo_url = ?, repo_auth_method = ?, branch = ?, revision = ?, compose_path = ?, template = ?
 	WHERE id = ?
 	`
-	result, err := s.execContext(ctx, query, repoURL, repoAuthMethod, branch, revision, composePath, id)
+	result, err := s.execContext(ctx, query, repoURL, repoAuthMethod, branch, revision, composePath, template, id)
 	if err != nil {
 		return err
 	}

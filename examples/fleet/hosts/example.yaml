@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json
+$schema: https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json
+schema: 1
+host: example.internal
+apps:
+  - name: web
+    repo_url: https://git.example/org/web.git
+    branch: main
+    template: web
+  - name: api
+    repo_url: https://git.example/org/api.git
+    branch: main
+    compose_path: docker-compose.yml

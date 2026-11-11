@@ -102,6 +102,15 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "revision TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	// Tide v2.2: fleet template compose source. Additive only — older binaries
+	// keep working against this schema (they ignore the new columns), and
+	// compose_path applications are untouched (template stays '').
+	if err := addSQLiteColumnIfMissing(db, "apps", "template TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "last_applied_template_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	if err := addSQLiteColumnIfMissing(db, "apps", "last_healthy_vars TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
@@ -232,6 +241,7 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, app *api.App) error {
 		repo_auth_method,
 		branch,
 		compose_path,
+		template,
 		poll_interval,
 		last_seen_commit,
 		last_seen_commit_message,
@@ -243,7 +253,7 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, app *api.App) error {
 		status,
 		suspended
 	)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	suspended := 0
 	if app.Suspended {
@@ -258,6 +268,7 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, app *api.App) error {
 		app.RepoAuthMethod,
 		app.Branch,
 		app.ComposePath,
+		app.Template,
 		app.PollInterval,
 		app.LastSeenCommit,
 		app.LastSeenCommitMessage,
@@ -281,6 +292,8 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		repo_auth_method,
 		branch,
 		compose_path,
+		COALESCE(template, ''),
+		COALESCE(last_applied_template_hash, ''),
 		poll_interval,
 		COALESCE(last_seen_commit, ''),
 		COALESCE(last_seen_commit_message, ''),
@@ -321,6 +334,8 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 			&app.RepoAuthMethod,
 			&app.Branch,
 			&app.ComposePath,
+			&app.Template,
+			&app.LastAppliedTemplateHash,
 			&app.PollInterval,
 			&app.LastSeenCommit,
 			&app.LastSeenCommitMessage,
@@ -367,6 +382,8 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		repo_auth_method,
 		branch,
 		compose_path,
+		COALESCE(template, ''),
+		COALESCE(last_applied_template_hash, ''),
 		poll_interval,
 		COALESCE(last_seen_commit, ''),
 		COALESCE(last_seen_commit_message, ''),
@@ -412,6 +429,8 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.RepoAuthMethod,
 			&app.Branch,
 			&app.ComposePath,
+			&app.Template,
+			&app.LastAppliedTemplateHash,
 			&app.PollInterval,
 			&app.LastSeenCommit,
 			&app.LastSeenCommitMessage,
@@ -610,6 +629,21 @@ func (s *SQLiteStore) ClearAppRepoSecret(ctx context.Context, appID string) erro
 
 func (s *SQLiteStore) UpdateAppEnvHash(ctx context.Context, id, envHash string) error {
 	result, err := s.execContext(ctx, `UPDATE apps SET last_applied_env_hash = ? WHERE id = ?`, envHash, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateAppTemplateHash(ctx context.Context, id, hash string) error {
+	result, err := s.execContext(ctx, `UPDATE apps SET last_applied_template_hash = ? WHERE id = ?`, hash, id)
 	if err != nil {
 		return err
 	}

@@ -50,7 +50,7 @@ func triggerForReason(reason string) string {
 	switch {
 	case strings.Contains(reason, "commit"):
 		return "commit"
-	case strings.Contains(reason, "var"), strings.Contains(reason, "env"), strings.Contains(reason, "watch"), strings.Contains(reason, "fleet"):
+	case strings.Contains(reason, "var"), strings.Contains(reason, "env"), strings.Contains(reason, "watch"), strings.Contains(reason, "fleet"), strings.Contains(reason, "template"):
 		return "fleet"
 	case strings.Contains(reason, "image"), strings.Contains(reason, "runtime"), strings.Contains(reason, "container"), strings.Contains(reason, "restart"):
 		return "drift"
@@ -231,6 +231,9 @@ func (r *Reconciler) cheapDrift(app *App, snap map[string]compose.ProjectRuntime
 	if reason := r.envFileDriftReason(app); reason != "" {
 		return reason, "fleet"
 	}
+	if reason := r.templateDriftReason(app); reason != "" {
+		return reason, "fleet"
+	}
 	if snap != nil {
 		if reason := r.runtimeDriftReason(app.ComposeProject(), snap); reason != "" {
 			return reason, "drift"
@@ -282,6 +285,10 @@ func (r *Reconciler) configHold(app *App) bool {
 		return false
 	}
 	if r.varsDriftReason(app) != "" {
+		return false
+	}
+	// A fixed template must be able to break a config hold.
+	if r.templateDriftReason(app) != "" {
 		return false
 	}
 	return true
@@ -477,6 +484,11 @@ func (r *Reconciler) desiredSettled(app *App) bool {
 		return false
 	}
 	if r.varsDriftReason(app) != "" {
+		return false
+	}
+	// A fleet template (or override) change queues the app with an unchanged
+	// git commit; it is only settled once that source hash has been applied.
+	if r.templateDriftReason(app) != "" {
 		return false
 	}
 	seen := strings.TrimSpace(app.LastSeenCommit)

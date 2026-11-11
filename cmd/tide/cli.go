@@ -16,6 +16,10 @@ const tideUsageText = `Tide — GitOps Docker Compose controller
 
 Usage:
   tide [flags]
+  tide schema host [--version vX.Y.Z]
+  tide validate [-o json|text] [--strict warn|enforce] [--with-compose] [--apps-dir DIR] <host-file.yaml> [...]
+
+The schema and validate subcommands are offline: no controller, DB, Docker, or network.
 
 Flags:
   --data-dir PATH   Controller state directory (default: TIDE_DATA_DIR, /data, /opt/tide/data, or .)

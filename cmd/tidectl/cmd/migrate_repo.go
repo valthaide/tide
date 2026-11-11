@@ -19,6 +19,7 @@ var (
 	migrateBranch         string
 	migrateRevision       string
 	migrateComposePath    string
+	migrateTemplate       string
 	migrateDryRun         bool
 	migrateReason         string
 )
@@ -26,7 +27,8 @@ var (
 var migrateRepoCmd = &cobra.Command{
 	Use:   "migrate-repo APP",
 	Short: "Change an application's Git source without unnecessary container restarts",
-	Long: `Validates the target repository/branch/compose_path, CI gate, rendered compose configuration,
+	Long: `Validates the target repository/branch/compose source (compose_path, or a fleet
+template with --template merged with the app's compose.override.yaml), CI gate, rendered compose configuration,
 image pins, env_file, and data mounts BEFORE touching the currently running stack.
 
 When rendered configuration matches the running containers (image+digest, env, ports, volumes,
@@ -56,6 +58,7 @@ Use --dry-run to inspect the migration mode, reason, and affected services witho
 			Branch:         strings.TrimSpace(migrateBranch),
 			Revision:       strings.TrimSpace(migrateRevision),
 			ComposePath:    strings.TrimSpace(migrateComposePath),
+			Template:       strings.TrimSpace(migrateTemplate),
 			DryRun:         migrateDryRun,
 			Reason:         strings.TrimSpace(migrateReason),
 		}
@@ -95,7 +98,14 @@ Use --dry-run to inspect the migration mode, reason, and affected services witho
 		fmt.Fprintf(out, "From Repo:       %s\n", p.OldRepoURL)
 		fmt.Fprintf(out, "To Repo:         %s\n", p.NewRepoURL)
 		fmt.Fprintf(out, "Branch:          %s\n", orDash(p.Branch))
-		fmt.Fprintf(out, "Compose Path:    %s\n", orDash(p.ComposePath))
+		if p.Template != "" || p.OldTemplate != "" {
+			fmt.Fprintf(out, "Template:        %s -> %s (override: %v)\n", orDash(p.OldTemplate), orDash(p.Template), p.HasOverride)
+		} else {
+			fmt.Fprintf(out, "Compose Path:    %s\n", orDash(p.ComposePath))
+		}
+		if p.Mode == "no_restart" {
+			fmt.Fprintf(out, "Restart:         no_restart (rendered config identical; no container will be recreated)\n")
+		}
 		fmt.Fprintf(out, "Target Commit:   %s\n", orDash(p.TargetCommit))
 		fmt.Fprintf(out, "Compose Project: %s\n", p.ComposeProject)
 		fmt.Fprintf(out, "CI Status:       %s\n", orDash(p.CIStatus))
@@ -132,6 +142,7 @@ func init() {
 	migrateRepoCmd.Flags().StringVar(&migrateBranch, "branch", "", "Target Git branch")
 	migrateRepoCmd.Flags().StringVar(&migrateRevision, "revision", "", "Optional target tag, branch, or full SHA")
 	migrateRepoCmd.Flags().StringVar(&migrateComposePath, "compose-path", "", "Compose file path inside target repository")
+	migrateRepoCmd.Flags().StringVar(&migrateTemplate, "template", "", "Fleet template name (templates/<template>/compose.yaml); alternative to --compose-path")
 	migrateRepoCmd.Flags().BoolVar(&migrateDryRun, "dry-run", false, "Validate and show migration plan without stopping or modifying anything")
 	migrateRepoCmd.Flags().StringVar(&migrateReason, "reason", "", "Audit reason for the repository migration")
 	rootCmd.AddCommand(migrateRepoCmd)

@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/valthaide/tide/internal/envcompat"
@@ -42,10 +43,17 @@ var validateCmd = &cobra.Command{
 			return exitError{code: 2, err: err}
 		}
 		strict := envcompat.Getenv("TIDE_FLEET_STRICT")
+		// The fleet checkout root holds templates/: the fleet file lives in
+		// hosts/<host>.yaml, or directly at the root.
+		fleetDir, _ := filepath.Abs(filepath.Dir(validateFleetFile))
+		if filepath.Base(fleetDir) == "hosts" {
+			fleetDir = filepath.Dir(fleetDir)
+		}
 		report, err := fleet.Validate(data, fleet.ValidateOptions{
 			AppsDir:     validateAppsDir,
 			WithCompose: validateCompose,
 			Strict:      strict,
+			FleetDir:    fleetDir,
 		})
 		if err != nil {
 			return exitError{code: 2, err: err}
@@ -55,14 +63,18 @@ var validateCmd = &cobra.Command{
 				return exitError{code: 2, err: err}
 			}
 		} else {
-			if len(report.Unknown) > 0 {
-				fmt.Printf("unknown_field: %s\n", joinIssues(report.Unknown))
+			for _, field := range report.Unknown {
+				fmt.Printf("%s: %s: warning: unknown_field: %s\n", validateFleetFile, field, field)
 			}
 			for _, issue := range report.Issues {
-				fmt.Println(issue.Message)
+				path := issue.Path
+				if path == "" {
+					path = "(document)"
+				}
+				fmt.Printf("%s: %s: %s\n", validateFleetFile, path, issue.Message)
 			}
 			if report.OK && len(report.Unknown) == 0 {
-				fmt.Println("ok")
+				fmt.Printf("%s: ok\n", validateFleetFile)
 			}
 		}
 		if !report.OK {
