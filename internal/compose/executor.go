@@ -188,7 +188,9 @@ func (e *ComposeExecutor) ApplyImages(
 	emitProgress()
 
 	repoDir := filepath.Join(appDirAbs, "repo")
-	e.Logger.Info("Preparing repo", "app_id", appID, "repo", repoURL, "branch", branch, "commit", commitHash, "dir", repoDir)
+	if e.Logger != nil {
+		e.Logger.Info("Preparing repo", "app_id", appID, "repo", repoURL, "branch", branch, "commit", commitHash, "dir", repoDir)
+	}
 	repoLog, err := e.prepareRepo(ctx, appDirAbs, repoDir, repoURL, branch, commitHash, repoAuthMethod, repoSecret)
 	appendLogBlock(&syncLog, repoLog)
 	emitProgress()
@@ -279,13 +281,15 @@ func (e *ComposeExecutor) ApplyImages(
 	appendLogLine(&syncLog, fmt.Sprintf("written_from_request: %t", wroteCompose))
 	emitProgress()
 
-	e.Logger.Info(
-		"Compose file ready",
-		"app_id", appID,
-		"path", composeFullPath,
-		"bytes", len(content),
-		"written", wroteCompose,
-	)
+	if e.Logger != nil {
+		e.Logger.Info(
+			"Compose file ready",
+			"app_id", appID,
+			"path", composeFullPath,
+			"bytes", len(content),
+			"written", wroteCompose,
+		)
+	}
 
 	prep, prepErr := e.prepareImageSync(ctx, &syncLog, projectName, composeFileName, composeDir, composeFullPath, overrideArgs, opts, func(string) {})
 	emitProgress()
@@ -401,7 +405,9 @@ func (e *ComposeExecutor) ApplyImages(
 	} else {
 		appendLogLine(&syncLog, "build output appears below when services require a build")
 	}
-	e.Logger.Info("Applying configuration", "app_id", appID)
+	if e.Logger != nil {
+		e.Logger.Info("Applying configuration", "app_id", appID)
+	}
 
 	upArgs := []string{"compose", "-p", projectName, "-f", composeFileName}
 	if len(overrideArgs) > 0 {

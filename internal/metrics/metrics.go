@@ -235,6 +235,12 @@ var (
 		Help:      "Deploy results recorded for an app.",
 	}, []string{"app", "result"})
 
+	RepoMigrationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "repo_migrations_total",
+		Help:      "Application source migrations by mode (no_restart, restarted, failed) and reason.",
+	}, []string{"app", "mode", "reason"})
+
 	ImageGCRemoved = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "image_gc_removed_total",
@@ -526,6 +532,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		SyncRunning,
 		PullRunning,
 		DeploysTotal,
+		RepoMigrationsTotal,
 		ImageGCRemoved,
 		VolumesCreated,
 		ReconcileTotal,
@@ -996,6 +1003,7 @@ func ForgetApp(name, id, repo string, repoStillUsed bool) {
 			RequeueTotal.DeletePartialMatch(labels)
 			SyncErrorsTotal.DeletePartialMatch(labels)
 			envHashApplied.DeletePartialMatch(labels)
+			RepoMigrationsTotal.DeletePartialMatch(labels)
 			GitAuthFailuresTotal.DeletePartialMatch(prometheus.Labels{"name": name})
 		}
 	}
@@ -1142,4 +1150,21 @@ func ObserveFleetError(code string) {
 	if code == "git_auth" {
 		GitAuthFailuresTotal.WithLabelValues("fleet", "fleet").Inc()
 	}
+}
+
+// ObserveRepoMigration counts a source migration outcome by mode (no_restart, restarted, failed) and bounded reason.
+func ObserveRepoMigration(app, mode, reason string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = "unknown"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unknown"
+	}
+	RepoMigrationsTotal.WithLabelValues(app, mode, reason).Inc()
 }

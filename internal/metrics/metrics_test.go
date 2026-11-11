@@ -130,6 +130,9 @@ func TestMetricLabelsExcludeSHAsPipelineIDsAndUsers(t *testing.T) {
 	}
 	SetFleetRevision(fleetCommit)
 	ObserveDeployBlocked("dev-1-backend", "ci_failed", "push")
+	ObserveRepoMigration("dev-1-backend", "no_restart", "config_identical")
+	ObserveRepoMigration("dev-1-backend", "restarted", "image_changed")
+	ObserveRepoMigration("dev-1-backend", "failed", "ci_failed")
 
 	families, err := reg.Gather()
 	if err != nil {

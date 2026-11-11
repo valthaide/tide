@@ -108,6 +108,28 @@ func (c *engineClient) inspectImage(ctx context.Context, id string) ([]byte, err
 	return c.get(ctx, "/"+engineAPIVersion+"/images/"+url.PathEscape(id)+"/json")
 }
 
+func (c *engineClient) inspectNetwork(ctx context.Context, name string) ([]byte, error) {
+	return c.get(ctx, "/"+engineAPIVersion+"/networks/"+url.PathEscape(name))
+}
+
+func (c *engineClient) listProjectContainers(ctx context.Context, project string) ([]engineContainer, error) {
+	q := url.Values{}
+	q.Set("all", "1")
+	filterJSON, _ := json.Marshal(map[string][]string{
+		"label": {"com.docker.compose.project=" + project},
+	})
+	q.Set("filters", string(filterJSON))
+	body, err := c.get(ctx, "/"+engineAPIVersion+"/containers/json?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	var listed []engineContainer
+	if err := json.Unmarshal(body, &listed); err != nil {
+		return nil, fmt.Errorf("docker engine container list: %w", err)
+	}
+	return listed, nil
+}
+
 func (e *ComposeExecutor) observeContainers(ctx context.Context) ([]containerObs, error) {
 	client, err := newEngineClient()
 	if err != nil {

@@ -72,12 +72,13 @@ type RunningImage struct {
 }
 
 type imagePrep struct {
-	env      map[string]string
-	cleanup  func()
-	noBuild  bool
-	images   []string
-	rerun    []string
-	oneshots []string
+	env        map[string]string
+	cleanup    func()
+	noBuild    bool
+	images     []string
+	rerun      []string
+	oneshots   []string
+	configJSON []byte
 }
 
 func (p imagePrep) clean() {
@@ -420,7 +421,7 @@ func (e *ComposeExecutor) prepareImageSync(
 	}
 	appendLogLine(syncLog, "ok")
 
-	prep := imagePrep{env: copyVars(opts.Vars), noBuild: noBuild, images: images, rerun: sum.Rerun, oneshots: OneshotServiceNames(configJSON), cleanup: func() {}}
+	prep := imagePrep{env: copyVars(opts.Vars), noBuild: noBuild, images: images, rerun: sum.Rerun, oneshots: OneshotServiceNames(configJSON), configJSON: configJSON, cleanup: func() {}}
 	creds, configured, credErr := RegistryCredsFromEnv()
 	if credErr != nil || (configured && (creds.Host == "" || creds.Username == "" || creds.Password == "")) {
 		appendLogSection(syncLog, "Registry login")

@@ -5,19 +5,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/valthaide/tide/internal/api"
 	"github.com/valthaide/tide/internal/apiauth"
 	"github.com/valthaide/tide/internal/cigate"
 	"github.com/valthaide/tide/internal/compose"
 	"github.com/valthaide/tide/internal/credentials"
 	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/metrics"
 	"github.com/valthaide/tide/internal/store"
 	"github.com/valthaide/tide/internal/syncerr"
 )
@@ -281,25 +286,59 @@ func TestHardenedForceBypassSingleUseSHABoundAndAuditedAcrossRestart(t *testing.
 
 type fakeMigRuntime struct {
 	fakeRuntime
-	prepErr   error
-	downErr   error
-	downCalls int
-	keptVols  []string
-	stopped   []string
+	prepErr           error
+	downErr           error
+	downCalls         int
+	equivalent        bool
+	reason            string
+	changedServices   []string
+	unchangedServices []string
+	keptVols          []string
+	stopped           []string
 }
 
 func (f *fakeMigRuntime) PrepareRepoMigration(_ context.Context, p compose.MigrationPrepParams) (compose.MigrationPrepared, error) {
 	if f.prepErr != nil {
 		return compose.MigrationPrepared{}, f.prepErr
 	}
+	mode := compose.MigrationModeRestarted
+	strategy := compose.MigrationStrategyComposeUp
+	reason := f.reason
+	if f.equivalent {
+		mode = compose.MigrationModeNoRestart
+		strategy = compose.MigrationStrategyAdoptNoRestart
+		if reason == "" {
+			reason = "config_identical"
+		}
+		return compose.MigrationPrepared{
+			StagingDir:        filepath.Join(p.AppID, "staged"),
+			ProjectName:       p.Opts.Project,
+			Equivalent:        true,
+			Mode:              mode,
+			Strategy:          strategy,
+			Reason:            reason,
+			UnchangedServices: append([]string(nil), f.unchangedServices...),
+			KeptVolumes:       append([]string(nil), f.keptVols...),
+			ImagesVerified:    []string{"registry.example/tenant2/backend@sha256:abcdef"},
+		}, nil
+	}
+	if reason == "" {
+		reason = "image_changed"
+	}
 	return compose.MigrationPrepared{
-		StagingDir:     filepath.Join(p.AppID, "staged"), // marker for CommitRepoMigration
-		ProjectName:    p.Opts.Project,
-		ToStop:         append([]string(nil), f.stopped...),
-		ToRemove:       []string{"/runtime/" + p.AppID + "/repo"},
-		KeptVolumes:    append([]string(nil), f.keptVols...),
-		ToCreate:       []string{"registry.example/tenant2/backend@sha256:abcdef"},
-		ImagesVerified: []string{"registry.example/tenant2/backend@sha256:abcdef"},
+		StagingDir:        filepath.Join(p.AppID, "staged"), // marker for CommitRepoMigration
+		ProjectName:       p.Opts.Project,
+		Equivalent:        false,
+		Mode:              mode,
+		Strategy:          strategy,
+		Reason:            reason,
+		ChangedServices:   append([]string(nil), f.changedServices...),
+		UnchangedServices: append([]string(nil), f.unchangedServices...),
+		ToStop:            append([]string(nil), f.stopped...),
+		ToRemove:          []string{"/runtime/" + p.AppID + "/repo"},
+		KeptVolumes:       append([]string(nil), f.keptVols...),
+		ToCreate:          []string{"registry.example/tenant2/backend@sha256:abcdef"},
+		ImagesVerified:    []string{"registry.example/tenant2/backend@sha256:abcdef"},
 	}, nil
 }
 
@@ -438,5 +477,169 @@ func TestSafeRepoMigrationPreflightDataPreservationDryRunAndRollback(t *testing.
 		var buf bytes.Buffer
 		_ = json.NewEncoder(&buf).Encode(audits)
 		t.Fatalf("expected all migration attempts in audit log, got %d: %s", len(audits), buf.String())
+	}
+}
+
+func TestZeroDowntimeSourceMigrationNoRestartAndTargetedRestartAndMetrics(t *testing.T) {
+	reg := testRegistry(t)
+	const (
+		monoRepo   = "https://git.example/tenko/dev-monorepo.git"
+		tenantRepo = "https://git.example/tenko/dev-tenant-1.git"
+		oldSHA     = "1010101010101010101010101010101010101010"
+		sameCfgSHA = "2020202020202020202020202020202020202020"
+		newImgSHA  = "3030303030303030303030303030303030303030"
+	)
+
+	envFile := filepath.Join(t.TempDir(), "tenant.env")
+	if err := os.WriteFile(envFile, []byte("TENANT_CODE=dev1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &api.App{
+		Name:             "tenko-dev-1",
+		RepoURL:          monoRepo,
+		Branch:           "main",
+		ComposePath:      "tenants/dev-1/compose.yaml",
+		PollInterval:     "30s",
+		LastSeenCommit:   oldSHA,
+		LastSyncedCommit: oldSHA,
+		Status:           "synced",
+	}
+	addPublicApp(t, reg, app)
+	_ = reg.UpdateStatus(app.ID, "synced", nil)
+	pol := deploypolicy.Policy{
+		RequirePipelineSuccess: true,
+		Project:                "tenko-dev-1",
+		EnvFiles:               []string{envFile},
+		Vars:                   map[string]string{"API_TAG": "1.0.0"},
+		PublicVars:             []string{"API_TAG"},
+	}
+	_ = reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(pol))
+	_ = reg.UpdateRollback(app.ID, oldSHA, "", deploypolicy.EncodeVars(pol.Vars), "")
+
+	origApp, _ := reg.Get(app.ID)
+	origID := origApp.ID
+	origProject := origApp.ComposeProject()
+
+	var logBuf bytes.Buffer
+	rt := &fakeMigRuntime{
+		equivalent:        true,
+		reason:            "config_identical",
+		unchangedServices: []string{"api", "postgres"},
+		keptVols:          []string{"tenko-dev-1_pgdata"},
+	}
+	rec := NewReconciler(reg, rt, slog.New(slog.NewTextHandler(&logBuf, nil)), ReconcilerConfig{MaxConcurrent: 2})
+	currentTargetSHA := sameCfgSHA
+	rec.ResolveMigrationCommit = func(repoURL, _ string, _ []byte, _, _ string) (string, error) {
+		if repoURL == "https://git.example/tenko/broken.git" {
+			return "", fmt.Errorf("repository not found")
+		}
+		return currentTargetSHA, nil
+	}
+	rec.Gate = &mapGate{byRepo: map[string]func(cigate.CheckRequest) cigate.Result{
+		tenantRepo: func(cigate.CheckRequest) cigate.Result {
+			return cigate.Result{Allowed: true, Outcome: cigate.OutcomeAllow, Status: "success", Reason: cigate.ReasonOK, PipelineID: 801, Source: "push"}
+		},
+		monoRepo: func(cigate.CheckRequest) cigate.Result {
+			return cigate.Result{Allowed: true, Outcome: cigate.OutcomeAllow, Status: "success", Reason: cigate.ReasonOK, PipelineID: 802, Source: "push"}
+		},
+	}}
+
+	beforeNoRestart := testutil.ToFloat64(metrics.RepoMigrationsTotal.WithLabelValues(app.Name, "no_restart", "config_identical"))
+	beforeFailed := testutil.ToFloat64(metrics.RepoMigrationsTotal.WithLabelValues(app.Name, "failed", "source_unreachable"))
+
+	// 1. Unreachable new source -> leaves old source, branch, compose_path, and running containers untouched!
+	if _, err := rec.MigrateRepo(context.Background(), origApp, api.RepoMigrationRequest{
+		RepoURL:     "https://git.example/tenko/broken.git",
+		Branch:      "release",
+		ComposePath: "compose.yaml",
+		Actor:       "fleet",
+		FromFleet:   true,
+	}, deploypolicy.Encode(pol)); err == nil {
+		t.Fatal("expected unreachable repo to fail migration")
+	}
+	unchangedApp, _ := reg.Get(app.ID)
+	if unchangedApp.RepoURL != monoRepo || unchangedApp.Branch != "main" || unchangedApp.ComposePath != "tenants/dev-1/compose.yaml" {
+		t.Fatalf("old source mutated on failed migration: %+v", unchangedApp)
+	}
+	if rt.downCalls != 0 || len(rt.applyCalls) != 0 {
+		t.Fatalf("containers touched on failed migration: downCalls=%d applyCalls=%v", rt.downCalls, rt.applyCalls)
+	}
+	if got := testutil.ToFloat64(metrics.RepoMigrationsTotal.WithLabelValues(app.Name, "failed", "source_unreachable")); got != beforeFailed+1 {
+		t.Fatalf("expected failed/source_unreachable metric increment, got %v", got)
+	}
+
+	// 2. Identical rendered compose across repo_url + branch + compose_path change ->
+	//    adopted WITHOUT restarting containers (applyCalls == 0!), preserving ID, project, volumes, env_files.
+	plan, err := rec.MigrateRepo(context.Background(), unchangedApp, api.RepoMigrationRequest{
+		RepoURL:     tenantRepo,
+		Branch:      "release",
+		ComposePath: "compose.yaml",
+		Actor:       "fleet",
+		Reason:      "fleet repo_url updated",
+		FromFleet:   true,
+	}, deploypolicy.Encode(pol))
+	if err != nil {
+		t.Fatalf("no-restart migration failed: %v", err)
+	}
+	if !plan.Applied || plan.Mode != compose.MigrationModeNoRestart || plan.Reason != "config_identical" || len(plan.ToStop) != 0 {
+		t.Fatalf("unexpected no-restart plan: %+v", plan)
+	}
+	if len(rt.applyCalls) != 0 {
+		t.Fatalf("expected ZERO compose apply calls on identical config, got %d (%v)", len(rt.applyCalls), rt.applyCalls)
+	}
+	adopted, _ := reg.Get(app.ID)
+	if adopted.ID != origID || adopted.ComposeProject() != origProject ||
+		adopted.RepoURL != tenantRepo || adopted.Branch != "release" || adopted.ComposePath != "compose.yaml" ||
+		adopted.LastSyncedCommit != sameCfgSHA || adopted.LastSeenCommit != sameCfgSHA || adopted.Status != "synced" {
+		t.Fatalf("unexpected adopted app state: %+v", adopted)
+	}
+	if !slices.Equal(adopted.Policy().EnvFiles, []string{envFile}) {
+		t.Fatalf("env_files changed unexpectedly: %v", adopted.Policy().EnvFiles)
+	}
+	if got := testutil.ToFloat64(metrics.RepoMigrationsTotal.WithLabelValues(app.Name, "no_restart", "config_identical")); got != beforeNoRestart+1 {
+		t.Fatalf("expected no_restart/config_identical metric increment, got %v", got)
+	}
+	if !strings.Contains(logBuf.String(), "mode=no_restart") || !strings.Contains(logBuf.String(), "reason=config_identical") {
+		t.Fatalf("expected structured no_restart log with reason, got:\n%s", logBuf.String())
+	}
+
+	// Subsequent normal reconciliation must see desired state already settled and NOT trigger a redundant apply!
+	rec.reconcileOnce()
+	if len(rt.applyCalls) != 0 {
+		t.Fatalf("normal reconcile after no-restart migration must not re-apply unchanged commit, got %v", rt.applyCalls)
+	}
+
+	// 3. Migrate compose_path/branch with a changed service image -> runs compose up (applyCalls == 1) and records restarted/image_changed.
+	beforeRestarted := testutil.ToFloat64(metrics.RepoMigrationsTotal.WithLabelValues(app.Name, "restarted", "image_changed"))
+	currentTargetSHA = newImgSHA
+	rt.equivalent = false
+	rt.reason = "image_changed"
+	rt.changedServices = []string{"api"}
+	rt.unchangedServices = []string{"postgres"}
+	rt.stopped = []string{"api (tenko-dev-1-api-1)"}
+
+	plan2, err := rec.MigrateRepo(context.Background(), adopted, api.RepoMigrationRequest{
+		RepoURL:     tenantRepo,
+		Branch:      "main",
+		ComposePath: "deploy/compose.yaml",
+		Actor:       "fleet",
+		Reason:      "fleet branch updated",
+		FromFleet:   true,
+	}, deploypolicy.Encode(pol))
+	if err != nil {
+		t.Fatalf("targeted restart migration failed: %v", err)
+	}
+	if !plan2.Applied || plan2.Mode != compose.MigrationModeRestarted || plan2.Reason != "image_changed" || !slices.Equal(plan2.ChangedServices, []string{"api"}) {
+		t.Fatalf("unexpected restarted plan: %+v", plan2)
+	}
+	if len(rt.applyCalls) != 1 {
+		t.Fatalf("expected exactly 1 compose up apply call, got %d", len(rt.applyCalls))
+	}
+	if got := testutil.ToFloat64(metrics.RepoMigrationsTotal.WithLabelValues(app.Name, "restarted", "image_changed")); got != beforeRestarted+1 {
+		t.Fatalf("expected restarted/image_changed metric increment, got %v", got)
+	}
+	if !strings.Contains(logBuf.String(), "mode=restarted") || !strings.Contains(logBuf.String(), "reason=image_changed") {
+		t.Fatalf("expected structured restarted log with reason, got:\n%s", logBuf.String())
 	}
 }

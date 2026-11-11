@@ -25,25 +25,33 @@ var (
 
 var migrateRepoCmd = &cobra.Command{
 	Use:   "migrate-repo APP",
-	Short: "Safely change an application's Git repository without losing data",
-	Long: `Validates the target repository, compose configuration, image pins, data mounts, and CI gate
-BEFORE stopping the currently running stack. Volumes and compose project names are preserved.
+	Short: "Change an application's Git source without unnecessary container restarts",
+	Long: `Validates the target repository/branch/compose_path, CI gate, rendered compose configuration,
+image pins, env_file, and data mounts BEFORE touching the currently running stack.
 
-Use --dry-run to inspect what will be stopped, kept, removed, and created without making changes.
-Rollback by running the command again with the previous --repo-url.`,
+When rendered configuration matches the running containers (image+digest, env, ports, volumes,
+networks, commands, labels), Tide adopts the new source and commit without restarting containers.
+When configuration differs, Tide runs standard 'compose up' to recreate only changed services.
+App ID, compose project name, volumes, and env_file are preserved.
+
+Use --dry-run to inspect the migration mode, reason, and affected services without making changes.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if strings.TrimSpace(migrateRepoURL) == "" {
-			return fmt.Errorf("--repo-url is required")
-		}
 		client := NewClient()
 		app, err := resolveApp(client, args[0])
 		if err != nil {
 			return err
 		}
+		targetRepo := strings.TrimSpace(migrateRepoURL)
+		if targetRepo == "" {
+			targetRepo = strings.TrimSpace(app.RepoURL)
+		}
+		if targetRepo == "" {
+			return fmt.Errorf("--repo-url is required")
+		}
 
 		req := api.RepoMigrationRequest{
-			RepoURL:        strings.TrimSpace(migrateRepoURL),
+			RepoURL:        targetRepo,
 			RepoAuthMethod: strings.TrimSpace(migrateRepoAuthMethod),
 			Branch:         strings.TrimSpace(migrateBranch),
 			Revision:       strings.TrimSpace(migrateRevision),
@@ -86,9 +94,18 @@ Rollback by running the command again with the previous --repo-url.`,
 		fmt.Fprintf(out, "App:             %s (%s)\n", p.AppName, p.AppID)
 		fmt.Fprintf(out, "From Repo:       %s\n", p.OldRepoURL)
 		fmt.Fprintf(out, "To Repo:         %s\n", p.NewRepoURL)
+		fmt.Fprintf(out, "Branch:          %s\n", orDash(p.Branch))
+		fmt.Fprintf(out, "Compose Path:    %s\n", orDash(p.ComposePath))
 		fmt.Fprintf(out, "Target Commit:   %s\n", orDash(p.TargetCommit))
 		fmt.Fprintf(out, "Compose Project: %s\n", p.ComposeProject)
 		fmt.Fprintf(out, "CI Status:       %s\n", orDash(p.CIStatus))
+		fmt.Fprintf(out, "Migration Mode:  %s (%s)\n", orDash(p.Mode), orDash(p.Reason))
+		if len(p.ChangedServices) > 0 {
+			fmt.Fprintf(out, "Changed Svcs:    %s\n", strings.Join(p.ChangedServices, ", "))
+		}
+		if len(p.UnchangedServices) > 0 {
+			fmt.Fprintf(out, "Unchanged Svcs:  %s\n", strings.Join(p.UnchangedServices, ", "))
+		}
 		fmt.Fprintf(out, "Will Stop:       %s\n", joinOrNone(p.ToStop))
 		fmt.Fprintf(out, "Kept Volumes:    %s\n", joinOrNone(p.KeptVolumes))
 		fmt.Fprintf(out, "Will Remove:     %s\n", joinOrNone(p.ToRemove))

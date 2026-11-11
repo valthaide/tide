@@ -1924,7 +1924,7 @@ func deployTrigger(app *App, target string) string {
 
 func deployResult(result string) string {
 	switch result {
-	case "applied", "rolled_back", "recovered", "volume_created":
+	case "applied", "rolled_back", "recovered", "volume_created", "migrated_no_restart", "migrated_restarted":
 		return result
 	default:
 		return "failed"

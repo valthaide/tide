@@ -160,7 +160,7 @@ type AuditEvent struct {
 	DetailsJSON    string    `json:"details_json,omitempty"`
 }
 
-// RepoMigrationRequest describes a production-safe repository URL / auth migration.
+// RepoMigrationRequest describes a production-safe repository / source migration.
 type RepoMigrationRequest struct {
 	RepoURL        string            `json:"repo_url"`
 	RepoAuthMethod string            `json:"repo_auth_method,omitempty"`
@@ -168,33 +168,43 @@ type RepoMigrationRequest struct {
 	Branch         string            `json:"branch,omitempty"`
 	Revision       string            `json:"revision,omitempty"`
 	ComposePath    string            `json:"compose_path,omitempty"`
+	PollInterval   string            `json:"poll_interval,omitempty"`
 	Vars           map[string]string `json:"vars,omitempty"`
 	DryRun         bool              `json:"dry_run,omitempty"`
 	Reason         string            `json:"reason,omitempty"`
 	Actor          string            `json:"actor,omitempty"`
+	FromFleet      bool              `json:"-"`
 }
 
 // RepoMigrationPlan is returned by dry-run and completed repository migrations.
 type RepoMigrationPlan struct {
-	AppID          string   `json:"app_id"`
-	AppName        string   `json:"app_name"`
-	OldRepoURL     string   `json:"old_repo_url"`
-	NewRepoURL     string   `json:"new_repo_url"`
-	Branch         string   `json:"branch"`
-	Revision       string   `json:"revision,omitempty"`
-	TargetCommit   string   `json:"target_commit"`
-	ComposePath    string   `json:"compose_path"`
-	ComposeProject string   `json:"compose_project"`
-	CIStatus       string   `json:"ci_status"`
-	CIPipelineID   int64    `json:"ci_pipeline_id,omitempty"`
-	CIPipelineURL  string   `json:"ci_pipeline_url,omitempty"`
-	ToStop         []string `json:"to_stop"`
-	ToRemove       []string `json:"to_remove"`
-	KeptVolumes    []string `json:"kept_volumes"`
-	ToCreate       []string `json:"to_create"`
-	ImagesVerified []string `json:"images_verified"`
-	DryRun         bool     `json:"dry_run"`
-	Applied        bool     `json:"applied"`
+	AppID             string   `json:"app_id"`
+	AppName           string   `json:"app_name"`
+	OldRepoURL        string   `json:"old_repo_url"`
+	NewRepoURL        string   `json:"new_repo_url"`
+	OldBranch         string   `json:"old_branch,omitempty"`
+	Branch            string   `json:"branch"`
+	Revision          string   `json:"revision,omitempty"`
+	TargetCommit      string   `json:"target_commit"`
+	OldComposePath    string   `json:"old_compose_path,omitempty"`
+	ComposePath       string   `json:"compose_path"`
+	ComposeProject    string   `json:"compose_project"`
+	CIStatus          string   `json:"ci_status"`
+	CIPipelineID      int64    `json:"ci_pipeline_id,omitempty"`
+	CIPipelineURL     string   `json:"ci_pipeline_url,omitempty"`
+	Mode              string   `json:"mode,omitempty"`
+	Strategy          string   `json:"strategy,omitempty"`
+	Reason            string   `json:"reason,omitempty"`
+	ChangedServices   []string `json:"changed_services,omitempty"`
+	UnchangedServices []string `json:"unchanged_services,omitempty"`
+	DiffSummary       []string `json:"diff_summary,omitempty"`
+	ToStop            []string `json:"to_stop"`
+	ToRemove          []string `json:"to_remove"`
+	KeptVolumes       []string `json:"kept_volumes"`
+	ToCreate          []string `json:"to_create"`
+	ImagesVerified    []string `json:"images_verified"`
+	DryRun            bool     `json:"dry_run"`
+	Applied           bool     `json:"applied"`
 }
 
 // ImageRef is one running compose service image.

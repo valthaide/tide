@@ -491,6 +491,54 @@ func (h *Handler) UpdateApp(w http.ResponseWriter, r *http.Request) {
 		envVarsChanged = true
 	}
 
+	migrator, hasMigrator := h.SyncGate.(interface {
+		MigrateRepo(ctx context.Context, existing *api.App, req api.RepoMigrationRequest, nextPolicyJSON string) (api.RepoMigrationPlan, error)
+	})
+	if (branchChanged || composePathChanged) && !envVarsChanged && hasMigrator && migrator != nil {
+		if name != app.Name || pollInterval != app.PollInterval {
+			if err := h.Registry.UpdateApp(id, name, app.Branch, app.ComposePath, pollInterval, nil); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		actor := apiauth.ActorFromRequest(r)
+		migReq := api.RepoMigrationRequest{
+			RepoURL:        app.RepoURL,
+			RepoAuthMethod: app.RepoAuthMethod,
+			Branch:         branch,
+			Revision:       app.Revision,
+			ComposePath:    composePath,
+			PollInterval:   pollInterval,
+			Reason:         "api patch source updated",
+			Actor:          actor,
+		}
+		plan, migErr := migrator.MigrateRepo(r.Context(), app, migReq, "")
+		if migErr != nil {
+			se := syncerr.Classify(migErr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(httpStatusForSyncErr(se))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message": se.Message,
+				"code":    se.Code,
+				"stage":   se.Stage,
+				"data":    plan,
+			})
+			return
+		}
+		updatedApp, err := h.Registry.Get(id)
+		if err != nil {
+			http.Error(w, "App updated but failed to retrieve updated data", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(api.APIResponse{
+			Message: "App updated successfully",
+			Data:    updatedApp,
+		})
+		return
+	}
+
 	// Update the app
 	if err := h.Registry.UpdateApp(id, name, branch, composePath, pollInterval, serviceEnvs); err != nil {
 		status := http.StatusInternalServerError

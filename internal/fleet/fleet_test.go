@@ -333,3 +333,88 @@ func TestFleetReconcileDoesNotClearOperatorSuspend(t *testing.T) {
 		t.Fatal("operator pause cleared")
 	}
 }
+
+type fakeRepoMigrator struct {
+	calls []api.RepoMigrationRequest
+	err   error
+	apps  *fakeApps
+}
+
+func (m *fakeRepoMigrator) MigrateRepoFromFleet(_ context.Context, existing *api.App, req api.RepoMigrationRequest, nextPolicyJSON string) error {
+	m.calls = append(m.calls, req)
+	if m.err != nil {
+		return m.err
+	}
+	existing.RepoURL = req.RepoURL
+	existing.Branch = req.Branch
+	existing.ComposePath = req.ComposePath
+	existing.Revision = req.Revision
+	existing.DeployPolicyJSON = nextPolicyJSON
+	existing.ApplyPolicy()
+	return nil
+}
+
+func TestFleetSourceChangesRouteThroughMigratorAndKeepOldSourceOnError(t *testing.T) {
+	app := &api.App{
+		ID:             "tenko-dev1",
+		Name:           "tenko-dev1",
+		RepoURL:        "https://git.example/tenko/monorepo.git",
+		Branch:         "main",
+		ComposePath:    "tenants/dev1/docker-compose.yml",
+		RepoAuthMethod: "public",
+		Status:         "synced",
+	}
+	apps := &fakeApps{list: []*api.App{app}}
+	cleaner := &fakeCleaner{}
+	mig := &fakeRepoMigrator{apps: apps}
+	r := &Reconciler{Apps: apps, Cleaner: cleaner, RepoMigrator: mig}
+
+	// 1. Changing branch or compose_path in fleet routes through RepoMigrator (NOT UpdateApp + blind redeploy, NOT Cleaner.Destroy).
+	docBranch := &HostDocument{Apps: []AppSpec{{
+		Name:        "tenko-dev1",
+		RepoURL:     "https://git.example/tenko/monorepo.git",
+		Branch:      "release",
+		ComposePath: "tenants/dev1/docker-compose.yml",
+	}}}
+	if err := r.applyDesired(context.Background(), docBranch); err != nil {
+		t.Fatalf("branch migration failed: %v", err)
+	}
+	if len(mig.calls) != 1 || mig.calls[0].Branch != "release" || mig.calls[0].Reason != "fleet branch updated" {
+		t.Fatalf("expected fleet branch change to invoke RepoMigrator, got %+v", mig.calls)
+	}
+	if len(cleaner.ids) != 0 {
+		t.Fatalf("Cleaner.Destroy must never be called during source migration: %v", cleaner.ids)
+	}
+
+	// 2. Changing compose_path also routes through RepoMigrator.
+	docPath := &HostDocument{Apps: []AppSpec{{
+		Name:        "tenko-dev1",
+		RepoURL:     "https://git.example/tenko/monorepo.git",
+		Branch:      "release",
+		ComposePath: "compose.prod.yml",
+	}}}
+	if err := r.applyDesired(context.Background(), docPath); err != nil {
+		t.Fatalf("compose_path migration failed: %v", err)
+	}
+	if len(mig.calls) != 2 || mig.calls[1].ComposePath != "compose.prod.yml" || mig.calls[1].Reason != "fleet compose_path updated" {
+		t.Fatalf("expected fleet compose_path change to invoke RepoMigrator, got %+v", mig.calls)
+	}
+
+	// 3. Failed migration to a new repo_url leaves old source intact and never calls Cleaner.Destroy.
+	mig.err = os.ErrNotExist
+	docBrokenRepo := &HostDocument{Apps: []AppSpec{{
+		Name:        "tenko-dev1",
+		RepoURL:     "https://git.example/tenko/dev1-dedicated.git",
+		Branch:      "main",
+		ComposePath: "docker-compose.yml",
+	}}}
+	if err := r.applyDesired(context.Background(), docBrokenRepo); err == nil {
+		t.Fatal("expected failed migration to return error")
+	}
+	if app.RepoURL != "https://git.example/tenko/monorepo.git" || app.Branch != "release" || app.ComposePath != "compose.prod.yml" {
+		t.Fatalf("failed fleet migration mutated existing source: %+v", app)
+	}
+	if len(cleaner.ids) != 0 {
+		t.Fatalf("Cleaner.Destroy called on failed migration: %v", cleaner.ids)
+	}
+}

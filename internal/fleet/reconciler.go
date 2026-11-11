@@ -384,11 +384,26 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 		return nil
 	}
 
-	// Repo URL / auth method change -> production-safe in-place migration (preserves app ID, compose project, and volumes).
-	if !strings.EqualFold(existing.RepoURL, spec.RepoURL) ||
-		repoauth.NormalizeMethod(existing.RepoAuthMethod) != method {
+	// Source change (`repo_url`, `repo_auth_method`, `branch`, or `compose_path`) ->
+	// zero-downtime / production-safe in-place migration (preserves app ID, compose project, volumes, and env_file;
+	// skips container restart when rendered configuration is identical, and leaves old source untouched on error).
+	repoChanged := !strings.EqualFold(strings.TrimSpace(existing.RepoURL), strings.TrimSpace(spec.RepoURL)) ||
+		repoauth.NormalizeMethod(existing.RepoAuthMethod) != method
+	sourceLocChanged := strings.TrimSpace(existing.Branch) != strings.TrimSpace(spec.Branch) ||
+		strings.TrimSpace(existing.ComposePath) != strings.TrimSpace(spec.ComposePath)
+
+	if repoChanged || (sourceLocChanged && r.RepoMigrator != nil) {
 		nextPolicy := policyJSONFromSpec(spec, doc)
 		if r.RepoMigrator != nil {
+			migReason := "fleet source updated"
+			switch {
+			case !strings.EqualFold(strings.TrimSpace(existing.RepoURL), strings.TrimSpace(spec.RepoURL)):
+				migReason = "fleet repo_url updated"
+			case strings.TrimSpace(existing.Branch) != strings.TrimSpace(spec.Branch):
+				migReason = "fleet branch updated"
+			case strings.TrimSpace(existing.ComposePath) != strings.TrimSpace(spec.ComposePath):
+				migReason = "fleet compose_path updated"
+			}
 			migReq := api.RepoMigrationRequest{
 				RepoURL:        spec.RepoURL,
 				RepoAuthMethod: method,
@@ -396,9 +411,11 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 				Branch:         spec.Branch,
 				Revision:       spec.Revision,
 				ComposePath:    spec.ComposePath,
+				PollInterval:   spec.PollInterval,
 				Vars:           spec.Vars,
-				Reason:         "fleet repo_url updated",
+				Reason:         migReason,
 				Actor:          "fleet",
+				FromFleet:      true,
 			}
 			if err := r.RepoMigrator.MigrateRepoFromFleet(ctx, existing, migReq, nextPolicy); err != nil {
 				return err
@@ -409,13 +426,7 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 			return nil
 		}
 
-		// Unit-test fallback when RepoMigrator is not wired: never prune volumes, fail on cleaner error, preserve app ID if supported.
-		if r.Cleaner != nil {
-			rememberProject(r.Cleaner, existing)
-			if _, err := r.Cleaner.Destroy(ctx, existing.ID, existing.ComposePath, nil, false); err != nil {
-				return fmt.Errorf("stop existing app before repo migration: %w", err)
-			}
-		}
+		// Unit-test fallback when RepoMigrator is not wired: preserve app ID, compose project, and running containers.
 		if updater, ok := r.Apps.(interface {
 			UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath string) error
 		}); ok {

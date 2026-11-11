@@ -100,7 +100,7 @@ func appPollSpec(app *App) string {
 	if app == nil {
 		return ""
 	}
-	return strings.Join([]string{app.RepoURL, app.Branch, app.Revision, app.PollInterval}, "\x00")
+	return strings.Join([]string{app.RepoURL, app.Branch, app.Revision, app.ComposePath, app.PollInterval}, "\x00")
 }
 
 func (w *GitWatcher) pollApp(ctx context.Context, app *App) {

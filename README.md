@@ -13,9 +13,10 @@ Tide is a single-host GitOps controller for Docker Compose stacks, paired with t
 - **Audited operations & hardened `--force`**:
   - `tidectl reconcile app <name> --force --sha <sha> --reason "<reason>"` is single-use, short-lived, bound to one application and exact commit SHA, revoked automatically if the commit changes, and recorded in persistent `audit_events`.
   - Compose security rules, image digest requirements, and secret checks are never bypassed.
-- **Production-safe repository migration**:
-  - `tidectl migrate-repo <app> --repo-url <url> [--dry-run]` (and fleet `repo_url` updates) verifies repository readability, green CI, compose validity, absence of persistent data binds inside the app checkout directory, and image availability before stopping the running stack.
-  - Volumes and compose project names are preserved; rollback is performed by restoring the previous `repo_url`.
+- **Zero-downtime source migration**:
+  - `tidectl migrate-repo <app> --repo-url <url> [--branch <branch>] [--compose-path <path>] [--dry-run]` and Fleet updates to `repo_url`, `branch`, or `compose_path` stage the target repository, verify the CI gate for the target commit, render Compose, and compare image+digest, env, ports, volumes, networks, commands, and labels against the running containers.
+  - Identical configurations adopt the new source and commit **without restarting or recreating containers** (`mode=no_restart`, `reason=config_identical`); changed configurations run `docker compose up -d --remove-orphans` (without `compose down`) to recreate only changed services (`mode=restarted`).
+  - `app.ID`, `ComposeProject`, volumes, and `env_file` are preserved; preflight failures leave the old source and running containers untouched. Outcomes are recorded in structured logs, `audit_events`, and `tide_repo_migrations_total{app,mode,reason}`.
 - **Process & CLI safety**:
   - `tide` acquires a non-blocking `flock` (`<dataDir>/tide.lock`) before opening the database or touching application state.
   - `--help`, `--version`, and unknown flags exit immediately without touching files, databases, or Docker.

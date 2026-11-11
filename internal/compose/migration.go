@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -30,16 +32,23 @@ type MigrationPrepParams struct {
 	DryRun         bool
 }
 
-// MigrationPrepared holds the verified staging artifacts and plan summary before cutover.
+// MigrationPrepared holds the verified staging artifacts, equivalence diff, and plan summary before cutover.
 type MigrationPrepared struct {
-	StagingDir     string
-	ProjectName    string
-	ToStop         []string
-	ToRemove       []string
-	KeptVolumes    []string
-	ToCreate       []string
-	ImagesVerified []string
-	Prep           imagePrep
+	StagingDir        string
+	ProjectName       string
+	Equivalent        bool
+	Mode              string
+	Strategy          string
+	Reason            string
+	ChangedServices   []string
+	UnchangedServices []string
+	DiffSummary       []string
+	ToStop            []string
+	ToRemove          []string
+	KeptVolumes       []string
+	ToCreate          []string
+	ImagesVerified    []string
+	Prep              imagePrep
 }
 
 // Release cleans up temporary staging files when dry-running or aborting before cutover.
@@ -51,8 +60,9 @@ func (m *MigrationPrepared) Release() {
 }
 
 // PrepareRepoMigration validates the current app directory for persistent data binds,
-// clones and validates the new repository in an isolated staging directory, and verifies
-// (or pulls) every required container image BEFORE stopping the running application.
+// clones and validates the new repository in an isolated staging directory, verifies
+// (or pulls) every required container image, and compares the rendered Compose spec
+// against the currently running containers BEFORE touching the live application.
 func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationPrepParams) (MigrationPrepared, error) {
 	var out MigrationPrepared
 
@@ -67,7 +77,7 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 		return out, fmt.Errorf("resolve app dir: %w", err)
 	}
 
-	// 1. Verify no persistent data or bind mounts point to data inside appDirAbs.
+	// 1. Verify no persistent data or writable bind mounts point to data inside appDirAbs.
 	if err := e.verifyNoDataInAppDir(ctx, appDirAbs, projectName, p.OldComposePath); err != nil {
 		return out, err
 	}
@@ -117,6 +127,11 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 		return out, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, fmt.Sprintf("compose file not found in new repository: %s", composeRel))
 	}
 
+	// Verify any external host env_files referenced by compose exist before proceeding.
+	if _, extErr := ExternalEnvHash(stagingRepoDir, composeRel); extErr != nil {
+		return out, extErr
+	}
+
 	var overrideArgs []string
 	if len(envVars) > 0 {
 		var cleanupOverride func()
@@ -143,7 +158,7 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 		return out, err
 	}
 
-	// 3. Verify that all images (including digest pins) are reachable BEFORE stopping the running stack.
+	// 3. Verify that all images (including digest pins) are reachable BEFORE touching the running stack.
 	if len(prep.images) > 0 && !e.pinnedDigestsLocal(ctx, prep.images) {
 		if err := e.verifyOrPullImages(ctx, composeDir, projectName, composeFileName, overrideArgs, prep, opts, p.DryRun); err != nil {
 			return out, err
@@ -152,28 +167,103 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 	out.Prep = prep
 	out.ImagesVerified = append([]string(nil), prep.images...)
 
-	// 4. Populate migration plan details (what will be stopped, kept, removed, and created).
-	if containers, cErr := e.InspectProjectContainers(ctx, projectName); cErr == nil {
-		for _, c := range containers {
-			label := c.Service
-			if c.Name != "" {
-				label = fmt.Sprintf("%s (%s)", c.Service, c.Name)
+	// 4. Compare rendered Compose configuration against the currently running containers.
+	targetAppRepoDir := filepath.Join(appDirAbs, "repo")
+	desiredImages := e.inspectDesiredImages(ctx, prep.images, prep.env)
+	desiredSpec, specErr := ParseRenderedComposeSpec(prep.configJSON, projectName, stagingRepoDir, targetAppRepoDir, func(imageRef string) string {
+		if img, ok := desiredImages[imageRef]; ok {
+			for _, rd := range img.RepoDigests {
+				if d := extractDigestHex(rd); d != "" {
+					return d
+				}
 			}
-			out.ToStop = append(out.ToStop, label)
+			return img.ID
+		}
+		return ""
+	})
+	var diff MigrationDiffResult
+	if specErr != nil {
+		diff = MigrationDiffResult{
+			Equivalent:  false,
+			Mode:        MigrationModeRestarted,
+			Strategy:    MigrationStrategyComposeUp,
+			Reason:      "config_parse_error",
+			DiffSummary: []string{specErr.Error()},
+		}
+	} else {
+		runningSpec, runningHealthy, runErr := e.InspectRunningProjectSpec(ctx, projectName, targetAppRepoDir)
+		if runErr != nil {
+			diff = MigrationDiffResult{
+				Equivalent:  false,
+				Mode:        MigrationModeRestarted,
+				Strategy:    MigrationStrategyComposeUp,
+				Reason:      "runtime_inspect_error",
+				DiffSummary: []string{runErr.Error()},
+			}
+		} else {
+			diff = CompareMigrationSpecs(desiredSpec, runningSpec, runningHealthy, desiredImages)
 		}
 	}
+
+	out.Equivalent = diff.Equivalent
+	out.Mode = diff.Mode
+	out.Strategy = diff.Strategy
+	out.Reason = diff.Reason
+	out.ChangedServices = append([]string(nil), diff.ChangedServices...)
+	out.UnchangedServices = append([]string(nil), diff.UnchangedServices...)
+	out.DiffSummary = append([]string(nil), diff.DiffSummary...)
+
+	// 5. Populate migration plan details (what will be stopped/recreated, kept, removed, and created).
 	out.KeptVolumes = e.projectVolumeNames(ctx, projectName)
 	sort.Strings(out.KeptVolumes)
 
-	oldRepoDir := filepath.Join(appDirAbs, "repo")
-	if info, statErr := os.Stat(oldRepoDir); statErr == nil && info.IsDir() {
-		out.ToRemove = []string{oldRepoDir}
+	if diff.Equivalent {
+		// Zero-downtime source adoption: no containers are stopped, removed, or recreated.
+		out.ToStop = nil
+		out.ToRemove = nil
+		out.ToCreate = nil
+	} else {
+		affected := map[string]bool{}
+		for _, s := range diff.ChangedServices {
+			affected[s] = true
+		}
+		for _, s := range diff.RemovedServices {
+			affected[s] = true
+		}
+		if containers, cErr := e.InspectProjectContainers(ctx, projectName); cErr == nil {
+			for _, c := range containers {
+				if len(affected) > 0 && !affected[c.Service] {
+					continue
+				}
+				label := c.Service
+				if c.Name != "" {
+					label = fmt.Sprintf("%s (%s)", c.Service, c.Name)
+				}
+				out.ToStop = append(out.ToStop, label)
+			}
+		}
+		for _, s := range diff.RemovedServices {
+			out.ToRemove = append(out.ToRemove, "service:"+s)
+		}
+		if len(diff.ChangedServices) > 0 {
+			for _, s := range diff.ChangedServices {
+				if desSvc, ok := desiredSpec.Services[s]; ok && desSvc.Image != "" {
+					imgRef := desSvc.Image
+					if desSvc.Digest != "" {
+						imgRef = imgRef + "@sha256:" + desSvc.Digest
+					}
+					out.ToCreate = append(out.ToCreate, fmt.Sprintf("%s (%s)", s, imgRef))
+				} else {
+					out.ToCreate = append(out.ToCreate, s)
+				}
+			}
+		} else {
+			out.ToCreate = append([]string(nil), prep.images...)
+		}
+		sort.Strings(out.ToCreate)
 	}
-	out.ToCreate = append([]string(nil), prep.images...)
-	sort.Strings(out.ToCreate)
 
 	if p.DryRun {
-		// Release temporary staging dir immediately for dry-run.
 		out.Release()
 	} else {
 		cleanupOnErr = false
@@ -181,14 +271,17 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 	return out, nil
 }
 
-// CommitRepoMigration stops the old compose stack (failing immediately if compose down fails),
-// preserves all volumes and persistent data regardless of prune_volumes, replaces only a clean
-// checkout directory, and leaves the staged repository ready for `ApplyImages`.
+// CommitRepoMigration activates the staged repository checkout in-place (preserving file inodes
+// for any read-only tracked bind mounts and keeping all volumes and running containers intact).
+// It does NOT run `docker compose down`, allowing either zero-restart source adoption when
+// Equivalent==true or targeted service recreation via standard `docker compose up -d --remove-orphans`
+// when Equivalent==false.
 func (e *ComposeExecutor) CommitRepoMigration(ctx context.Context, appID, oldComposePath string, envVars map[string]string, prepared *MigrationPrepared) error {
 	if prepared == nil || prepared.StagingDir == "" {
 		return fmt.Errorf("migration staging state is missing")
 	}
 	defer prepared.Release()
+	_ = envVars
 
 	projectName := prepared.ProjectName
 	if projectName == "" {
@@ -199,52 +292,188 @@ func (e *ComposeExecutor) CommitRepoMigration(ctx context.Context, appID, oldCom
 		return err
 	}
 
-	// Re-verify before touching anything on disk.
+	// Re-verify no persistent data lives inside appDirAbs before updating checkout files.
 	if err := e.verifyNoDataInAppDir(ctx, appDirAbs, projectName, oldComposePath); err != nil {
 		return err
 	}
 
-	oldRepoDir := filepath.Join(appDirAbs, "repo")
-	composeRel := strings.TrimSpace(oldComposePath)
-	if composeRel == "" {
-		composeRel = "compose.yaml"
-	}
-	oldComposeFull := filepath.Join(oldRepoDir, composeRel)
-	if info, statErr := os.Stat(oldComposeFull); statErr == nil && !info.IsDir() {
-		if e.Logger != nil {
-			e.Logger.Info("Stopping existing stack for repository migration (volumes preserved)", "app_id", appID, "project", projectName)
-		}
-		// Never pass -v / pruneVolumes during repository migration; fail immediately if compose down fails.
-		_, downErr := e.runCommand(
-			ctx,
-			"docker",
-			composeDownArgs(projectName, filepath.Base(oldComposeFull), false),
-			filepath.Dir(oldComposeFull),
-			envVars,
-			nil,
-		)
-		if downErr != nil {
-			return syncerr.Wrap(syncerr.CodeComposeApply, syncerr.StageCompose, fmt.Errorf("compose down failed; aborting repository migration: %w", downErr))
-		}
-	}
-
-	if err := os.MkdirAll(appDirAbs, 0755); err != nil {
+	if err := fsperm.EnsureSharedDir(appDirAbs); err != nil {
 		return fmt.Errorf("prepare app dir: %w", err)
 	}
-	if _, statErr := os.Stat(oldRepoDir); statErr == nil {
-		if err := os.RemoveAll(oldRepoDir); err != nil {
-			return fmt.Errorf("remove old checkout directory: %w", err)
+
+	targetRepoDir := filepath.Join(appDirAbs, "repo")
+	stagedRepoDir := filepath.Join(prepared.StagingDir, "repo")
+	if err := swapStagedCheckoutInPlace(ctx, e, stagedRepoDir, targetRepoDir, appDirAbs); err != nil {
+		return err
+	}
+	_ = fsperm.RelaxCheckoutTree(targetRepoDir)
+	return nil
+}
+
+// swapStagedCheckoutInPlace updates targetRepoDir to match stagedRepoDir while preserving
+// existing regular file inodes (safe for live containers with single-file read-only bind mounts)
+// and replacing `.git` with the staged repository's `.git` metadata.
+func swapStagedCheckoutInPlace(ctx context.Context, e *ComposeExecutor, stagedRepoDir, targetRepoDir, appDirAbs string) error {
+	if st, err := os.Stat(targetRepoDir); os.IsNotExist(err) || (err == nil && !st.IsDir()) {
+		_ = os.RemoveAll(targetRepoDir)
+		if renErr := os.Rename(stagedRepoDir, targetRepoDir); renErr != nil {
+			if _, cloneErr := e.runCommand(ctx, "git", []string{"clone", stagedRepoDir, targetRepoDir}, appDirAbs, nil, nil); cloneErr != nil {
+				return fmt.Errorf("activate staged repository: %w (rename err: %v)", cloneErr, renErr)
+			}
 		}
+		return nil
 	}
 
-	stagedRepo := filepath.Join(prepared.StagingDir, "repo")
-	if err := os.Rename(stagedRepo, oldRepoDir); err != nil {
-		// Cross-device fallback: copy via git clone from stagedRepo.
-		if _, cloneErr := e.runCommand(ctx, "git", []string{"clone", stagedRepo, oldRepoDir}, appDirAbs, nil, nil); cloneErr != nil {
-			return fmt.Errorf("activate staged repository: %w (rename err: %v)", cloneErr, err)
+	// Copy/truncate tracked working-tree files in-place so existing file inodes stay intact.
+	want := map[string]struct{}{}
+	walkErr := filepath.WalkDir(stagedRepoDir, func(path string, d fs.DirEntry, wErr error) error {
+		if wErr != nil || d == nil {
+			return nil
+		}
+		if d.Name() == ".git" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(stagedRepoDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		want[rel] = struct{}{}
+		dest := filepath.Join(targetRepoDir, rel)
+		if d.Type()&os.ModeSymlink != 0 {
+			linkTarget, readErr := os.Readlink(path)
+			if readErr != nil {
+				return readErr
+			}
+			_ = os.Remove(dest)
+			if mkErr := os.MkdirAll(filepath.Dir(dest), 0o755); mkErr != nil {
+				return mkErr
+			}
+			return os.Symlink(linkTarget, dest)
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		mode := os.FileMode(0o644)
+		if info, statErr := d.Info(); statErr == nil {
+			mode = info.Mode().Perm()
+		}
+		return writeFileInPlacePortable(dest, content, mode)
+	})
+	if walkErr != nil {
+		return fmt.Errorf("sync staged worktree files: %w", walkErr)
+	}
+
+	// Remove files from targetRepoDir that no longer exist in stagedRepoDir.
+	_ = filepath.WalkDir(targetRepoDir, func(path string, d fs.DirEntry, wErr error) error {
+		if wErr != nil || d == nil || path == targetRepoDir {
+			return nil
+		}
+		if d.Name() == ".git" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(targetRepoDir, path)
+		if relErr != nil {
+			return nil
+		}
+		if _, ok := want[rel]; !ok {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
+
+	// Replace .git directory with the staged repository's .git directory.
+	oldGit := filepath.Join(targetRepoDir, ".git")
+	stagedGit := filepath.Join(stagedRepoDir, ".git")
+	backupGit := filepath.Join(appDirAbs, ".git-prev-mig")
+	_ = os.RemoveAll(backupGit)
+	hadOldGit := false
+	if _, statErr := os.Stat(oldGit); statErr == nil {
+		if renErr := os.Rename(oldGit, backupGit); renErr == nil {
+			hadOldGit = true
+		} else {
+			_ = os.RemoveAll(oldGit)
 		}
 	}
+	if err := moveOrCopyDir(stagedGit, oldGit); err != nil {
+		if hadOldGit {
+			_ = os.RemoveAll(oldGit)
+			_ = os.Rename(backupGit, oldGit)
+		}
+		return fmt.Errorf("swap repository .git metadata: %w", err)
+	}
+	_ = os.RemoveAll(backupGit)
+	_ = fsperm.HardenPrivateSubtree(oldGit)
 	return nil
+}
+
+func writeFileInPlacePortable(dest string, content []byte, mode os.FileMode) error {
+	if info, err := os.Lstat(dest); err == nil && info.Mode().IsRegular() {
+		f, err := os.OpenFile(dest, os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			return err
+		}
+		_, werr := f.Write(content)
+		cerr := f.Close()
+		if werr != nil {
+			return werr
+		}
+		if cerr != nil {
+			return cerr
+		}
+		return os.Chmod(dest, mode)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dest, content, mode)
+}
+
+func moveOrCopyDir(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, wErr error) error {
+		if wErr != nil {
+			return wErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			link, lErr := os.Readlink(path)
+			if lErr != nil {
+				return lErr
+			}
+			return os.Symlink(link, target)
+		}
+		data, rErr := os.ReadFile(path)
+		if rErr != nil {
+			return rErr
+		}
+		mode := os.FileMode(0o600)
+		if info, iErr := d.Info(); iErr == nil {
+			mode = info.Mode().Perm()
+		}
+		return os.WriteFile(target, data, mode)
+	})
 }
 
 func (e *ComposeExecutor) verifyOrPullImages(
@@ -302,14 +531,14 @@ func (e *ComposeExecutor) verifyNoDataInAppDir(ctx context.Context, appDirAbs, p
 		return nil
 	}
 
-	// Check for unexpected entries directly inside appDirAbs (only "repo" and ".ssh" are controller-managed).
+	// Check for unexpected entries directly inside appDirAbs (only "repo", ".ssh", and ".envs" are controller-managed).
 	entries, err := os.ReadDir(appDirAbs)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == "repo" || name == ".ssh" || strings.HasPrefix(name, ".env.override") {
+		if name == "repo" || name == ".ssh" || name == ".envs" || strings.HasPrefix(name, ".env.override") {
 			continue
 		}
 		return syncerr.New(syncerr.CodeValidation, syncerr.StageValidate,
@@ -340,6 +569,9 @@ func (e *ComposeExecutor) verifyNoDataInAppDir(ctx context.Context, appDirAbs, p
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "?? ") {
 					untracked := strings.TrimSpace(strings.TrimPrefix(line, "?? "))
+					if untracked == ".envs" || strings.HasPrefix(untracked, ".envs/") {
+						continue
+					}
 					return syncerr.New(syncerr.CodeValidation, syncerr.StageValidate,
 						fmt.Sprintf("app_dir_contains_data: untracked data %s inside checkout", untracked))
 				}
@@ -348,6 +580,7 @@ func (e *ComposeExecutor) verifyNoDataInAppDir(ctx context.Context, appDirAbs, p
 	}
 
 	_ = composePath
+	_ = slices.Sort[[]string]
 	return nil
 }
 
@@ -393,14 +626,6 @@ func checkComposeBindsAgainstAppDir(composeFullPath, stagingRepoDir, targetAppDi
 	if err != nil {
 		return nil
 	}
-	var raw struct {
-		Services map[string]struct {
-			Volumes []any `json:"volumes"`
-		} `json:"services"`
-	}
-	_ = raw
-	// Also inspect docker compose config summary via simple path resolution on declared bind sources if JSON;
-	// composeFullPath is YAML, so check relative/explicit appDir paths in raw text and interpolated paths.
 	_ = vars
 	cleanTarget := filepath.Clean(targetAppDir)
 	for _, line := range strings.Split(string(data), "\n") {

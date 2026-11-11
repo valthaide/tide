@@ -53,12 +53,14 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 - Per-entry file, directory, and glob hashing for `watch_files`: config changes trigger HTTP reload hooks (`reload_url`), in-container commands (`reload_command`, e.g. `kill -HUP 1`), or targeted single-service restarts instead of recreating containers.
 - Content hashing for external host `env_files` and Compose `env_file` references with automatic drift reconciliation.
 
-### 8. Production-Safe Repository Migration (`tidectl migrate-repo` & Fleet)
-- Original ConOps had no repository migration workflow. Tide performs in-place repository switches while preserving `app.ID`, `ComposeProject`, and all data volumes:
-  - stages and validates the target repository before stopping the live stack: checks Git readability, green CI gate, valid Compose config, absence of persistent data or writable bind mounts inside the managed app directory, and availability of all pinned images;
-  - aborts immediately on any preflight or `compose down` error, leaving the existing application running untouched;
-  - never prunes named or external volumes regardless of `prune_volumes`;
-  - supports `--dry-run` impact plans, symmetric rollback by restoring the previous `repo_url`, and permanent audit logging.
+### 8. Zero-Downtime Application Source Migration (`tidectl migrate-repo` & Fleet)
+- Original ConOps had no repository migration workflow. Tide performs in-place source switches (`repo_url`, `branch`, `compose_path`, `revision`, or `repo_auth_method`) while preserving `app.ID`, `ComposeProject`, `env_file`, and all data volumes:
+  - stages and validates the target source before touching the live stack: checks Git readability, green CI gate for the target commit, valid rendered Compose config, external `env_file` availability, absence of persistent data or writable bind mounts inside the managed app directory, and availability of all pinned images;
+  - compares the rendered Compose configuration (image with `@sha256` digest, environment variables, published ports, volumes/mounts, networks, command/entrypoint, and user labels) against the currently running containers;
+  - **zero-restart adoption (`mode=no_restart`, `reason=config_identical`)**: when the rendered configuration matches the live stack, Tide swaps the Git checkout metadata in-place (preserving file inodes), records the new source and commit, and enters regular reconciliation without stopping or recreating any containers;
+  - **targeted service recreation (`mode=restarted`)**: when configuration differs, Tide runs standard `docker compose up -d --remove-orphans` (never `compose down`) so only changed services are recreated while unchanged services remain running;
+  - aborts immediately on any preflight error (unreachable source, red/pending CI gate, invalid Compose, missing `env_file` or image), keeping the old source and leaving the running application untouched;
+  - emits structured migration logs, persistent `audit_events`, and `tide_repo_migrations_total{app,mode,reason}` Prometheus metrics; supports `--dry-run` impact plans and symmetric rollback.
 
 ### 9. Security, Encryption & Secret Redaction (`internal/apiauth`, `internal/redact`, `internal/secrets`, `internal/tlsutil`)
 - **HTTPS by default** (`:8443`) with automatic self-signed certificate generation or custom `TIDE_TLS_CERT` / `TIDE_TLS_KEY`.
@@ -87,6 +89,14 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 ---
 
 ## Release History
+
+### v2.1.0 (2026-11-11)
+- **Zero-downtime application source migration (`repo_url`, `branch`, `compose_path`)**:
+  - When moving an application to a new repository, branch, or `compose_path` (in Fleet YAML, API `PATCH` / `migrate-repo`, or `tidectl migrate-repo`), Tide fetches the target repository in staging, verifies the CI gate for the target commit, renders `docker compose config`, and compares the normalized specification (image + `@sha256` digest, environment variables, ports, volumes/bind mounts, networks, command/entrypoint, and labels) against the currently running containers.
+  - **No-restart source adoption (`mode=no_restart`, `reason=config_identical`)**: If the rendered configuration matches the live stack, Tide swaps the checkout metadata in-place (preserving regular file inodes for bind mounts), updates the stored source and commit, and resumes normal reconciliation without stopping or recreating any containers.
+  - **Targeted service recreation (`mode=restarted`)**: If the configuration differs (e.g., `image_changed`, `env_changed`, `ports_changed`, `volumes_changed`, `networks_changed`, `command_changed`, `labels_changed`), Tide swaps the checkout in-place and runs standard `docker compose up -d --remove-orphans` without `compose down`, recreating only the changed services while unchanged services continue running uninterrupted.
+  - **Preserved identity & safe failure**: Preserves `app.ID`, `ComposeProject`, named/external volumes, and `env_file` references. If the new source is unreachable, CI gate is not green, `env_file` is missing, or Compose fails to render/validate, Tide stays on the previous source and leaves the running application untouched.
+  - **Observability**: Added `tide_repo_migrations_total{app,mode,reason}` Prometheus counter, structured logs (`mode`, `strategy`, `reason`, `changed_services`, `unchanged_services`), `migrated_no_restart` / `migrated_restarted` deploy history & audit decisions, and migration diff fields in `tidectl migrate-repo [--dry-run]`.
 
 ### v2.0.1 (2026-11-10)
 - Consolidated repository branches to a single `main` branch and unified binary archive + GHCR container image publishing in the release workflow.
