@@ -171,15 +171,7 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 	targetAppRepoDir := filepath.Join(appDirAbs, "repo")
 	desiredImages := e.inspectDesiredImages(ctx, prep.images, prep.env)
 	desiredSpec, specErr := ParseRenderedComposeSpec(prep.configJSON, projectName, stagingRepoDir, targetAppRepoDir, func(imageRef string) string {
-		if img, ok := desiredImages[imageRef]; ok {
-			for _, rd := range img.RepoDigests {
-				if d := extractDigestHex(rd); d != "" {
-					return d
-				}
-			}
-			return img.ID
-		}
-		return ""
+		return localImageDigest(desiredImages, imageRef)
 	})
 	var diff MigrationDiffResult
 	if specErr != nil {

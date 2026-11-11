@@ -1,7 +1,9 @@
 package compose
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -435,6 +437,451 @@ func TestCommitRepoMigrationPreservesInodesAndSwapsGitWithoutComposeDown(t *test
 	}
 	if got := strings.TrimSpace(string(out)); got != "https://git.example/new/tenant-dev1.git" {
 		t.Fatalf("expected .git origin to point to new repo, got %q", got)
+	}
+}
+
+const (
+	dollarProject = "tenko-dev2"
+
+	// Real values, as a container holds them.
+	dollarCORS       = `^https://([a-z0-9-]+\.)?example\.com$`
+	dollarOtherCORS  = `^https://([a-z0-9-]+\.)?example\.org$`
+	dollarSecret     = "s3cr3t$with$dollars"
+	dollarOtherSec   = "r0tated$secret"
+	dollarLiteral    = "a$$b"
+	dollarRedisShell = `exec redis-server --requirepass "$REDIS_PASSWORD"`
+	dollarLabelKey   = "traefik.http.middlewares.strip.replacepathregex.replacement"
+)
+
+// escapeLikeCompose doubles every `$`, as `docker compose config` does with its
+// interpolated output.
+func escapeLikeCompose(doc []byte) []byte {
+	return bytes.ReplaceAll(doc, []byte("$"), []byte("$$"))
+}
+
+// dollarFixture is a healthy three-service project whose images are referenced
+// by tag only and whose values contain `$`. doc holds the real values and is
+// escaped the way Compose prints it before it is parsed.
+type dollarFixture struct {
+	doc           map[string]any
+	images        map[string]fullImageInspect // by service
+	desiredImages map[string]fullImageInspect // as inspectDesiredImages builds it
+	runningImages map[string]fullImageInspect // as fetchLiveProjectObjects builds it
+	containers    map[string]*fullContainerInspect
+	stagingRepo   string
+	targetRepo    string
+}
+
+func newDollarFixture(t *testing.T) *dollarFixture {
+	t.Helper()
+	f := &dollarFixture{
+		images:        map[string]fullImageInspect{},
+		desiredImages: map[string]fullImageInspect{},
+		runningImages: map[string]fullImageInspect{},
+		containers:    map[string]*fullContainerInspect{},
+		stagingRepo:   t.TempDir(),
+		targetRepo:    t.TempDir(),
+	}
+	f.doc = map[string]any{
+		"name": dollarProject,
+		"services": map[string]any{
+			"api": map[string]any{
+				"image": "registry.example/tenko/api:1.4.2",
+				"environment": map[string]any{
+					"CORS_ALLOWED_ORIGIN_REGEX": dollarCORS,
+					"SESSION_SECRET":            dollarSecret,
+					"LITERAL_DOUBLE":            dollarLiteral,
+				},
+				"labels":   map[string]any{dollarLabelKey: "/$1"},
+				"networks": map[string]any{"default": nil},
+			},
+			"redis": map[string]any{
+				"image":    "redis:7.4-alpine",
+				"command":  []any{"sh", "-c", dollarRedisShell},
+				"networks": map[string]any{"default": nil},
+			},
+			"postgres": map[string]any{
+				"image":       "postgres:16-alpine",
+				"environment": map[string]any{"POSTGRES_DB": "tenko"},
+				"networks":    map[string]any{"default": nil},
+			},
+		},
+		"networks": map[string]any{"default": map[string]any{"name": dollarProject + "_default"}},
+	}
+
+	// api and redis were pulled from a registry. postgres was loaded from an
+	// archive, so it has no RepoDigests and is known by its image ID only.
+	api := fullImageInspect{
+		ID:          "sha256:" + strings.Repeat("a", 64),
+		RepoDigests: []string{"registry.example/tenko/api@sha256:" + strings.Repeat("1", 64)},
+		RepoTags:    []string{"registry.example/tenko/api:1.4.2"},
+	}
+	api.Config.Entrypoint = []string{"/entrypoint.sh"}
+	api.Config.Cmd = []string{"sh", "-c", "exec app --home $HOME"}
+	api.Config.Env = []string{"PATH=/usr/local/bin:/usr/bin", "IMAGE_DEFAULT=x$$y"}
+
+	redis := fullImageInspect{
+		ID:          "sha256:" + strings.Repeat("b", 64),
+		RepoDigests: []string{"redis@sha256:" + strings.Repeat("2", 64)},
+		RepoTags:    []string{"redis:7.4-alpine"},
+	}
+	redis.Config.Entrypoint = []string{"docker-entrypoint.sh"}
+	redis.Config.Cmd = []string{"redis-server"}
+	redis.Config.Env = []string{"PATH=/usr/local/bin:/usr/bin"}
+
+	postgres := fullImageInspect{
+		ID:       "sha256:" + strings.Repeat("c", 64),
+		RepoTags: []string{"postgres:16-alpine"},
+	}
+	postgres.Config.Entrypoint = []string{"docker-entrypoint.sh"}
+	postgres.Config.Cmd = []string{"postgres"}
+	postgres.Config.Env = []string{"PATH=/usr/local/bin:/usr/bin", "PG_MAJOR=16"}
+
+	f.addService("api", api, []string{"/entrypoint.sh"}, []string{"sh", "-c", "exec app --home $HOME"}, []string{
+		"CORS_ALLOWED_ORIGIN_REGEX=" + dollarCORS,
+		"SESSION_SECRET=" + dollarSecret,
+		"LITERAL_DOUBLE=" + dollarLiteral,
+		"PATH=/usr/local/bin:/usr/bin",
+		"IMAGE_DEFAULT=x$$y",
+	}, map[string]string{dollarLabelKey: "/$1"})
+	f.addService("redis", redis, []string{"docker-entrypoint.sh"}, []string{"sh", "-c", dollarRedisShell}, []string{
+		"PATH=/usr/local/bin:/usr/bin",
+	}, nil)
+	f.addService("postgres", postgres, []string{"docker-entrypoint.sh"}, []string{"postgres"}, []string{
+		"POSTGRES_DB=tenko",
+		"PATH=/usr/local/bin:/usr/bin",
+		"PG_MAJOR=16",
+	}, nil)
+	return f
+}
+
+func (f *dollarFixture) service(name string) map[string]any {
+	return f.doc["services"].(map[string]any)[name].(map[string]any)
+}
+
+func (f *dollarFixture) addService(name string, img fullImageInspect, entrypoint, cmd, env []string, userLabels map[string]string) {
+	ref := f.service(name)["image"].(string)
+	f.images[name] = img
+	registerImageKeys(f.desiredImages, ref, img)
+
+	c := &fullContainerInspect{}
+	c.ID = "cid-" + name
+	c.Image = img.ID
+	c.State.Status = "running"
+	c.State.Running = true
+	c.Config.Image = ref
+	c.Config.Entrypoint = entrypoint
+	c.Config.Cmd = cmd
+	c.Config.Env = env
+	c.Config.Labels = map[string]string{
+		"com.docker.compose.project": dollarProject,
+		"com.docker.compose.service": name,
+	}
+	for k, v := range userLabels {
+		c.Config.Labels[k] = v
+	}
+	c.HostConfig.NetworkMode = dollarProject + "_default"
+	c.NetworkSettings.Networks = map[string]struct {
+		NetworkID string   `json:"NetworkID"`
+		Aliases   []string `json:"Aliases"`
+	}{
+		dollarProject + "_default": {NetworkID: "n1"},
+	}
+	f.containers[name] = c
+	registerImageKeys(f.runningImages, c.Image, img)
+	registerImageKeys(f.runningImages, c.Config.Image, img)
+}
+
+func (f *dollarFixture) setContainerEnv(t *testing.T, service, key, value string) {
+	t.Helper()
+	c := f.containers[service]
+	for i, entry := range c.Config.Env {
+		if strings.HasPrefix(entry, key+"=") {
+			c.Config.Env[i] = key + "=" + value
+			return
+		}
+	}
+	t.Fatalf("container %s has no env %s", service, key)
+}
+
+// compare runs the same steps as PrepareRepoMigration: parse the escaped
+// config with digests resolved from local image inspect, build the running
+// spec from container inspect, compare.
+func (f *dollarFixture) compare(t *testing.T) (CanonicalProjectSpec, MigrationDiffResult) {
+	t.Helper()
+	raw, err := json.Marshal(f.doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := ParseRenderedComposeSpec(escapeLikeCompose(raw), dollarProject, f.stagingRepo, f.targetRepo, func(ref string) string {
+		return localImageDigest(f.desiredImages, ref)
+	})
+	if err != nil {
+		t.Fatalf("ParseRenderedComposeSpec: %v", err)
+	}
+	var containers []fullContainerInspect
+	for _, name := range []string{"api", "postgres", "redis"} {
+		containers = append(containers, *f.containers[name])
+	}
+	netMap := map[string]string{dollarProject + "_default": dollarProject + "_default"}
+	running, healthy, err := BuildRunningProjectSpec(dollarProject, f.targetRepo, containers, f.runningImages, netMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !healthy {
+		t.Fatal("fixture containers must be healthy")
+	}
+	return desired, CompareMigrationSpecs(desired, running, healthy, f.desiredImages)
+}
+
+func requireIdentical(t *testing.T, res MigrationDiffResult) {
+	t.Helper()
+	if !res.Equivalent || res.Mode != MigrationModeNoRestart || res.Reason != "config_identical" {
+		t.Fatalf("expected no_restart/config_identical, got %+v", res)
+	}
+	if len(res.ChangedServices) != 0 || len(res.RemovedServices) != 0 || len(res.DiffSummary) != 0 {
+		t.Fatalf("identical config must report no changes, got %+v", res)
+	}
+	if !slices.Equal(res.UnchangedServices, []string{"api", "postgres", "redis"}) {
+		t.Fatalf("unexpected unchanged services: %v", res.UnchangedServices)
+	}
+}
+
+func requireChanged(t *testing.T, res MigrationDiffResult, reason string, services ...string) {
+	t.Helper()
+	if res.Equivalent || res.Mode != MigrationModeRestarted || res.Reason != reason {
+		t.Fatalf("expected restarted/%s, got %+v", reason, res)
+	}
+	if !slices.Equal(res.ChangedServices, services) {
+		t.Fatalf("expected changed services %v, got %v", services, res.ChangedServices)
+	}
+}
+
+func requireNoValuesInSummary(t *testing.T, res MigrationDiffResult, values ...string) {
+	t.Helper()
+	for _, line := range res.DiffSummary {
+		for _, value := range values {
+			if strings.Contains(line, value) {
+				t.Fatalf("value leaked into diff summary: %s", line)
+			}
+		}
+	}
+}
+
+// Compose prints `$` as `$$` in `config` output. The same values in the
+// containers must compare equal, and a real change must still be found.
+func TestMigrationDiffComposeDollarEscaping(t *testing.T) {
+	t.Run("same values are identical", func(t *testing.T) {
+		f := newDollarFixture(t)
+		desired, res := f.compare(t)
+		requireIdentical(t, res)
+
+		api := desired.Services["api"]
+		if got := api.Environment["CORS_ALLOWED_ORIGIN_REGEX"]; got != dollarCORS {
+			t.Fatalf("CORS value was not unescaped: %q", got)
+		}
+		if got := api.Labels[dollarLabelKey]; got != "/$1" {
+			t.Fatalf("label value was not unescaped: %q", got)
+		}
+		if got := desired.Services["redis"].Command; !slices.Equal(got, []string{"sh", "-c", dollarRedisShell}) {
+			t.Fatalf("redis command was not unescaped: %q", got)
+		}
+	})
+
+	t.Run("literal double dollar stays double", func(t *testing.T) {
+		f := newDollarFixture(t)
+		desired, res := f.compare(t)
+		requireIdentical(t, res)
+		if got := desired.Services["api"].Environment["LITERAL_DOUBLE"]; got != dollarLiteral {
+			t.Fatalf("literal $$ must survive, got %q", got)
+		}
+
+		// Config says a$b, the container holds a$$b.
+		f.service("api")["environment"].(map[string]any)["LITERAL_DOUBLE"] = "a$b"
+		_, res = f.compare(t)
+		requireChanged(t, res, "env_changed", "api")
+	})
+
+	t.Run("container values and image defaults are compared as they are", func(t *testing.T) {
+		// The image default is x$$y. A container holding x$y differs from it.
+		f := newDollarFixture(t)
+		f.setContainerEnv(t, "api", "IMAGE_DEFAULT", "x$y")
+		_, res := f.compare(t)
+		requireChanged(t, res, "env_changed", "api")
+
+		// A container value with a real $$ is not collapsed either.
+		f = newDollarFixture(t)
+		f.setContainerEnv(t, "api", "SESSION_SECRET", "s3cr3t$$with$$dollars")
+		_, res = f.compare(t)
+		requireChanged(t, res, "env_changed", "api")
+	})
+
+	t.Run("changed env value is found and not printed", func(t *testing.T) {
+		f := newDollarFixture(t)
+		f.setContainerEnv(t, "api", "CORS_ALLOWED_ORIGIN_REGEX", dollarOtherCORS)
+		f.setContainerEnv(t, "api", "SESSION_SECRET", dollarOtherSec)
+		_, res := f.compare(t)
+		requireChanged(t, res, "env_changed", "api")
+		summary := strings.Join(res.DiffSummary, "\n")
+		if !strings.Contains(summary, "CORS_ALLOWED_ORIGIN_REGEX") || !strings.Contains(summary, "SESSION_SECRET") {
+			t.Fatalf("changed keys missing from diff summary: %s", summary)
+		}
+		requireNoValuesInSummary(t, res, dollarCORS, dollarOtherCORS, dollarSecret, dollarOtherSec, "a-z0-9", "s3cr3t", "r0tated")
+	})
+
+	t.Run("changed command is found", func(t *testing.T) {
+		f := newDollarFixture(t)
+		f.containers["redis"].Config.Cmd = []string{"sh", "-c", `exec redis-server --requirepass "$OTHER_PASSWORD"`}
+		_, res := f.compare(t)
+		requireChanged(t, res, "command_changed", "redis")
+		requireNoValuesInSummary(t, res, "requirepass", "PASSWORD")
+	})
+
+	t.Run("changed entrypoint is found", func(t *testing.T) {
+		f := newDollarFixture(t)
+		f.service("api")["entrypoint"] = []any{"/other-entrypoint.sh"}
+		_, res := f.compare(t)
+		requireChanged(t, res, "command_changed", "api")
+	})
+
+	t.Run("changed label is found", func(t *testing.T) {
+		f := newDollarFixture(t)
+		f.containers["api"].Config.Labels[dollarLabelKey] = "/$2"
+		_, res := f.compare(t)
+		requireChanged(t, res, "labels_changed", "api")
+	})
+}
+
+// An image referenced by tag has no digest in the config. Its digest comes
+// from local image inspect and must reach the comparison.
+func TestMigrationDiffTagOnlyImages(t *testing.T) {
+	t.Run("same local image is identical", func(t *testing.T) {
+		f := newDollarFixture(t)
+		desired, res := f.compare(t)
+		requireIdentical(t, res)
+
+		want := map[string]string{
+			"api":      strings.Repeat("1", 64), // RepoDigest
+			"redis":    strings.Repeat("2", 64), // RepoDigest
+			"postgres": strings.Repeat("c", 64), // image ID, no RepoDigests
+		}
+		for name, digest := range want {
+			if got := desired.Services[name].Digest; got != digest {
+				t.Fatalf("service %s: digest %q, want %q", name, got, digest)
+			}
+		}
+	})
+
+	t.Run("tag moved to another local image", func(t *testing.T) {
+		f := newDollarFixture(t)
+		moved := f.images["redis"]
+		moved.ID = "sha256:" + strings.Repeat("d", 64)
+		moved.RepoDigests = []string{"redis@sha256:" + strings.Repeat("3", 64)}
+		registerImageKeys(f.desiredImages, "redis:7.4-alpine", moved)
+		_, res := f.compare(t)
+		requireChanged(t, res, "image_changed", "redis")
+	})
+
+	t.Run("tag changed in compose", func(t *testing.T) {
+		f := newDollarFixture(t)
+		next := f.images["redis"]
+		next.ID = "sha256:" + strings.Repeat("e", 64)
+		next.RepoDigests = []string{"redis@sha256:" + strings.Repeat("4", 64)}
+		next.RepoTags = []string{"redis:8.0-alpine"}
+		f.service("redis")["image"] = "redis:8.0-alpine"
+		registerImageKeys(f.desiredImages, "redis:8.0-alpine", next)
+		_, res := f.compare(t)
+		requireChanged(t, res, "image_changed", "redis")
+	})
+
+	t.Run("image missing locally is not treated as the same", func(t *testing.T) {
+		f := newDollarFixture(t)
+		f.desiredImages = map[string]fullImageInspect{}
+		registerImageKeys(f.desiredImages, "registry.example/tenko/api:1.4.2", f.images["api"])
+		registerImageKeys(f.desiredImages, "redis:7.4-alpine", f.images["redis"])
+		desired, res := f.compare(t)
+		if got := desired.Services["postgres"].Digest; got != "" {
+			t.Fatalf("image without local inspect must have no digest, got %q", got)
+		}
+		if res.Equivalent || !slices.Equal(res.ChangedServices, []string{"postgres"}) {
+			t.Fatalf("expected only postgres changed, got %+v", res)
+		}
+		if !strings.Contains(strings.Join(res.DiffSummary, "\n"), "has no resolved digest") {
+			t.Fatalf("expected unresolved digest in summary, got %v", res.DiffSummary)
+		}
+	})
+}
+
+func TestUnescapeComposeDollars(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"no dollars", `{"a":"b"}`, `{"a":"b"}`},
+		{"single escaped dollar", `{"a":"x$$y"}`, `{"a":"x$y"}`},
+		{"escaped variable syntax", `{"a":"$${HOME}"}`, `{"a":"${HOME}"}`},
+		{"literal double dollar", `{"a":"x$$$$y"}`, `{"a":"x$$y"}`},
+		{"dollar at end of value", `{"a":"^x$$"}`, `{"a":"^x$"}`},
+		{"several values", `{"a":"$$1","b":["sh","-c","echo $$A $$B"]}`, `{"a":"$1","b":["sh","-c","echo $A $B"]}`},
+		{"unescaped document is left alone", `{"a":"x$y","b":"p$$q"}`, `{"a":"x$y","b":"p$$q"}`},
+		{"odd run is left alone", `{"a":"x$$$y"}`, `{"a":"x$$$y"}`},
+		{"odd run at the end is left alone", `x$$ y$`, `x$$ y$`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(unescapeComposeDollars([]byte(tc.in))); got != tc.want {
+				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeDigestHex(t *testing.T) {
+	hex64 := strings.Repeat("ab", 32)
+	cases := []struct{ name, in, want string }{
+		{"bare hex", hex64, hex64},
+		{"bare hex upper case", strings.ToUpper(hex64), hex64},
+		{"image id", "sha256:" + hex64, hex64},
+		{"repo digest", "registry.example/app@sha256:" + hex64, hex64},
+		{"empty", "", ""},
+		{"tag", "postgres:16-alpine", ""},
+		{"short hex", "abcdef", ""},
+		{"not hex", strings.Repeat("zz", 32), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeDigestHex(tc.in); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLocalImageDigest(t *testing.T) {
+	withRepoDigest := fullImageInspect{
+		ID:          "sha256:" + strings.Repeat("a", 64),
+		RepoDigests: []string{"redis@sha256:" + strings.Repeat("2", 64)},
+		RepoTags:    []string{"redis:7.4-alpine"},
+	}
+	idOnly := fullImageInspect{ID: "sha256:" + strings.Repeat("c", 64), RepoTags: []string{"app:dev"}}
+	images := map[string]fullImageInspect{}
+	registerImageKeys(images, "redis:7.4-alpine", withRepoDigest)
+	registerImageKeys(images, "app:dev", idOnly)
+
+	cases := []struct{ name, ref, want string }{
+		{"repo digest wins", "redis:7.4-alpine", strings.Repeat("2", 64)},
+		{"same image under its full name", "docker.io/library/redis:7.4-alpine", strings.Repeat("2", 64)},
+		{"image id when there is no repo digest", "app:dev", strings.Repeat("c", 64)},
+		{"unknown image", "nginx:1.27", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := localImageDigest(images, tc.ref)
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+			// The value must survive the hand-over to ParseRenderedComposeSpec.
+			if normalizeDigestHex(got) != tc.want {
+				t.Fatalf("digest %q is dropped by normalizeDigestHex", got)
+			}
+		})
 	}
 }
 

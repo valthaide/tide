@@ -90,6 +90,12 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.1.1 (2026-11-11)
+- **Fixed false `restarted` plans in `tidectl migrate-repo` when the configuration is unchanged**:
+  - **`$` in values**: `docker compose config` prints every `$` as `$$`. Tide compared that escaped text with the values Docker Engine reports for the running containers, so an environment value, command, entrypoint, or label containing `$` was reported as `env_changed`, `command_changed`, or `labels_changed`. The rendered configuration is now unescaped before the comparison. Container values and image defaults are compared as they are and nothing is interpolated a second time; a literal `$$` in a container matches `$$$$` in the rendered configuration.
+  - **Images referenced by tag**: for an image without `@sha256` the digest read from local `image inspect` was lost between two comparison steps, so the service was reported as `image_changed` (`no resolved digest`) while the container was running that very image. The digest (first RepoDigest, or the image ID when the image has none) now reaches the comparison and is derived the same way for the desired and the running side. A tag that points to another local image, a changed tag, and an image that is not available locally are still reported as `image_changed`.
+- Added regression tests for `$` and literal `$$` values, image defaults, tag-only images, and a dry run that must not start, stop, pull, or create anything and must not print environment values in the plan or the log.
+
 ### v2.1.0 (2026-11-11)
 - **Zero-downtime application source migration (`repo_url`, `branch`, `compose_path`)**:
   - When moving an application to a new repository, branch, or `compose_path` (in Fleet YAML, API `PATCH` / `migrate-repo`, or `tidectl migrate-repo`), Tide fetches the target repository in staging, verifies the CI gate for the target commit, renders `docker compose config`, and compares the normalized specification (image + `@sha256` digest, environment variables, ports, volumes/bind mounts, networks, command/entrypoint, and labels) against the currently running containers.

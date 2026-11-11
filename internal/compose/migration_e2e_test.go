@@ -1,8 +1,10 @@
 package compose
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,308 @@ import (
 	"sync"
 	"testing"
 )
+
+// TestEndToEndDryRunWithDollarValuesAndTagOnlyImages runs PrepareRepoMigration in
+// dry-run mode against a simulated Docker Engine API and `docker` CLI for a stack
+// whose images are referenced by tag only and whose values contain `$`:
+//  1. `compose config` prints `$` as `$$`, the containers hold the real values and
+//     run the images the tags point to: the plan is `no_restart/config_identical`
+//     with no changed services.
+//  2. A value that really differs in a container is reported as `env_changed`
+//     by key, without the value in the plan or in the log.
+//
+// In both cases the dry run starts, stops, pulls and creates nothing, leaves the
+// live checkout on its commit and removes its staging directory.
+func TestEndToEndDryRunWithDollarValuesAndTagOnlyImages(t *testing.T) {
+	f := newDollarFixture(t)
+	serviceNames := []string{"api", "postgres", "redis"}
+
+	var mu sync.Mutex
+	engineSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		switch {
+		case strings.HasSuffix(path, "/containers/json"):
+			var listed []engineContainer
+			for _, name := range serviceNames {
+				c := f.containers[name]
+				listed = append(listed, engineContainer{
+					ID:      c.ID,
+					Names:   []string{"/" + dollarProject + "-" + name + "-1"},
+					Image:   c.Config.Image,
+					ImageID: c.Image,
+					State:   "running",
+					Status:  "Up 2 hours",
+					Labels:  c.Config.Labels,
+				})
+			}
+			_ = json.NewEncoder(w).Encode(listed)
+
+		case strings.Contains(path, "/containers/"):
+			for _, name := range serviceNames {
+				c := f.containers[name]
+				if strings.Contains(path, "/containers/"+c.ID+"/json") {
+					_ = json.NewEncoder(w).Encode(c)
+					return
+				}
+			}
+			http.NotFound(w, r)
+
+		case strings.Contains(path, "/images/"):
+			ref := strings.TrimSuffix(path[strings.Index(path, "/images/")+len("/images/"):], "/json")
+			if img, ok := f.runningImages[ref]; ok {
+				_ = json.NewEncoder(w).Encode(img)
+				return
+			}
+			http.NotFound(w, r)
+
+		case strings.Contains(path, "/networks/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Name": dollarProject + "_default",
+				"Labels": map[string]string{
+					"com.docker.compose.project": dollarProject,
+					"com.docker.compose.network": "default",
+				},
+			})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer engineSrv.Close()
+	t.Setenv("DOCKER_HOST", engineSrv.URL)
+
+	// The compose file as it is written in Git: `$` escaped as `$$`.
+	composeYAML := "services:\n" +
+		"  api:\n" +
+		"    image: registry.example/tenko/api:1.4.2\n" +
+		"    environment:\n" +
+		"      CORS_ALLOWED_ORIGIN_REGEX: '^https://([a-z0-9-]+\\.)?example\\.com$$'\n" +
+		"      SESSION_SECRET: 's3cr3t$$with$$dollars'\n" +
+		"      LITERAL_DOUBLE: 'a$$$$b'\n" +
+		"    labels:\n" +
+		"      " + dollarLabelKey + ": '/$$1'\n" +
+		"  redis:\n" +
+		"    image: redis:7.4-alpine\n" +
+		"    command: [\"sh\", \"-c\", \"exec redis-server --requirepass \\\"$$REDIS_PASSWORD\\\"\"]\n" +
+		"  postgres:\n" +
+		"    image: postgres:16-alpine\n" +
+		"    environment:\n" +
+		"      POSTGRES_DB: tenko\n"
+	makeComposeRepo := func(readme string) (string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		run := func(args ...string) string {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %v: %v (%s)", args, err, out)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		run("init", "-b", "main")
+		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(composeYAML), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(readme), 0644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", ".")
+		run("commit", "-m", "compose")
+		return dir, run("rev-parse", "HEAD")
+	}
+	oldRepoDir, oldSHA := makeComposeRepo("stands/dev\n")
+	newRepoDir, newSHA := makeComposeRepo("new source\n")
+	if oldSHA == newSHA {
+		t.Fatal("the two sources must be different commits")
+	}
+
+	// `docker compose config --format json` output: the real values with every `$` doubled.
+	rawConfig, err := json.Marshal(f.doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	configFile := filepath.Join(binDir, "config.json")
+	if err := os.WriteFile(configFile, escapeLikeCompose(rawConfig), 0644); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(binDir, "docker-cmds.log")
+	dockerScript := `#!/bin/sh
+echo "$@" >> "` + logFile + `"
+if [ "$1" = "version" ]; then
+  echo '{"Client":{"Version":"27.3.1","ApiVersion":"1.47"},"Server":{"Version":"27.3.1","ApiVersion":"1.47","MinAPIVersion":"1.24"}}'
+  exit 0
+fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ]; then
+  echo "Docker Compose version v2.29.0"
+  exit 0
+fi
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  echo '[{"Id":"sha256:ok"}]'
+  exit 0
+fi
+if [ "$1" = "ps" ]; then
+  for a in "$@"; do
+    if [ "$a" = "-aq" ]; then
+      printf "%s\n" cid-api cid-postgres cid-redis
+      exit 0
+    fi
+    if [ "$a" = "-a" ]; then
+      echo "api|registry.example/tenko/api:1.4.2|Up 2 hours||` + dollarProject + `-api-1"
+      echo "postgres|postgres:16-alpine|Up 2 hours||` + dollarProject + `-postgres-1"
+      echo "redis|redis:7.4-alpine|Up 2 hours||` + dollarProject + `-redis-1"
+      exit 0
+    fi
+  done
+  exit 0
+fi
+if [ "$1" = "inspect" ]; then
+  echo '[{"Mounts":[]},{"Mounts":[]},{"Mounts":[]}]'
+  exit 0
+fi
+if [ "$1" = "compose" ]; then
+  for a in "$@"; do
+    if [ "$a" = "config" ]; then
+      cat "` + configFile + `"
+      exit 0
+    fi
+  done
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(dockerScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Staging directories are created under TMPDIR, so leftovers are visible here.
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+
+	var logBuf bytes.Buffer
+	workDir := t.TempDir()
+	executor := &ComposeExecutor{
+		WorkDir: workDir,
+		Logger:  slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	appID := "app-dryrun-1"
+	executor.RememberProject(appID, dollarProject)
+	appDirAbs := filepath.Join(workDir, appID)
+	liveRepo := filepath.Join(appDirAbs, "repo")
+	if err := os.MkdirAll(appDirAbs, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.prepareRepo(context.Background(), appDirAbs, liveRepo, oldRepoDir, "main", oldSHA, "public", nil); err != nil {
+		t.Fatalf("seed old repo: %v", err)
+	}
+
+	dryRun := func() MigrationPrepared {
+		t.Helper()
+		prep, err := executor.PrepareRepoMigration(context.Background(), MigrationPrepParams{
+			AppID:          appID,
+			AppName:        dollarProject,
+			OldComposePath: "docker-compose.yml",
+			NewRepoURL:     newRepoDir,
+			NewAuthMethod:  "public",
+			NewBranch:      "main",
+			TargetCommit:   newSHA,
+			NewComposePath: "docker-compose.yml",
+			Opts:           ApplyOptions{Project: dollarProject},
+			DryRun:         true,
+		})
+		if err != nil {
+			t.Fatalf("PrepareRepoMigration dry run failed: %v", err)
+		}
+		return prep
+	}
+
+	requireNothingApplied := func() {
+		t.Helper()
+		cmds, err := os.ReadFile(logFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changing := []string{"up", "down", "pull", "push", "create", "rm", "stop", "start", "restart", "kill", "run", "exec", "build", "login"}
+		for _, line := range strings.Split(strings.TrimSpace(string(cmds)), "\n") {
+			for _, word := range strings.Fields(line) {
+				if slices.Contains(changing, word) {
+					t.Fatalf("dry run must not change anything, but ran: docker %s", line)
+				}
+			}
+		}
+		if !strings.Contains(string(cmds), "config --format json") {
+			t.Fatalf("dry run did not render the compose config, commands:\n%s", cmds)
+		}
+		out, err := exec.Command("git", "-C", liveRepo, "rev-parse", "HEAD").CombinedOutput()
+		if err != nil {
+			t.Fatalf("git rev-parse: %v (%s)", err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != oldSHA {
+			t.Fatalf("dry run moved the live checkout to %s, want %s", got, oldSHA)
+		}
+		left, err := filepath.Glob(filepath.Join(tmpRoot, "tide-repo-stage-*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(left) != 0 {
+			t.Fatalf("dry run left staging directories: %v", left)
+		}
+	}
+
+	requireNoValues := func(prep MigrationPrepared) {
+		t.Helper()
+		plan, err := json.Marshal(prep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, value := range []string{"s3cr3t", "r0tated", "a-z0-9"} {
+			if strings.Contains(string(plan), value) {
+				t.Fatalf("environment value %q leaked into the plan: %s", value, plan)
+			}
+			if strings.Contains(logBuf.String(), value) {
+				t.Fatalf("environment value %q leaked into the log:\n%s", value, logBuf.String())
+			}
+		}
+	}
+
+	// 1. Same configuration: nothing to restart.
+	prep := dryRun()
+	if !prep.Equivalent || prep.Mode != MigrationModeNoRestart || prep.Reason != "config_identical" {
+		t.Fatalf("expected no_restart/config_identical, got mode=%s reason=%s diff=%v", prep.Mode, prep.Reason, prep.DiffSummary)
+	}
+	if len(prep.ChangedServices) != 0 || len(prep.ToStop) != 0 || len(prep.ToCreate) != 0 || len(prep.ToRemove) != 0 {
+		t.Fatalf("identical config must not plan any change, got %+v", prep)
+	}
+	if !slices.Equal(prep.UnchangedServices, serviceNames) {
+		t.Fatalf("unexpected unchanged services: %v", prep.UnchangedServices)
+	}
+	requireNothingApplied()
+	requireNoValues(prep)
+
+	// 2. A value that really differs in the container is still found.
+	mu.Lock()
+	f.setContainerEnv(t, "api", "SESSION_SECRET", dollarOtherSec)
+	mu.Unlock()
+	prep = dryRun()
+	if prep.Equivalent || prep.Mode != MigrationModeRestarted || prep.Reason != "env_changed" {
+		t.Fatalf("expected restarted/env_changed, got mode=%s reason=%s diff=%v", prep.Mode, prep.Reason, prep.DiffSummary)
+	}
+	if !slices.Equal(prep.ChangedServices, []string{"api"}) || !slices.Equal(prep.UnchangedServices, []string{"postgres", "redis"}) {
+		t.Fatalf("expected only api changed, got changed=%v unchanged=%v", prep.ChangedServices, prep.UnchangedServices)
+	}
+	if !strings.Contains(strings.Join(prep.DiffSummary, "\n"), "SESSION_SECRET") {
+		t.Fatalf("changed key missing from diff summary: %v", prep.DiffSummary)
+	}
+	requireNothingApplied()
+	requireNoValues(prep)
+}
 
 // TestEndToEndExecutorMigrationNoRestartThenTargetedServiceRecreate verifies the full
 // PrepareRepoMigration + CommitRepoMigration + ApplyImages pipeline against a simulated

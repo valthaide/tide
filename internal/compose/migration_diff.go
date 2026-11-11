@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -187,6 +188,13 @@ type dockerNetworkInspect struct {
 }
 
 // ParseRenderedComposeSpec normalizes `docker compose config --format json` output for equivalence comparison.
+//
+// Compose's `$$` escaping is undone first, so every value is the one a container
+// created from this config would hold. Nothing is interpolated again.
+//
+// resolveLocalDigest is asked for the digest of an image that is not pinned with
+// @sha256. It may return bare 64 hex, `sha256:<hex>` or `repo@sha256:<hex>`,
+// or "" when the image is not available locally.
 func ParseRenderedComposeSpec(
 	configJSON []byte,
 	projectName string,
@@ -195,7 +203,7 @@ func ParseRenderedComposeSpec(
 	resolveLocalDigest func(imageRef string) string,
 ) (CanonicalProjectSpec, error) {
 	var doc renderedComposeDoc
-	if err := json.Unmarshal(configJSON, &doc); err != nil {
+	if err := json.Unmarshal(unescapeComposeDollars(configJSON), &doc); err != nil {
 		return CanonicalProjectSpec{}, fmt.Errorf("parse compose config json: %w", err)
 	}
 	if strings.TrimSpace(projectName) == "" {
@@ -244,7 +252,7 @@ func ParseRenderedComposeSpec(
 		img := strings.TrimSpace(svc.Image)
 		digest := extractDigestHex(img)
 		if digest == "" && img != "" && resolveLocalDigest != nil {
-			digest = extractDigestHex(resolveLocalDigest(img))
+			digest = normalizeDigestHex(resolveLocalDigest(img))
 		}
 
 		rawBuild := strings.TrimSpace(string(svc.Build))
@@ -355,15 +363,7 @@ func BuildRunningProjectSpec(
 		cfgImage := strings.TrimSpace(c.Config.Image)
 		digest := extractDigestHex(cfgImage)
 		if digest == "" && hasImg {
-			for _, rd := range imgInfo.RepoDigests {
-				if d := extractDigestHex(rd); d != "" {
-					digest = d
-					break
-				}
-			}
-			if digest == "" {
-				digest = strings.TrimPrefix(strings.TrimSpace(imgInfo.ID), "sha256:")
-			}
+			digest = imageInspectDigest(imgInfo)
 		}
 
 		spec := CanonicalServiceSpec{
@@ -867,6 +867,81 @@ func extractDigestHex(ref string) string {
 		return strings.ToLower(strings.TrimSpace(ref[len("sha256:"):]))
 	}
 	return ""
+}
+
+// normalizeDigestHex returns the digest hex of an already resolved digest: bare
+// 64 hex, `sha256:<hex>` or `repo@sha256:<hex>`. Anything else yields "".
+func normalizeDigestHex(value string) string {
+	if d := extractDigestHex(value); d != "" {
+		return d
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) != sha256.Size*2 {
+		return ""
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return ""
+	}
+	return value
+}
+
+// imageInspectDigest names the content of a locally inspected image: its first
+// RepoDigest, or the image ID when the image has none (built or loaded locally).
+// The desired and the running side must both use this rule, otherwise an image
+// referenced by tag never compares equal to itself.
+func imageInspectDigest(img fullImageInspect) string {
+	for _, rd := range img.RepoDigests {
+		if d := extractDigestHex(rd); d != "" {
+			return d
+		}
+	}
+	return strings.TrimPrefix(strings.TrimSpace(img.ID), "sha256:")
+}
+
+// localImageDigest returns the digest of imageRef from local image inspect
+// results, or "" when the image was not inspected successfully.
+func localImageDigest(images map[string]fullImageInspect, imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	img, ok := images[imageRef]
+	if !ok {
+		img, ok = images[normalizeImageRepoRef(imageRef)]
+	}
+	if !ok {
+		return ""
+	}
+	return imageInspectDigest(img)
+}
+
+// unescapeComposeDollars undoes the `$` to `$$` escaping of `docker compose config`.
+//
+// After interpolation Compose doubles every `$` left in the rendered document
+// (environment, command, entrypoint, labels, paths) so the output can be read
+// back as a Compose file. A container holds the value with a single `$`, so
+// the escaped form never equals Docker Engine inspect data. Collapsing `$$`
+// to `$` is the exact inverse and does not interpolate anything: a literal
+// `$$` in a container is rendered as `$$$$` and comes back as `$$`.
+//
+// A run of `$` with odd length cannot come from that escaping, so such a
+// document is returned unchanged.
+func unescapeComposeDollars(configJSON []byte) []byte {
+	if !bytes.Contains(configJSON, []byte("$$")) {
+		return configJSON
+	}
+	run := 0
+	for _, b := range configJSON {
+		if b == '$' {
+			run++
+			continue
+		}
+		if run%2 != 0 {
+			return configJSON
+		}
+		run = 0
+	}
+	if run%2 != 0 {
+		return configJSON
+	}
+	return bytes.ReplaceAll(configJSON, []byte("$$"), []byte("$"))
 }
 
 func normalizeImageRepoRef(ref string) string {
