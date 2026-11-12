@@ -110,6 +110,10 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_applied_template_hash TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	// Tide v2.3.1: app_dir subfolder for template mode (additive, rollback-safe).
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS app_dir TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_healthy_vars TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -239,6 +243,7 @@ func (s *PostgresStore) CreateApp(ctx context.Context, app *api.App) error {
 		branch,
 		compose_path,
 		template,
+		app_dir,
 		poll_interval,
 		last_seen_commit,
 		last_seen_commit_message,
@@ -250,7 +255,7 @@ func (s *PostgresStore) CreateApp(ctx context.Context, app *api.App) error {
 		status,
 		suspended
 	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 	`
 	_, err := s.pool.Exec(
 		ctx,
@@ -262,6 +267,7 @@ func (s *PostgresStore) CreateApp(ctx context.Context, app *api.App) error {
 		app.Branch,
 		app.ComposePath,
 		app.Template,
+		app.AppDir,
 		app.PollInterval,
 		app.LastSeenCommit,
 		app.LastSeenCommitMessage,
@@ -286,6 +292,7 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		branch,
 		compose_path,
 		COALESCE(template, ''),
+		COALESCE(app_dir, ''),
 		COALESCE(last_applied_template_hash, ''),
 		poll_interval,
 		COALESCE(last_seen_commit, ''),
@@ -328,6 +335,7 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		&app.Branch,
 		&app.ComposePath,
 		&app.Template,
+		&app.AppDir,
 		&app.LastAppliedTemplateHash,
 		&app.PollInterval,
 		&app.LastSeenCommit,
@@ -375,6 +383,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		branch,
 		compose_path,
 		COALESCE(template, ''),
+		COALESCE(app_dir, ''),
 		COALESCE(last_applied_template_hash, ''),
 		poll_interval,
 		COALESCE(last_seen_commit, ''),
@@ -422,6 +431,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.Branch,
 			&app.ComposePath,
 			&app.Template,
+			&app.AppDir,
 			&app.LastAppliedTemplateHash,
 			&app.PollInterval,
 			&app.LastSeenCommit,

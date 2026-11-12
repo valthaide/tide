@@ -435,10 +435,21 @@ func TestSafeRepoMigrationPreflightDataPreservationDryRunAndRollback(t *testing.
 		t.Fatalf("unexpected dry-run plan: %+v downCalls=%d", dryPlan, rt.downCalls)
 	}
 
-	// 4. `compose down` error -> halts procedure before changing repo_url or starting new stack.
-	rt.downErr = fmt.Errorf("compose down exit 1")
+	// 4a. Without --allow-restart a restarted plan is refused and nothing is touched.
 	if _, err := rec.MigrateRepo(context.Background(), origApp, api.RepoMigrationRequest{
 		RepoURL: newRepo, Actor: "sre", Reason: "cutover",
+	}, ""); err == nil || !strings.Contains(err.Error(), "migration_requires_allow_restart") {
+		t.Fatalf("expected allow_restart gate, got %v", err)
+	}
+	if rt.downCalls != 0 {
+		t.Fatalf("allow_restart gate still stopped containers: downCalls=%d", rt.downCalls)
+	}
+
+	// 4. `compose down` error -> halts procedure before changing repo_url or starting new stack.
+	// Operator cutovers that would recreate services need --allow-restart (AllowRestart).
+	rt.downErr = fmt.Errorf("compose down exit 1")
+	if _, err := rec.MigrateRepo(context.Background(), origApp, api.RepoMigrationRequest{
+		RepoURL: newRepo, Actor: "sre", Reason: "cutover", AllowRestart: true,
 	}, ""); err == nil {
 		t.Fatal("expected compose down failure to abort migration")
 	}
@@ -450,7 +461,7 @@ func TestSafeRepoMigrationPreflightDataPreservationDryRunAndRollback(t *testing.
 	// 5. Clean migration -> preserves App.ID, ComposeProject, and KeptVolumes (Criterion 12).
 	rt.downErr = nil
 	appliedPlan, err := rec.MigrateRepo(context.Background(), afterDownErr, api.RepoMigrationRequest{
-		RepoURL: newRepo, Actor: "sre", Reason: "cutover to tenant repo",
+		RepoURL: newRepo, Actor: "sre", Reason: "cutover to tenant repo", AllowRestart: true,
 	}, "")
 	if err != nil {
 		t.Fatalf("migration failed: %v", err)
@@ -462,7 +473,7 @@ func TestSafeRepoMigrationPreflightDataPreservationDryRunAndRollback(t *testing.
 
 	// 6. Rollback by restoring previous repo_url -> preserves same App.ID, ComposeProject, and data volumes, and records audit.
 	rolledPlan, err := rec.MigrateRepo(context.Background(), migrated, api.RepoMigrationRequest{
-		RepoURL: oldRepo, Actor: "sre", Reason: "rollback to previous repo_url",
+		RepoURL: oldRepo, Actor: "sre", Reason: "rollback to previous repo_url", AllowRestart: true,
 	}, "")
 	if err != nil || !rolledPlan.Applied {
 		t.Fatalf("rollback migration failed: %v plan=%+v", err, rolledPlan)

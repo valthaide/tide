@@ -60,6 +60,11 @@ type ApplyOptions struct {
 	// compose.override.yaml. Empty means the app's compose_path file is used.
 	// Template and a compose_path must never be combined by callers.
 	Template string
+	// AppDir is the app folder inside its repository in template mode
+	// (e.g. "backend"). Empty means the repository root. It becomes the
+	// compose --project-directory; .env, env_file, and the app's
+	// compose.override.yaml resolve from it.
+	AppDir string
 	// FleetCheckoutDir is the fleet checkout root holding templates/.
 	// Empty falls back to the executor's configured checkout.
 	FleetCheckoutDir string
@@ -299,7 +304,47 @@ func unsetVarError(names []string) error {
 	if len(names) == 0 {
 		names = []string{"unknown"}
 	}
-	return syncerr.New(syncerr.CodeUnsetVar, syncerr.StageValidate, "unset_var: "+strings.Join(names, ","))
+	return syncerr.New(syncerr.CodeUnsetVar, syncerr.StageValidate, "unset_var: "+strings.Join(names, ", "))
+}
+
+// attributeUnsetVars annotates each unset variable with the compose file
+// that references it, e.g. `API_KEY (in /fleet/templates/web/compose.yaml)`,
+// so a preflight error says which file expects the variable. A variable is
+// attributed to the first file (in merge order) whose own text references
+// it unset; unattributed names stay bare.
+func attributeUnsetVars(inv Invocation, names []string, env map[string]string) []string {
+	if len(names) == 0 || len(inv.Files) == 0 {
+		return names
+	}
+	remaining := map[string]bool{}
+	for _, n := range names {
+		remaining[n] = true
+	}
+	foundIn := map[string]string{}
+	for _, file := range inv.Files {
+		if len(remaining) == 0 {
+			break
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		for _, missing := range MissingInterpolations(string(data), env) {
+			if remaining[missing] {
+				foundIn[missing] = file
+				delete(remaining, missing)
+			}
+		}
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if file, ok := foundIn[n]; ok {
+			out = append(out, fmt.Sprintf("%s (in %s)", n, file))
+		} else {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func buildForbiddenError(services []string) error {
@@ -345,17 +390,19 @@ func (e *ComposeExecutor) prepareImageSync(
 	}
 	env := interpolationEnv(composeDir, opts.Vars)
 	if missing := MissingInterpolations(combined.String(), env); len(missing) > 0 {
+		attributed := attributeUnsetVars(inv, missing, env)
 		appendLogSection(syncLog, "Validation")
-		appendLogLine(syncLog, "unset_var: "+strings.Join(missing, ","))
-		return imagePrep{}, unsetVarError(missing)
+		appendLogLine(syncLog, "unset_var: "+strings.Join(attributed, ", "))
+		return imagePrep{}, unsetVarError(attributed)
 	}
 
 	appendLogSection(syncLog, "Compose config")
 	configArgs := inv.Args(projectName, overrideArgs, "config", "--format", "json")
 	configOut, configErr := e.runCommand(ctx, "docker", configArgs, composeDir, copyVars(opts.Vars), onProgress)
 	if names := unsetVarsInOutput(configOut); len(names) > 0 {
-		appendLogLine(syncLog, "unset_var: "+strings.Join(names, ","))
-		return imagePrep{}, unsetVarError(names)
+		attributed := attributeUnsetVars(inv, names, env)
+		appendLogLine(syncLog, "unset_var: "+strings.Join(attributed, ", "))
+		return imagePrep{}, unsetVarError(attributed)
 	}
 	configJSON := extractJSON(configOut)
 	if configErr != nil {

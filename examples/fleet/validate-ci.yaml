@@ -2,7 +2,7 @@
 # version that runs on the hosts. No controller, DB, or network needed,
 # and no local copy of the schema or validator.
 validate-fleet:
-  image: ghcr.io/valthaide/tide:v2.3.0
+  image: ghcr.io/valthaide/tide:v2.3.1
   script:
     - tide validate hosts/*.yaml
     # Machine-readable output for CI tooling:

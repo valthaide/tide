@@ -378,6 +378,12 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 	if issue := fleetcheck.CheckTemplateName(spec.Template); issue != nil {
 		return fmt.Errorf("%s (app %s)", issue.Message, spec.Name)
 	}
+	if issue := fleetcheck.CheckAppDir(spec.AppDir); issue != nil {
+		return fmt.Errorf("%s (app %s)", issue.Message, spec.Name)
+	}
+	if strings.TrimSpace(spec.AppDir) != "" && strings.TrimSpace(spec.Template) == "" {
+		return fmt.Errorf("app_dir_requires_template: app %s sets app_dir without template", spec.Name)
+	}
 
 	existing := r.Apps.FindByName(spec.Name)
 	if existing == nil {
@@ -389,6 +395,7 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 			Revision:       spec.Revision,
 			ComposePath:    spec.ComposePath,
 			Template:       spec.Template,
+			AppDir:         spec.AppDir,
 			PollInterval:   spec.PollInterval,
 			Suspended:      spec.Suspended,
 		}
@@ -416,9 +423,10 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 	repoChanged := !strings.EqualFold(strings.TrimSpace(existing.RepoURL), strings.TrimSpace(spec.RepoURL)) ||
 		repoauth.NormalizeMethod(existing.RepoAuthMethod) != method
 	templateChanged := strings.TrimSpace(existing.Template) != strings.TrimSpace(spec.Template)
+	appDirChanged := fleetcheck.NormalizeAppDir(existing.AppDir) != fleetcheck.NormalizeAppDir(spec.AppDir)
 	sourceLocChanged := strings.TrimSpace(existing.Branch) != strings.TrimSpace(spec.Branch) ||
 		strings.TrimSpace(existing.ComposePath) != strings.TrimSpace(spec.ComposePath) ||
-		templateChanged
+		templateChanged || appDirChanged
 
 	if repoChanged || (sourceLocChanged && r.RepoMigrator != nil) {
 		nextPolicy := policyJSONFromSpec(spec, doc)
@@ -431,6 +439,8 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 				migReason = "fleet branch updated"
 			case templateChanged:
 				migReason = "fleet template updated"
+			case appDirChanged:
+				migReason = "fleet app_dir updated"
 			case strings.TrimSpace(existing.ComposePath) != strings.TrimSpace(spec.ComposePath):
 				migReason = "fleet compose_path updated"
 			}
@@ -442,6 +452,7 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 				Revision:       spec.Revision,
 				ComposePath:    spec.ComposePath,
 				Template:       spec.Template,
+				AppDir:         spec.AppDir,
 				PollInterval:   spec.PollInterval,
 				Vars:           spec.Vars,
 				Reason:         migReason,
@@ -459,9 +470,9 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 
 		// Unit-test fallback when RepoMigrator is not wired: preserve app ID, compose project, and running containers.
 		if updater, ok := r.Apps.(interface {
-			UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath, template string) error
+			UpdateRepository(id, repoURL, repoAuthMethod, branch, revision, composePath, template, appDir string) error
 		}); ok {
-			if err := updater.UpdateRepository(existing.ID, spec.RepoURL, method, spec.Branch, spec.Revision, spec.ComposePath, spec.Template); err != nil {
+			if err := updater.UpdateRepository(existing.ID, spec.RepoURL, method, spec.Branch, spec.Revision, spec.ComposePath, spec.Template, spec.AppDir); err != nil {
 				return err
 			}
 			if err := r.Apps.UpdateDeployPolicy(existing.ID, nextPolicy); err != nil {
@@ -482,6 +493,7 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 		existing.Revision = spec.Revision
 		existing.ComposePath = spec.ComposePath
 		existing.Template = spec.Template
+		existing.AppDir = spec.AppDir
 		_ = r.Apps.UpdateApp(existing.ID, spec.Name, spec.Branch, spec.ComposePath, spec.PollInterval, nil)
 		_ = r.Apps.SetRevision(existing.ID, spec.Revision)
 		_ = r.Apps.UpdateDeployPolicy(existing.ID, nextPolicy)
@@ -493,18 +505,26 @@ func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocum
 	if err := r.Apps.UpdateApp(existing.ID, spec.Name, spec.Branch, spec.ComposePath, spec.PollInterval, nil); err != nil {
 		return err
 	}
-	if templateChanged {
+	if templateChanged || appDirChanged {
 		// No RepoMigrator wired: switch the stored source and requeue. The
 		// apply itself still renders template + override through preflight
 		// and `compose up` recreates only services whose config changed.
 		if setter, ok := r.Apps.(interface {
+			SetSource(id, template, appDir string) error
+		}); ok {
+			if err := setter.SetSource(existing.ID, spec.Template, spec.AppDir); err != nil {
+				return err
+			}
+		} else if setter, ok := r.Apps.(interface {
 			SetTemplate(id, template string) error
 		}); ok {
 			if err := setter.SetTemplate(existing.ID, spec.Template); err != nil {
 				return err
 			}
+			existing.AppDir = spec.AppDir
 		} else {
 			existing.Template = spec.Template
+			existing.AppDir = spec.AppDir
 		}
 		if err := r.Apps.MarkPending(existing.ID); err != nil {
 			return err

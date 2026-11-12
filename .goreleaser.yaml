@@ -59,6 +59,12 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 
+# Attach the generated fleet host schema alongside the binaries so a release
+# always ships host.schema.json (or fails before publishing).
+release:
+  extra_files:
+    - glob: ./host.schema.json
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 

@@ -37,6 +37,9 @@ type Invocation struct {
 	Template string
 	// TemplateFile is the resolved fleet template file, template mode only.
 	TemplateFile string
+	// AppDir is the app folder relative to the repository root in template
+	// mode ("" = root); ProjectDir is its absolute form.
+	AppDir string
 	// HasOverride reports whether <app dir>/compose.override.yaml exists.
 	HasOverride bool
 	// OverrideFile is the app override file when HasOverride is true.
@@ -105,10 +108,11 @@ func TemplateFileFor(fleetCheckoutDir, template string) (string, error) {
 // ResolveInvocation resolves the compose source for one app checkout.
 //
 // Template mode: the base file is the fleet template, --project-directory is
-// the app folder in its own repository (the checkout root), and an optional
-// compose.override.yaml in that folder is merged after the template. A
-// missing override is silently skipped; a missing/invalid template is a
-// validation error so a deploy never starts from a half-resolved source.
+// the app folder in its own repository (the checkout root, or the app_dir
+// subfolder when set), and an optional compose.override.yaml in that folder
+// is merged after the template. A missing override is silently skipped; a
+// missing/invalid template or app_dir is a validation error so a deploy
+// never starts from a half-resolved source.
 //
 // compose_path mode keeps the historical layout: the file from the app repo,
 // with its own directory as the project directory.
@@ -150,14 +154,20 @@ func (e *ComposeExecutor) ResolveInvocation(repoDir, composePath string, opts Ap
 			fmt.Sprintf("template_unavailable: template %q not found in fleet checkout: %s", template, templateFile))
 	}
 
+	appFolder, appErr := appFolderDir(repoDir, opts.AppDir)
+	if appErr != nil {
+		return Invocation{}, appErr
+	}
+
 	inv := Invocation{
-		ProjectDir:   repoDir,
+		ProjectDir:   appFolder,
 		Primary:      templateFile,
 		Template:     template,
 		TemplateFile: templateFile,
+		AppDir:       fleetcheck.NormalizeAppDir(opts.AppDir),
 		Files:        []string{templateFile},
 	}
-	override := filepath.Join(repoDir, fleetcheck.OverrideFileName)
+	override := filepath.Join(appFolder, fleetcheck.OverrideFileName)
 	if info, statErr := os.Stat(override); statErr == nil {
 		if info.IsDir() {
 			return Invocation{}, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate,
@@ -170,6 +180,34 @@ func (e *ComposeExecutor) ResolveInvocation(repoDir, composePath string, opts Ap
 		return Invocation{}, fmt.Errorf("stat app compose override %s: %w", override, statErr)
 	}
 	return inv, nil
+}
+
+// appFolderDir resolves the compose project directory for template mode:
+// the repository root, or its app_dir subfolder. The folder must exist and
+// stay inside the checkout; app_dir itself was validated at registration,
+// so this is a defense-in-depth check against escapes and typos.
+func appFolderDir(repoDir, appDir string) (string, error) {
+	// Validate the raw value first so backslashes and ".." are rejected
+	// before NormalizeAppDir collapses them into a lookalike relative path.
+	if issue := fleetcheck.CheckAppDir(appDir); issue != nil {
+		return "", syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issue.Message)
+	}
+	rel := fleetcheck.NormalizeAppDir(appDir)
+	folder := repoDir
+	if rel != "" {
+		folder = filepath.Join(repoDir, filepath.FromSlash(rel))
+	}
+	if info, err := os.Stat(folder); err != nil || !info.IsDir() {
+		if err == nil {
+			err = fmt.Errorf("not a directory")
+		}
+		if rel == "" {
+			return "", fmt.Errorf("app directory %s: %w", folder, err)
+		}
+		return "", syncerr.New(syncerr.CodeValidation, syncerr.StageValidate,
+			fmt.Sprintf("app_dir_not_found: app_dir %q does not exist in the app repository: %s", rel, folder))
+	}
+	return folder, nil
 }
 
 // rememberSource keeps the last resolved invocation for an app so Destroy /
@@ -216,15 +254,20 @@ func (e *ComposeExecutor) invocationForRuntime(appID, composePath string) (Invoc
 }
 
 // HasOverrideForApp reports whether the app checkout currently contains
-// compose.override.yaml. It never errors: a missing checkout means no override.
-func (e *ComposeExecutor) HasOverrideForApp(appID string) bool {
+// compose.override.yaml in its app folder (repo root or app_dir). It never
+// errors: a missing checkout means no override.
+func (e *ComposeExecutor) HasOverrideForApp(appID, appDir string) bool {
 	if e == nil || strings.TrimSpace(appID) == "" {
 		return false
 	}
 	if inv, ok := e.rememberedSource(appID); ok && inv.Template != "" {
 		return inv.HasOverride
 	}
-	info, err := os.Stat(filepath.Join(e.WorkDir, appID, "repo", fleetcheck.OverrideFileName))
+	folder := filepath.Join(e.WorkDir, appID, "repo")
+	if rel := fleetcheck.NormalizeAppDir(appDir); rel != "" {
+		folder = filepath.Join(folder, filepath.FromSlash(rel))
+	}
+	info, err := os.Stat(filepath.Join(folder, fleetcheck.OverrideFileName))
 	return err == nil && !info.IsDir()
 }
 
@@ -232,7 +275,7 @@ func (e *ComposeExecutor) HasOverrideForApp(appID string) bool {
 // fleet template file plus the app override (present/absent + content).
 // It returns "" for compose_path apps and when the source cannot be read, so
 // drift detection stays silent instead of forcing redeploys.
-func (e *ComposeExecutor) TemplateHashForApp(appID, template string) (string, error) {
+func (e *ComposeExecutor) TemplateHashForApp(appID, template, appDir string) (string, error) {
 	template = strings.TrimSpace(template)
 	if e == nil || template == "" {
 		return "", nil
@@ -247,7 +290,12 @@ func (e *ComposeExecutor) TemplateHashForApp(appID, template string) (string, er
 		return "", err
 	}
 	fmt.Fprintf(h, "template:%s\n", hex.EncodeToString(sha256Sum(data)))
-	override := filepath.Join(e.WorkDir, appID, "repo", fleetcheck.OverrideFileName)
+	fmt.Fprintf(h, "app_dir:%s\n", fleetcheck.NormalizeAppDir(appDir))
+	folder := filepath.Join(e.WorkDir, appID, "repo")
+	if rel := fleetcheck.NormalizeAppDir(appDir); rel != "" {
+		folder = filepath.Join(folder, filepath.FromSlash(rel))
+	}
+	override := filepath.Join(folder, fleetcheck.OverrideFileName)
 	if overrideData, readErr := os.ReadFile(override); readErr == nil {
 		fmt.Fprintf(h, "override:%s\n", hex.EncodeToString(sha256Sum(overrideData)))
 	} else {
@@ -267,24 +315,25 @@ func sha256Sum(data []byte) []byte {
 // `docker compose config` exactly the way a deploy would (same file order,
 // same --project-directory) and fails before anything is started.
 //
-// appDir is the app folder in its repository (the checkout or a CI working
-// copy); the override is appDir/compose.override.yaml when present.
-func (e *ComposeExecutor) CheckTemplate(ctx context.Context, fleetCheckoutDir, template, appDir, project string, vars map[string]string) (Invocation, []byte, error) {
-	appDir = strings.TrimSpace(appDir)
-	if appDir == "" {
-		return Invocation{}, nil, fmt.Errorf("app directory is required")
+// repoDir is the app repository checkout (or a CI working copy) and
+// appDirRel its app folder inside it ("" = root); .env, env_file, and the
+// override are read from that folder, exactly as a deploy resolves them.
+func (e *ComposeExecutor) CheckTemplate(ctx context.Context, fleetCheckoutDir, template, repoDir, appDirRel, project string, vars map[string]string) (Invocation, []byte, error) {
+	repoDir = strings.TrimSpace(repoDir)
+	if repoDir == "" {
+		return Invocation{}, nil, fmt.Errorf("app repository directory is required")
 	}
-	if abs, err := filepath.Abs(appDir); err == nil {
-		appDir = abs
+	if abs, err := filepath.Abs(repoDir); err == nil {
+		repoDir = abs
 	}
-	if info, err := os.Stat(appDir); err != nil || !info.IsDir() {
+	if info, err := os.Stat(repoDir); err != nil || !info.IsDir() {
 		if err == nil {
 			err = fmt.Errorf("not a directory")
 		}
-		return Invocation{}, nil, fmt.Errorf("app directory %s: %w", appDir, err)
+		return Invocation{}, nil, fmt.Errorf("app repository directory %s: %w", repoDir, err)
 	}
-	opts := ApplyOptions{Template: strings.TrimSpace(template), FleetCheckoutDir: fleetCheckoutDir, Vars: vars}
-	inv, err := e.ResolveInvocation(appDir, "", opts)
+	opts := ApplyOptions{Template: strings.TrimSpace(template), AppDir: appDirRel, FleetCheckoutDir: fleetCheckoutDir, Vars: vars}
+	inv, err := e.ResolveInvocation(repoDir, "", opts)
 	if err != nil {
 		return Invocation{}, nil, err
 	}
@@ -292,7 +341,7 @@ func (e *ComposeExecutor) CheckTemplate(ctx context.Context, fleetCheckoutDir, t
 		return Invocation{}, nil, fmt.Errorf("template is required")
 	}
 	if strings.TrimSpace(project) == "" {
-		project = composeProjectName(filepath.Base(appDir))
+		project = composeProjectName(filepath.Base(inv.ProjectDir))
 	}
 	configJSON, err := renderComposeConfigDirect(ctx, inv, project, vars)
 	if err != nil {
@@ -322,7 +371,7 @@ func renderComposeConfigDirect(ctx context.Context, inv Invocation, project stri
 	}
 	out, err := cmd.CombinedOutput()
 	if names := unsetVarsInOutput(string(out)); len(names) > 0 {
-		return nil, unsetVarError(names)
+		return nil, unsetVarError(attributeUnsetVars(inv, names, interpolationEnv(inv.ProjectDir, vars)))
 	}
 	if err != nil {
 		return nil, composeConfigFailure(inv, string(out), err)

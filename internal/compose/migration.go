@@ -30,9 +30,12 @@ type MigrationPrepParams struct {
 	// NewTemplate selects the fleet template source for the target. It is an
 	// alternative to NewComposePath; Opts.Template carries the same value.
 	NewTemplate string
-	EnvVars     map[string]string
-	Opts        ApplyOptions
-	DryRun      bool
+	// NewAppDir is the target app folder inside the repository (template
+	// mode); Opts.AppDir carries the same value.
+	NewAppDir string
+	EnvVars   map[string]string
+	Opts      ApplyOptions
+	DryRun    bool
 }
 
 // MigrationPrepared holds the verified staging artifacts, equivalence diff, and plan summary before cutover.
@@ -55,6 +58,7 @@ type MigrationPrepared struct {
 	// Template is the target fleet template (empty in compose_path mode) and
 	// HasOverride whether the staged app checkout provides an override.
 	Template    string
+	AppDir      string
 	HasOverride bool
 }
 
@@ -136,6 +140,9 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 	}
 	opts := p.Opts
 	opts.Template = template
+	if strings.TrimSpace(p.NewAppDir) != "" {
+		opts.AppDir = p.NewAppDir
+	}
 	// Resolve the target source exactly as a deploy would: fleet template +
 	// staged app override (project directory = staged app folder), or the
 	// staged compose_path file. This is the preflight render; a failure here
@@ -145,6 +152,7 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 		return out, invErr
 	}
 	out.Template = inv.Template
+	out.AppDir = inv.AppDir
 	out.HasOverride = inv.HasOverride
 	composeFullPath := inv.Primary
 	composeDir := inv.ProjectDir
@@ -324,7 +332,7 @@ func (e *ComposeExecutor) CommitRepoMigration(ctx context.Context, appID, oldCom
 	// checkout); only the app checkout changed, so re-resolve and remember
 	// the target source for later down/restart/exec calls.
 	if prepared.Template != "" {
-		if inv, invErr := e.ResolveInvocation(targetRepoDir, "", ApplyOptions{Template: prepared.Template}); invErr == nil {
+		if inv, invErr := e.ResolveInvocation(targetRepoDir, "", ApplyOptions{Template: prepared.Template, AppDir: prepared.AppDir}); invErr == nil {
 			e.rememberSource(appID, inv)
 		}
 	}

@@ -11,9 +11,9 @@ import (
 
 // The committed schema is generated, never hand-written: this test fails
 // when the fleet structs and schemas/host.schema.json drift apart.
-// Regenerate with: tide schema host --version v2.3.0 > schemas/host.schema.json
+// Regenerate with: tide schema host --version v2.3.1 > schemas/host.schema.json
 func TestCommittedHostSchemaMatchesGenerated(t *testing.T) {
-	generated, err := HostSchemaJSON("v2.3.0")
+	generated, err := HostSchemaJSON("v2.3.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,12 +22,12 @@ func TestCommittedHostSchemaMatchesGenerated(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(committed) != string(generated) {
-		t.Fatal("schemas/host.schema.json is stale; regenerate with `tide schema host --version v2.3.0 > schemas/host.schema.json`")
+		t.Fatal("schemas/host.schema.json is stale; regenerate with `tide schema host --version v2.3.1 > schemas/host.schema.json`")
 	}
 }
 
 func TestHostSchemaMetadata(t *testing.T) {
-	raw, err := HostSchemaJSON("2.3.0")
+	raw, err := HostSchemaJSON("2.3.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestHostSchemaMetadata(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc["$id"] != "https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json" {
+	if doc["$id"] != "https://github.com/valthaide/tide/releases/download/v2.3.1/host.schema.json" {
 		t.Fatalf("$id: %v", doc["$id"])
 	}
 	if doc["title"] == "" {
@@ -56,7 +56,7 @@ func TestHostSchemaMetadata(t *testing.T) {
 // Every yaml field the parser accepts must exist in the generated schema,
 // and vice versa. This is the parser-drift guard.
 func TestHostSchemaCoversParserStructs(t *testing.T) {
-	raw, err := HostSchemaJSON("v2.3.0")
+	raw, err := HostSchemaJSON("v2.3.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +191,42 @@ func TestValidateReportsPathsDuplicatesAndTemplateRefs(t *testing.T) {
 	report, err = Validate(okRaw, ValidateOptions{FleetDir: fleetDir})
 	if err != nil || !report.OK {
 		t.Fatalf("existing template rejected: %v %+v", err, report)
+	}
+}
+
+func TestValidateAppDirRules(t *testing.T) {
+	// app_dir with a template is accepted and present in the schema.
+	ok := []byte("host: h\napps:\n  - name: a\n    repo_url: https://git.example/a.git\n    template: web\n    app_dir: tools/pgadmin\n")
+	report, err := Validate(ok, ValidateOptions{})
+	if err != nil || !report.OK {
+		t.Fatalf("valid app_dir rejected: %v %+v", err, report)
+	}
+	raw, err := HostSchemaJSON("v2.3.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"app_dir"`) {
+		t.Fatal("generated schema has no app_dir")
+	}
+
+	cases := map[string]string{
+		"app_dir_requires_template": "host: h\napps:\n  - name: a\n    repo_url: https://git.example/a.git\n    app_dir: backend\n",
+		"invalid_app_dir":           "host: h\napps:\n  - name: a\n    repo_url: https://git.example/a.git\n    template: web\n    app_dir: ../escape\n",
+	}
+	for rule, doc := range cases {
+		report, err := Validate([]byte(doc), ValidateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, issue := range report.Issues {
+			if issue.Rule == rule && issue.Path == "apps[0].app_dir" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s not reported with path: %+v", rule, report.Issues)
+		}
 	}
 }
 

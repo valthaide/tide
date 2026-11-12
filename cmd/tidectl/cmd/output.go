@@ -164,6 +164,7 @@ func printAppDetail(app api.App) {
 	fmt.Printf("Revision:       %s\n", orDash(app.Revision))
 	if app.Template != "" {
 		fmt.Printf("Template:       %s\n", app.Template)
+		fmt.Printf("App Dir:        %s\n", orDash(app.AppDir))
 		fmt.Printf("Override:       %s\n", map[bool]string{true: "compose.override.yaml", false: "(none)"}[app.HasOverride])
 	} else {
 		fmt.Printf("Compose:        %s\n", app.ComposePath)

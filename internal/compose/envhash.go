@@ -30,7 +30,7 @@ func (e *ComposeExecutor) ExternalEnvHashForApp(appID, composePath string) (stri
 // source: a compose_path file, or a fleet template plus the app override.
 // Relative env_file entries resolve from the project directory (the app
 // folder in template mode), matching the deploy invocation.
-func (e *ComposeExecutor) ExternalEnvHashForSource(appID, composePath, template string) (string, error) {
+func (e *ComposeExecutor) ExternalEnvHashForSource(appID, composePath, template, appDir string) (string, error) {
 	if e == nil {
 		return "", fmt.Errorf("compose executor is nil")
 	}
@@ -41,7 +41,7 @@ func (e *ComposeExecutor) ExternalEnvHashForSource(appID, composePath, template 
 		}
 		return ExternalEnvHash(repoDir, composePath)
 	}
-	inv, err := e.ResolveInvocation(repoDir, "", ApplyOptions{Template: template})
+	inv, err := e.ResolveInvocation(repoDir, "", ApplyOptions{Template: template, AppDir: appDir})
 	if err != nil {
 		return "", err
 	}

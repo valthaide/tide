@@ -10,6 +10,10 @@
           },
           "type": "array"
         },
+        "app_dir": {
+          "description": "Folder of the application inside its own repository (template mode), e.g. backend or tools/pgadmin. .env, env_file, and compose.override.yaml resolve from here. Empty means the repository root.",
+          "type": "string"
+        },
         "branch": {
           "description": "Branch to track. Default: main.",
           "type": "string"
@@ -290,7 +294,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json",
+  "$id": "https://github.com/valthaide/tide/releases/download/v2.3.1/host.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Applications that should run on one host, declared in hosts/<fqdn>.yaml of a fleet repository. Generated from the Tide fleet parser structs; do not edit by hand.",
@@ -404,6 +408,6 @@
   "x-tide": {
     "fleet_format_version": 1,
     "latest_schema": "https://github.com/valthaide/tide/releases/latest/download/host.schema.json",
-    "tide_version": "v2.3.0"
+    "tide_version": "v2.3.1"
   }
 }

@@ -1,5 +1,5 @@
-# yaml-language-server: $schema=https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json
-$schema: https://github.com/valthaide/tide/releases/download/v2.3.0/host.schema.json
+# yaml-language-server: $schema=https://github.com/valthaide/tide/releases/download/v2.3.1/host.schema.json
+$schema: https://github.com/valthaide/tide/releases/download/v2.3.1/host.schema.json
 schema: 1
 host: example.internal
 apps:
@@ -7,6 +7,7 @@ apps:
     repo_url: https://git.example/org/web.git
     branch: main
     template: web
+    app_dir: backend
   - name: api
     repo_url: https://git.example/org/api.git
     branch: main

@@ -111,6 +111,11 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "last_applied_template_hash TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	// Tide v2.3.1: app_dir subfolder for template mode. Additive, same
+	// rollback story as the v2.2 columns.
+	if err := addSQLiteColumnIfMissing(db, "apps", "app_dir TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	if err := addSQLiteColumnIfMissing(db, "apps", "last_healthy_vars TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
@@ -242,6 +247,7 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, app *api.App) error {
 		branch,
 		compose_path,
 		template,
+		app_dir,
 		poll_interval,
 		last_seen_commit,
 		last_seen_commit_message,
@@ -253,7 +259,7 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, app *api.App) error {
 		status,
 		suspended
 	)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	suspended := 0
 	if app.Suspended {
@@ -269,6 +275,7 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, app *api.App) error {
 		app.Branch,
 		app.ComposePath,
 		app.Template,
+		app.AppDir,
 		app.PollInterval,
 		app.LastSeenCommit,
 		app.LastSeenCommitMessage,
@@ -293,6 +300,7 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		branch,
 		compose_path,
 		COALESCE(template, ''),
+		COALESCE(app_dir, ''),
 		COALESCE(last_applied_template_hash, ''),
 		poll_interval,
 		COALESCE(last_seen_commit, ''),
@@ -335,6 +343,7 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 			&app.Branch,
 			&app.ComposePath,
 			&app.Template,
+			&app.AppDir,
 			&app.LastAppliedTemplateHash,
 			&app.PollInterval,
 			&app.LastSeenCommit,
@@ -383,6 +392,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		branch,
 		compose_path,
 		COALESCE(template, ''),
+		COALESCE(app_dir, ''),
 		COALESCE(last_applied_template_hash, ''),
 		poll_interval,
 		COALESCE(last_seen_commit, ''),
@@ -430,6 +440,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&app.Branch,
 			&app.ComposePath,
 			&app.Template,
+			&app.AppDir,
 			&app.LastAppliedTemplateHash,
 			&app.PollInterval,
 			&app.LastSeenCommit,

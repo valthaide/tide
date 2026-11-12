@@ -82,7 +82,7 @@ func unknownAppFields(seq *yaml.Node) []string {
 		return nil
 	}
 	known := map[string]struct{}{
-		"name": {}, "tenant": {}, "repo_url": {}, "branch": {}, "revision": {}, "compose_path": {}, "template": {},
+		"name": {}, "tenant": {}, "repo_url": {}, "branch": {}, "revision": {}, "compose_path": {}, "template": {}, "app_dir": {},
 		"repo_auth_method": {}, "poll_interval": {}, "deploy_key_file": {}, "suspended": {},
 		"prune_volumes": {}, "health_timeout": {}, "require_pipeline_success": {}, "require_pipeline_sources": {},
 		"strict_pipeline_gate": {}, "pipeline_ref": {}, "required_jobs": {}, "shared_required_jobs": {},

@@ -10,6 +10,7 @@ import (
 
 	"github.com/valthaide/tide/internal/deploypolicy"
 	"github.com/valthaide/tide/internal/envcompat"
+	"github.com/valthaide/tide/internal/fleetcheck"
 	"github.com/valthaide/tide/internal/pollinterval"
 	"go.yaml.in/yaml/v3"
 )
@@ -66,6 +67,7 @@ type AppSpec struct {
 	// checkout, merged with the app's optional compose.override.yaml.
 	// Mutually exclusive with ComposePath.
 	Template               string            `yaml:"template" desc:"Fleet template name: templates/<template>/compose.yaml from the fleet checkout, merged with the app's compose.override.yaml. Mutually exclusive with compose_path."`
+	AppDir                 string            `yaml:"app_dir" desc:"Folder of the application inside its own repository (template mode), e.g. backend or tools/pgadmin. .env, env_file, and compose.override.yaml resolve from here. Empty means the repository root."`
 	RepoAuthMethod         string            `yaml:"repo_auth_method" desc:"Repository auth: public, token, or deploy_key."`
 	PollInterval           string            `yaml:"poll_interval" desc:"Git poll interval, e.g. 30s."`
 	DeployKeyFile          string            `yaml:"deploy_key_file" desc:"Path to the SSH deploy key for repo_auth_method deploy_key."`
@@ -201,6 +203,7 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 			doc.Apps[i].Branch = "main"
 		}
 		doc.Apps[i].Template = strings.TrimSpace(doc.Apps[i].Template)
+		doc.Apps[i].AppDir = fleetcheck.NormalizeAppDir(doc.Apps[i].AppDir)
 		doc.Apps[i].ComposePath = strings.TrimSpace(doc.Apps[i].ComposePath)
 		// Only default compose_path when no template is selected. An explicit
 		// compose_path next to a template is kept as-is here so validation can

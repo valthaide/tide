@@ -137,6 +137,14 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 			issue.Path = prefix + ".template"
 			issues = append(issues, *issue)
 		}
+		if issue := fleetcheck.CheckAppDir(app.AppDir); issue != nil {
+			issue.App = app.Name
+			issue.Path = prefix + ".app_dir"
+			issues = append(issues, *issue)
+		}
+		if strings.TrimSpace(app.AppDir) != "" && strings.TrimSpace(app.Template) == "" {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".app_dir", Rule: "app_dir_requires_template", Message: "app_dir_requires_template: app " + app.Name + " sets app_dir without template; app_dir only applies to the fleet template compose source"})
+		}
 		// Template references must resolve inside the fleet checkout. The
 		// controller has the checkout; offline validation derives it from
 		// the host file location. Without a fleet dir the reference cannot
@@ -281,7 +289,7 @@ func composeIssues(doc *HostDocument, opts ValidateOptions) ([]fleetcheck.Issue,
 				project = compose.ProjectNameForApp(app.Name)
 			}
 			exec := compose.NewComposeExecutor(nil)
-			_, configJSON, checkErr := exec.CheckTemplate(context.Background(), opts.FleetDir, app.Template, appDir, project, app.Vars)
+			_, configJSON, checkErr := exec.CheckTemplate(context.Background(), opts.FleetDir, app.Template, appDir, app.AppDir, project, app.Vars)
 			if checkErr != nil {
 				issues = append(issues, fleetcheck.Issue{App: app.Name, Rule: "template_compose_invalid", Message: checkErr.Error()})
 				continue

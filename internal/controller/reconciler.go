@@ -207,12 +207,12 @@ type EnvFileHasher interface {
 // sourceEnvFileHasher is the template-aware variant: env_file entries are
 // read from the fleet template plus the app override as well.
 type sourceEnvFileHasher interface {
-	ExternalEnvHashForSource(appID, composePath, template string) (string, error)
+	ExternalEnvHashForSource(appID, composePath, template, appDir string) (string, error)
 }
 
 // templateHasher optionally hashes the effective template source of an app.
 type templateHasher interface {
-	TemplateHashForApp(appID, template string) (string, error)
+	TemplateHashForApp(appID, template, appDir string) (string, error)
 }
 
 func (r *Reconciler) externalEnvHash(app *App) (string, error) {
@@ -220,7 +220,7 @@ func (r *Reconciler) externalEnvHash(app *App) (string, error) {
 		return "", nil
 	}
 	if hasher, ok := r.Executor.(sourceEnvFileHasher); ok {
-		return hasher.ExternalEnvHashForSource(app.ID, app.ComposePath, app.Template)
+		return hasher.ExternalEnvHashForSource(app.ID, app.ComposePath, app.Template, app.AppDir)
 	}
 	hasher, ok := r.Executor.(EnvFileHasher)
 	if !ok {
@@ -239,7 +239,7 @@ func (r *Reconciler) templateHash(app *App) string {
 	if !ok {
 		return ""
 	}
-	hash, err := hasher.TemplateHashForApp(app.ID, app.Template)
+	hash, err := hasher.TemplateHashForApp(app.ID, app.Template, app.AppDir)
 	if err != nil {
 		return ""
 	}
@@ -1329,6 +1329,9 @@ func (r *Reconciler) applyRuntime(ctx context.Context, app *App, envVars map[str
 	// renames the project or its volumes.
 	if strings.TrimSpace(opts.Template) == "" && strings.TrimSpace(app.Template) != "" {
 		opts.Template = app.Template
+	}
+	if strings.TrimSpace(opts.AppDir) == "" && strings.TrimSpace(app.AppDir) != "" {
+		opts.AppDir = app.AppDir
 	}
 	if ia, ok := r.Executor.(imageApplier); ok {
 		return ia.ApplyImages(ctx, app.ID, "", envVars, app.RepoURL, app.Branch, app.ComposePath, commit, app.RepoAuthMethod, repoSecret, opts, onProgress)

@@ -10,11 +10,11 @@ import (
 	"github.com/valthaide/tide/internal/api"
 )
 
-func (s *PostgresStore) UpdateAppRepository(ctx context.Context, id, repoURL, repoAuthMethod, branch, revision, composePath, template string) error {
+func (s *PostgresStore) UpdateAppRepository(ctx context.Context, id, repoURL, repoAuthMethod, branch, revision, composePath, template, appDir string) error {
 	ct, err := s.pool.Exec(
 		ctx,
-		`UPDATE apps SET repo_url = $1, repo_auth_method = $2, branch = $3, revision = $4, compose_path = $5, template = $6 WHERE id = $7`,
-		repoURL, repoAuthMethod, branch, revision, composePath, template, id,
+		`UPDATE apps SET repo_url = $1, repo_auth_method = $2, branch = $3, revision = $4, compose_path = $5, template = $6, app_dir = $7 WHERE id = $8`,
+		repoURL, repoAuthMethod, branch, revision, composePath, template, appDir, id,
 	)
 	if err != nil {
 		return err

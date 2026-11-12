@@ -739,8 +739,13 @@ exit 0
 	if strings.Contains(cmds2, " down") {
 		t.Fatalf("changed-service migration must NEVER call compose down, commands:\n%s", cmds2)
 	}
-	if !strings.Contains(cmds2, "compose -p "+projectName+" -f docker-compose.yml up -d --remove-orphans") {
-		t.Fatalf("expected standard `compose up -d --remove-orphans` call, commands:\n%s", cmds2)
+	// Compose is invoked with --project-directory and absolute -f paths
+	// (template/compose_path source resolution). Optional --build is fine
+	// when TIDE_BUILD is not forbidden; the cutover must never use `down`.
+	if !strings.Contains(cmds2, "--project-directory ") ||
+		!strings.Contains(cmds2, "-p "+projectName) ||
+		!strings.Contains(cmds2, "up -d --remove-orphans") {
+		t.Fatalf("expected `compose --project-directory … -p %s … up -d --remove-orphans`, commands:\n%s", projectName, cmds2)
 	}
 
 	// Verify post-apply state matches desired V2 spec with 0 diff (`Equivalent == true`), while `postgres` kept `cid-postgres-initial-001`!

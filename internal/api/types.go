@@ -25,6 +25,11 @@ type App struct {
 	// compose.override.yaml. Mutually exclusive with ComposePath: a template
 	// app stores an empty ComposePath. Empty means compose_path mode.
 	Template string `json:"template,omitempty"`
+	// AppDir is the folder of the application inside its own repository in
+	// template mode (e.g. "backend", "tools/pgadmin"). Empty means the
+	// repository root. .env, env_file, and compose.override.yaml resolve
+	// from this folder, and it is the compose --project-directory.
+	AppDir string `json:"app_dir,omitempty"`
 	// LastAppliedTemplateHash is the hash of the template + override source
 	// at the last successful apply (template mode only).
 	LastAppliedTemplateHash string `json:"-"`
@@ -182,13 +187,20 @@ type RepoMigrationRequest struct {
 	// Template switches the compose source to a fleet template (alternative
 	// to ComposePath). FromFleet requests treat it as authoritative,
 	// including empty (switch back to compose_path).
-	Template     string            `json:"template,omitempty"`
+	Template string `json:"template,omitempty"`
+	// AppDir is the target app folder inside the repository (template
+	// mode). AppDirSet distinguishes "keep current" from "set to root".
+	AppDir       string            `json:"app_dir,omitempty"`
+	AppDirSet    bool              `json:"app_dir_set,omitempty"`
 	PollInterval string            `json:"poll_interval,omitempty"`
 	Vars         map[string]string `json:"vars,omitempty"`
 	DryRun       bool              `json:"dry_run,omitempty"`
-	Reason       string            `json:"reason,omitempty"`
-	Actor        string            `json:"actor,omitempty"`
-	FromFleet    bool              `json:"-"`
+	// AllowRestart permits applying a migration whose plan is `restarted`.
+	// Without it a non-dry-run migration applies only a no_restart plan.
+	AllowRestart bool   `json:"allow_restart,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	Actor        string `json:"actor,omitempty"`
+	FromFleet    bool   `json:"-"`
 }
 
 // RepoMigrationPlan is returned by dry-run and completed repository migrations.
@@ -205,6 +217,8 @@ type RepoMigrationPlan struct {
 	ComposePath    string `json:"compose_path"`
 	OldTemplate    string `json:"old_template,omitempty"`
 	Template       string `json:"template,omitempty"`
+	OldAppDir      string `json:"old_app_dir,omitempty"`
+	AppDir         string `json:"app_dir,omitempty"`
 	// HasOverride reports whether the target app checkout provides
 	// compose.override.yaml (template mode).
 	HasOverride       bool     `json:"has_override,omitempty"`

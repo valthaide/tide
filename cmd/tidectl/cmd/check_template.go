@@ -15,6 +15,7 @@ import (
 var (
 	checkTemplateFleetDir string
 	checkTemplateName     string
+	checkTemplateRepoDir  string
 	checkTemplateAppDir   string
 	checkTemplateProject  string
 )
@@ -29,14 +30,18 @@ var checkTemplateCmd = &cobra.Command{
 	Long: `Builds the compose invocation for a template-sourced application exactly
 as a deploy would:
 
-  docker compose --project-directory <app-dir> -p <project> \
+  docker compose --project-directory <repo-dir>/<app-dir> -p <project> \
     -f <fleet-dir>/templates/<template>/compose.yaml \
-    [-f <app-dir>/compose.override.yaml] \
+    [-f <repo-dir>/<app-dir>/compose.override.yaml] \
     config
 
-The override is optional and silently skipped when absent. No controller,
-pull, or apply is involved, so this is safe to run in CI for both the fleet
-repository (template changes) and an application repository (override changes).`,
+--repo-dir is the application repository checkout and --app-dir its app
+folder inside it (e.g. backend; default is the repository root). Without
+--repo-dir, --app-dir names the app folder directly (previous behaviour).
+The override is optional and silently skipped when absent; .env and
+env_file resolve from the app folder. No controller, pull, or apply is
+involved, so this is safe to run in CI for both the fleet repository
+(template changes) and an application repository (override changes).`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if strings.TrimSpace(checkTemplateName) == "" {
@@ -48,14 +53,24 @@ repository (template changes) and an application repository (override changes).`
 		if strings.TrimSpace(checkTemplateFleetDir) == "" {
 			return exitError{code: 2, err: fmt.Errorf("--fleet-dir is required (fleet checkout holding templates/)")}
 		}
-		if strings.TrimSpace(checkTemplateAppDir) == "" {
-			return exitError{code: 2, err: fmt.Errorf("--app-dir is required (app folder in its repository)")}
+		repoDir := strings.TrimSpace(checkTemplateRepoDir)
+		appDirRel := ""
+		if repoDir != "" {
+			appDirRel = fleetcheck.NormalizeAppDir(checkTemplateAppDir)
+			if issue := fleetcheck.CheckAppDir(appDirRel); issue != nil {
+				return exitError{code: 2, err: fmt.Errorf("%s", issue.Message)}
+			}
+		} else {
+			if strings.TrimSpace(checkTemplateAppDir) == "" {
+				return exitError{code: 2, err: fmt.Errorf("--app-dir is required (app folder in its repository, or a folder with --repo-dir)")}
+			}
+			repoDir = checkTemplateAppDir
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		exec := compose.NewComposeExecutor(nil)
-		inv, configJSON, err := exec.CheckTemplate(ctx, checkTemplateFleetDir, checkTemplateName, checkTemplateAppDir, checkTemplateProject, nil)
+		inv, configJSON, err := exec.CheckTemplate(ctx, checkTemplateFleetDir, checkTemplateName, repoDir, appDirRel, checkTemplateProject, nil)
 		if err != nil {
 			return exitError{code: 1, err: err}
 		}
@@ -66,7 +81,9 @@ repository (template changes) and an application repository (override changes).`
 				"ok":              true,
 				"template":        inv.Template,
 				"template_file":   inv.TemplateFile,
+				"repo_dir":        repoDir,
 				"app_dir":         inv.ProjectDir,
+				"app_dir_rel":     inv.AppDir,
 				"project":         orDash(checkTemplateProject),
 				"has_override":    inv.HasOverride,
 				"override_file":   inv.OverrideFile,
@@ -115,7 +132,8 @@ func templateCheckServices(configJSON []byte) []string {
 func init() {
 	checkTemplateCmd.Flags().StringVar(&checkTemplateFleetDir, "fleet-dir", "", "Fleet checkout directory holding templates/<template>/compose.yaml")
 	checkTemplateCmd.Flags().StringVar(&checkTemplateName, "template", "", "Template name (templates/<template>/compose.yaml)")
-	checkTemplateCmd.Flags().StringVar(&checkTemplateAppDir, "app-dir", "", "App folder in its repository (compose.override.yaml lives here)")
+	checkTemplateCmd.Flags().StringVar(&checkTemplateRepoDir, "repo-dir", "", "Application repository checkout; --app-dir is then relative to it")
+	checkTemplateCmd.Flags().StringVar(&checkTemplateAppDir, "app-dir", "", "App folder: a path (--repo-dir unset) or relative to --repo-dir; .env and compose.override.yaml live here")
 	checkTemplateCmd.Flags().StringVar(&checkTemplateProject, "project", "", "Compose project name (default: derived from the app directory name)")
 	rootCmd.AddCommand(checkTemplateCmd)
 }

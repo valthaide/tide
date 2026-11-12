@@ -90,6 +90,14 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.3.1 (2026-11-12)
+- **Template `app_dir` for apps living in a repository subdirectory**:
+  - A fleet/API registration may set `app_dir: backend` (or `tools/pgadmin`, etc.). Tide then runs `docker compose --project-directory <repo>/<app_dir> -f <fleet template> [-f <app_dir>/compose.override.yaml] …`. `.env`, `env_file`, and relative paths resolve from `<app_dir>`; a missing override is still silently skipped. Empty `app_dir` keeps the repository root, matching v2.3.0. The compose project name is unchanged, so containers are not recreated solely by introducing `app_dir`.
+  - `app_dir` requires `template` (`app_dir_requires_template`); absolute paths, `..`, and escapes are rejected (`invalid_app_dir`). Storage gains an additive `app_dir` column (default `''`); `compose_path` apps and template apps without `app_dir` behave exactly as in v2.3.0. Host format version stays `schema: 1` (additive field only).
+  - `tidectl migrate-repo --template <t> --app-dir <dir> --dry-run` reports `no_restart`, `restarted` (with changed services and config field diffs), or an error. Without `--dry-run` a `restarted` plan is not applied unless `--allow-restart` is set. `tidectl migrate-repo --all --template <t> [--app-dir <dir>]` dry-runs every registration on the host and prints a per-app summary.
+  - Preflight and `tidectl check-template --repo-dir <checkout> --app-dir <rel>` validate the template together with `<app_dir>/.env` and the override; an unset variable is reported with the compose file that expects it (`unset_var: API_KEY (in …/compose.yaml)`). `tide validate` accepts `app_dir`; the generated `schemas/host.schema.json` includes it.
+  - Release workflow now generates `host.schema.json` before GoReleaser, attaches it with the binaries (`release.extra_files`), and fails the job if `host.schema.json`, `tidectl_*`, `tide_*`, or `checksums.txt` are missing from the published assets. Fixed `TestEndToEndExecutorMigrationNoRestartThenTargetedServiceRecreate`, which expected the pre-v2.2 relative `compose -p … -f docker-compose.yml up` form and broke `go test -race` on the v2.2.0/v2.3.0 tags.
+
 ### v2.3.0 (2026-11-12)
 - **Generated JSON Schema for the fleet host format**:
   - The JSON Schema for `hosts/<fqdn>.yaml` is generated from the same Go structs the fleet parser accepts (`internal/fleet` `HostDocument`/`AppSpec`, field names and types from the `yaml` tags, descriptions from `desc` tags in the code). The schema is never written or edited by hand: `tide schema host --version v2.3.0 > schemas/host.schema.json`. A repository test fails if the committed `schemas/host.schema.json` diverges from the generated one or from the parser structs, so the schema can no longer drift from what Tide actually accepts.

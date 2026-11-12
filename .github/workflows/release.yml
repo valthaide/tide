@@ -34,6 +34,32 @@ jobs:
         with:
           go-version: '1.25.x'
 
+      # Generate the fleet host schema BEFORE publishing so GoReleaser can
+      # attach it with the binaries in one atomic release. A missing or
+      # empty schema file fails the job before any GitHub Release is created.
+      - name: Generate host schema
+        run: |
+          set -euo pipefail
+          go run ./cmd/tide schema host --version "${GITHUB_REF_NAME}" > host.schema.json
+          test -s host.schema.json
+          grep -F "\"\$id\": \"https://github.com/valthaide/tide/releases/download/${GITHUB_REF_NAME}/host.schema.json\"" host.schema.json
+          # Refuse to publish if the generated schema drifted from the
+          # committed copy (aside from this release's $id / tide_version).
+          python3 - <<'PY'
+          import json, sys
+          a = json.load(open("host.schema.json"))
+          b = json.load(open("schemas/host.schema.json"))
+          for doc in (a, b):
+              doc.pop("$id", None)
+              xt = doc.get("x-tide") or {}
+              xt.pop("tide_version", None)
+              doc["x-tide"] = xt
+          if a != b:
+              print("generated schema shape differs from committed schemas/host.schema.json", file=sys.stderr)
+              sys.exit(1)
+          print("schema shape matches committed copy")
+          PY
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -43,15 +69,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Publish the generated fleet host schema as a release asset:
-      #   versioned: https://github.com/valthaide/tide/releases/download/<tag>/host.schema.json
-      #   latest:    https://github.com/valthaide/tide/releases/latest/download/host.schema.json
-      - name: Publish host schema asset
+      # Refuse a half-published release: binaries and host.schema.json must
+      # all be present as assets. Existing tags are never overwritten.
+      - name: Verify release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          go run ./cmd/tide schema host --version "${GITHUB_REF_NAME}" > host.schema.json
-          gh release upload "${GITHUB_REF_NAME}" host.schema.json --clobber
+          set -euo pipefail
+          assets="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort)"
+          echo "Release assets:"
+          echo "$assets"
+          echo "$assets" | grep -qx 'host.schema.json' || { echo "missing asset: host.schema.json" >&2; exit 1; }
+          echo "$assets" | grep -E '^tidectl_' >/dev/null || { echo "missing tidectl binary archives" >&2; exit 1; }
+          echo "$assets" | grep -E '^tide_' >/dev/null || { echo "missing tide binary archives" >&2; exit 1; }
+          echo "$assets" | grep -qx 'checksums.txt' || { echo "missing asset: checksums.txt" >&2; exit 1; }
+          echo "All required release assets present."
 
   image:
     needs: test

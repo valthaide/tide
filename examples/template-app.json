@@ -4,5 +4,6 @@
   "repo_auth_method": "public",
   "branch": "main",
   "template": "web",
+  "app_dir": "backend",
   "poll_interval": "30s"
 }

@@ -119,6 +119,22 @@ func (r *Reconciler) MigrateRepo(
 	if issue := fleetcheck.CheckTemplateName(template); issue != nil {
 		return plan, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issue.Message)
 	}
+	// Target app folder (template mode): fleet is authoritative; an API
+	// request sets it only when AppDirSet, otherwise the current folder is
+	// kept. Leaving template mode always clears it.
+	appDir := strings.TrimSpace(existing.AppDir)
+	switch {
+	case req.FromFleet:
+		appDir = fleetcheck.NormalizeAppDir(req.AppDir)
+	case req.AppDirSet:
+		appDir = fleetcheck.NormalizeAppDir(req.AppDir)
+	}
+	if template == "" {
+		appDir = ""
+	}
+	if issue := fleetcheck.CheckAppDir(appDir); issue != nil {
+		return plan, syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, issue.Message)
+	}
 	pollInterval := strings.TrimSpace(req.PollInterval)
 	if pollInterval == "" {
 		pollInterval = existing.PollInterval
@@ -159,6 +175,8 @@ func (r *Reconciler) MigrateRepo(
 		ComposePath:    composePath,
 		OldTemplate:    existing.Template,
 		Template:       template,
+		OldAppDir:      existing.AppDir,
+		AppDir:         appDir,
 		ComposeProject: existingProject,
 		DryRun:         req.DryRun,
 	}
@@ -173,6 +191,8 @@ func (r *Reconciler) MigrateRepo(
 			"new_compose_path":   composePath,
 			"old_template":       existing.Template,
 			"new_template":       template,
+			"old_app_dir":        existing.AppDir,
+			"new_app_dir":        appDir,
 			"has_override":       plan.HasOverride,
 			"mode":               plan.Mode,
 			"strategy":           plan.Strategy,
@@ -269,6 +289,7 @@ func (r *Reconciler) MigrateRepo(
 	candidateApp.Revision = revision
 	candidateApp.ComposePath = composePath
 	candidateApp.Template = template
+	candidateApp.AppDir = appDir
 	candidateApp.DeployPolicyJSON = deploypolicy.Encode(policy)
 	candidateApp.ApplyPolicy()
 
@@ -345,6 +366,7 @@ func (r *Reconciler) MigrateRepo(
 	applyOpts := compose.ApplyOptions{
 		Vars:              mergeInterpolation(fileVars, policy.Vars, existing.Name, existingProject),
 		Template:          template,
+		AppDir:            appDir,
 		BuildMode:         policy.EffectiveBuild(),
 		Project:           existingProject,
 		RequireDigest:     policy.RequireDigest,
@@ -373,6 +395,7 @@ func (r *Reconciler) MigrateRepo(
 			TargetCommit:   targetSHA,
 			NewComposePath: composePath,
 			NewTemplate:    template,
+			NewAppDir:      appDir,
 			EnvVars:        envVars,
 			Opts:           applyOpts,
 			DryRun:         req.DryRun,
@@ -417,6 +440,18 @@ func (r *Reconciler) MigrateRepo(
 		return plan, nil
 	}
 
+	// An operator-driven (non-fleet) migration applies automatically only
+	// when nothing would be recreated. A restarted plan needs the explicit
+	// --allow-restart opt-in; fleet desired state is authoritative and
+	// always applies.
+	if !req.FromFleet && hasMigRuntime && !prepared.Equivalent && !req.AllowRestart {
+		se := syncerr.New(syncerr.CodeValidation, syncerr.StageValidate,
+			fmt.Sprintf("migration_requires_allow_restart: plan would recreate services [%s]; re-run with --allow-restart to apply", strings.Join(plan.ChangedServices, ", ")))
+		recordOutcome("restart_requires_flag", compose.MigrationModeFailed, "allow_restart_required", ciRes, se)
+		logFailed("allow_restart_required", se)
+		return plan, se
+	}
+
 	// Acquire a sync slot for the cutover so periodic reconcile cannot race with migration.
 	slotCtx, cancelSlot := context.WithTimeout(ctx, syncTimeout)
 	defer cancelSlot()
@@ -455,7 +490,7 @@ func (r *Reconciler) MigrateRepo(
 	if pollInterval != "" && pollInterval != existing.PollInterval {
 		_ = r.Registry.UpdateApp(existing.ID, existing.Name, branch, composePath, pollInterval, nil)
 	}
-	if err := r.Registry.UpdateRepository(existing.ID, newRepoURL, method, branch, revision, composePath, template); err != nil {
+	if err := r.Registry.UpdateRepository(existing.ID, newRepoURL, method, branch, revision, composePath, template, appDir); err != nil {
 		recordOutcome("cutover_failed_db", compose.MigrationModeFailed, "db_error", ciRes, err)
 		return plan, err
 	}
