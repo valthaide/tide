@@ -1,4 +1,6 @@
 /REPO-MAP.md
+# Generated at release time for GoReleaser extra_files; committed copy lives in schemas/.
+/host.schema.json
 .tide-*
 bin
 .agents
