@@ -930,12 +930,21 @@ func TestWatchReloadCommandDoesNotRestart(t *testing.T) {
 
 type missRuntime struct {
 	fakeRuntime
+	containers int
 }
 
 func (m *missRuntime) Apply(ctx context.Context, appID, content string, env map[string]string, repoURL, branch, composePath, commit, method string, secret []byte, progress func(string)) (string, error) {
 	m.applyCalls = append(m.applyCalls, appID)
 	m.applyCommits = append(m.applyCommits, commit)
 	return "manifest missing", syncerr.New(syncerr.CodeImageNotFound, syncerr.StagePull, "image_not_found: registry.example/coach:9")
+}
+
+func (m *missRuntime) ProjectHealth(context.Context, string) (compose.ProjectRuntimeState, error) {
+	n := m.containers
+	if n < 0 {
+		n = 0
+	}
+	return compose.ProjectRuntimeState{ContainerCount: n, RunningCount: n}, nil
 }
 
 func TestImageNotFoundWaitsForDesiredChange(t *testing.T) {
@@ -950,7 +959,7 @@ func TestImageNotFoundWaitsForDesiredChange(t *testing.T) {
 	if err := reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{Vars: vars})); err != nil {
 		t.Fatal(err)
 	}
-	rt := &missRuntime{}
+	rt := &missRuntime{containers: 1}
 	r := testReconciler(t, reg, rt, ReconcilerConfig{Interval: time.Hour, SyncTimeout: time.Minute, MaxConcurrent: 1})
 	r.reconcileOnce()
 	if len(rt.applyCalls) != 1 {
@@ -975,6 +984,30 @@ func TestImageNotFoundWaitsForDesiredChange(t *testing.T) {
 	r.reconcileOnce()
 	if len(rt.applyCalls) != 2 {
 		t.Fatalf("new tag was not applied, calls %d", len(rt.applyCalls))
+	}
+}
+
+func TestImageNotFoundWithoutContainersIsPending(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "fresh", RepoURL: "https://example.com/fresh.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "bbbbbbbb", Status: "pending",
+	}
+	addPublicApp(t, reg, app)
+	rt := &missRuntime{containers: 0}
+	r := testReconciler(t, reg, rt, ReconcilerConfig{Interval: time.Hour, SyncTimeout: time.Minute, MaxConcurrent: 1})
+	r.reconcileOnce()
+	got, err := reg.Get(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "pending" || got.LastSyncErrorCode != syncerr.CodeImageNotFound {
+		t.Fatalf("status %s code %s err %s", got.Status, got.LastSyncErrorCode, got.LastSyncError)
+	}
+	r.reconcileOnce()
+	if len(rt.applyCalls) != 1 {
+		t.Fatalf("pending image miss must still hold retries: %v", rt.applyCalls)
 	}
 }
 

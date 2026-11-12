@@ -23,6 +23,7 @@ import (
 	"github.com/valthaide/tide/internal/metrics"
 	"github.com/valthaide/tide/internal/redact"
 	"github.com/valthaide/tide/internal/syncerr"
+	"github.com/valthaide/tide/internal/tenant"
 )
 
 type registerAppRequest struct {
@@ -90,6 +91,7 @@ type Handler struct {
 	Logger      *slog.Logger
 	Version     string
 	SyncTimeout time.Duration
+	Tenants     *tenant.Manager
 }
 
 // NewHandler creates a new controller handler.
@@ -304,6 +306,7 @@ func annotatePublic(app *api.App) {
 		sortStrings(tags)
 		app.Tags = strings.Join(tags, ",")
 	}
+	app.Tenant = policy.Tenant
 	app.FleetRevision = metrics.FleetSHA()
 	app.Schema = 1
 }

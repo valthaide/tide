@@ -38,6 +38,9 @@ type AppManager interface {
 	SetSuspended(id string, suspended bool) error
 	SetRevision(id, revision string) error
 	MarkPending(id string) error
+	// MarkFailed records a per-registration failure without changing the
+	// applied compose source or touching running containers.
+	MarkFailed(id, code, stage, message string) error
 	Delete(id string) error
 }
 
@@ -67,6 +70,9 @@ type Reconciler struct {
 	// fleet commit that only changes templates/<template>/ requeues exactly
 	// the apps using that template.
 	templateHashes map[string]string
+	// registrationIssues maps app name → validation messages that disable
+	// only that registration for the current host-file cycle.
+	registrationIssues map[string]string
 }
 
 // NewReconciler creates a fleet reconciler.
@@ -179,16 +185,26 @@ func (r *Reconciler) loadDesired(ctx context.Context) (*HostDocument, error) {
 	if len(report.Unknown) > 0 && r.Logger != nil {
 		r.Logger.Warn("Unknown fleet fields ignored", "fields", strings.Join(report.Unknown, ","))
 	}
-	if !report.OK {
-		parts := make([]string, 0, len(report.Issues))
-		for _, issue := range report.Issues {
+	hostIssues, byApp := PartitionIssues(report.Issues)
+	if len(hostIssues) > 0 {
+		parts := make([]string, 0, len(hostIssues))
+		for _, issue := range hostIssues {
 			where := issue.Path
 			if where == "" {
 				where = "(document)"
 			}
 			parts = append(parts, where+": "+issue.Message)
 		}
+		r.registrationIssues = nil
 		return nil, fmt.Errorf("fleet validation failed for %s: %s", path, strings.Join(parts, "; "))
+	}
+	r.registrationIssues = map[string]string{}
+	for name, issues := range byApp {
+		r.registrationIssues[name] = FirstIssueMessage(issues)
+		if r.Logger != nil {
+			r.Logger.Error("Fleet registration invalid; leaving other apps alone",
+				"app", name, "error", r.registrationIssues[name])
+		}
 	}
 	if doc.Host == "" {
 		doc.Host = r.Config.Host
@@ -327,13 +343,27 @@ func (r *Reconciler) gitAuth() (transport.AuthMethod, error) {
 
 func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error {
 	desiredNames := make(map[string]struct{}, len(doc.Apps))
+	var regFailures int
 	for _, spec := range doc.Apps {
 		if strings.TrimSpace(spec.Name) == "" || strings.TrimSpace(spec.RepoURL) == "" {
 			continue
 		}
 		desiredNames[spec.Name] = struct{}{}
+		if msg := strings.TrimSpace(r.registrationIssues[spec.Name]); msg != "" {
+			r.disableRegistration(spec.Name, msg)
+			regFailures++
+			continue
+		}
 		if err := r.upsertApp(ctx, spec, doc); err != nil {
-			return fmt.Errorf("upsert app %q: %w", spec.Name, err)
+			regFailures++
+			se := syncerr.Classify(err)
+			metrics.ObserveFleetError(se.GetCode())
+			if r.Logger != nil {
+				r.Logger.Error("Fleet registration upsert failed; continuing with other apps",
+					"app", spec.Name, "code", se.GetCode(), "error", err)
+			}
+			r.disableRegistration(spec.Name, se.Message)
+			continue
 		}
 	}
 
@@ -352,14 +382,49 @@ func (r *Reconciler) applyDesired(ctx context.Context, doc *HostDocument) error 
 		if r.Cleaner != nil {
 			rememberProject(r.Cleaner, app)
 			if _, err := r.Cleaner.Destroy(ctx, app.ID, app.ComposePath, nil, app.Policy().PruneVolumes); err != nil {
-				return fmt.Errorf("destroy removed app %q: %w", app.Name, err)
+				se := syncerr.Classify(err)
+				metrics.ObserveFleetError(se.GetCode())
+				if r.Logger != nil {
+					r.Logger.Error("Fleet destroy failed; continuing with other removals",
+						"app", app.Name, "code", se.GetCode(), "error", err)
+				}
+				regFailures++
+				continue
 			}
 		}
 		if err := r.Apps.Delete(app.ID); err != nil {
-			return fmt.Errorf("delete app %q: %w", app.Name, err)
+			se := syncerr.Classify(err)
+			metrics.ObserveFleetError(se.GetCode())
+			if r.Logger != nil {
+				r.Logger.Error("Fleet delete failed; continuing with other removals",
+					"app", app.Name, "code", se.GetCode(), "error", err)
+			}
+			regFailures++
+			continue
 		}
 	}
+	if regFailures > 0 && r.Logger != nil {
+		r.Logger.Warn("Fleet host reconcile finished with per-registration failures", "failures", regFailures)
+	}
 	return nil
+}
+
+// disableRegistration marks one registration failed without mutating its
+// last-applied source. Unknown apps are skipped so a bad new registration
+// never creates a half-applied row.
+func (r *Reconciler) disableRegistration(name, message string) {
+	name = strings.TrimSpace(name)
+	message = strings.TrimSpace(message)
+	if name == "" || message == "" || r.Apps == nil {
+		return
+	}
+	existing := r.Apps.FindByName(name)
+	if existing == nil {
+		return
+	}
+	if err := r.Apps.MarkFailed(existing.ID, syncerr.CodeRegistration, syncerr.StageValidate, message); err != nil && r.Logger != nil {
+		r.Logger.Error("Failed to mark registration failed", "app", name, "error", err)
+	}
 }
 
 func (r *Reconciler) upsertApp(ctx context.Context, spec AppSpec, doc *HostDocument) error {
@@ -720,6 +785,14 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 		trustedWeb = hostTrustedWeb
 	}
 
+	tenantFailure := ""
+	tenantCPU, tenantMem, tenantGrace := "", "", ""
+	if hasTenant {
+		tenantFailure = strings.TrimSpace(tenantSpec.FailurePolicy)
+		tenantCPU = strings.TrimSpace(tenantSpec.CPULimit)
+		tenantMem = strings.TrimSpace(tenantSpec.MemoryLimit)
+		tenantGrace = strings.TrimSpace(tenantSpec.CriticalGrace)
+	}
 	p := deploypolicy.Policy{
 		Tenant:                 spec.Tenant,
 		RequirePipelineSuccess: spec.RequirePipelineSuccess,
@@ -746,6 +819,15 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 		ReconcileInterval:      inherited(spec.ReconcileInterval, hostInterval(doc)),
 		RetryRejected:          inherited(spec.RetryRejected, hostRetry(doc)),
 		Priority:               inheritedPriority(spec.Priority, doc),
+		Critical:               spec.Critical,
+		FailurePolicy:          strings.TrimSpace(spec.FailurePolicy),
+		DependsOn:              append([]string(nil), spec.DependsOn...),
+		CPULimit:               strings.TrimSpace(spec.CPULimit),
+		MemoryLimit:            strings.TrimSpace(spec.MemoryLimit),
+		TenantFailurePolicy:    tenantFailure,
+		TenantCPULimit:         tenantCPU,
+		TenantMemoryLimit:      tenantMem,
+		TenantCriticalGrace:    tenantGrace,
 	}
 	for _, ex := range spec.PolicyExceptions {
 		p.PolicyExceptions = append(p.PolicyExceptions, deploypolicy.PolicyException{

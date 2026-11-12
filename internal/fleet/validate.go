@@ -89,6 +89,22 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 	if doc.ReconcileConcurrency < 0 {
 		issues = append(issues, fleetcheck.Issue{Path: "reconcile_concurrency", Rule: "invalid_concurrency", Message: "invalid_concurrency: reconcile_concurrency"})
 	}
+	for tName, tSpec := range doc.Tenants {
+		tPrefix := "tenants." + tName
+		if fp := strings.TrimSpace(tSpec.FailurePolicy); fp != "" {
+			switch strings.ToLower(fp) {
+			case "isolate", "hold", "stop":
+			default:
+				issues = append(issues, fleetcheck.Issue{Path: tPrefix + ".failure_policy", Rule: "invalid_failure_policy", Message: "invalid_failure_policy: must be isolate, hold, or stop"})
+			}
+		}
+		if raw := strings.TrimSpace(tSpec.CriticalGrace); raw != "" {
+			if _, issue := fleetcheck.ParseDuration(raw); issue != nil {
+				issue.Path = tPrefix + ".critical_grace"
+				issues = append(issues, *issue)
+			}
+		}
+	}
 	seenNames := map[string]int{}
 	for i, app := range doc.Apps {
 		prefix := fmt.Sprintf("apps[%d]", i)
@@ -144,6 +160,22 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 		}
 		if strings.TrimSpace(app.AppDir) != "" && strings.TrimSpace(app.Template) == "" {
 			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".app_dir", Rule: "app_dir_requires_template", Message: "app_dir_requires_template: app " + app.Name + " sets app_dir without template; app_dir only applies to the fleet template compose source"})
+		}
+		if fp := strings.TrimSpace(app.FailurePolicy); fp != "" {
+			switch strings.ToLower(fp) {
+			case "isolate", "hold", "stop":
+			default:
+				issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".failure_policy", Rule: "invalid_failure_policy", Message: "invalid_failure_policy: must be isolate, hold, or stop"})
+			}
+		}
+		for _, dep := range app.DependsOn {
+			dep = strings.TrimSpace(dep)
+			if dep == "" {
+				continue
+			}
+			if dep == app.Name {
+				issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".depends_on", Rule: "depends_on_self", Message: "depends_on_self: app cannot depend on itself"})
+			}
 		}
 		// Template references must resolve inside the fleet checkout. The
 		// controller has the checkout; offline validation derives it from

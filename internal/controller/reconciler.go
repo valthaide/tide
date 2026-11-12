@@ -19,6 +19,7 @@ import (
 	"github.com/valthaide/tide/internal/fleetcheck"
 	"github.com/valthaide/tide/internal/metrics"
 	"github.com/valthaide/tide/internal/syncerr"
+	"github.com/valthaide/tide/internal/tenant"
 )
 
 type imageApplier interface {
@@ -310,6 +311,8 @@ type Reconciler struct {
 	Config                 ReconcilerConfig
 	Gate                   pipelineGate
 	ResolveMigrationCommit ResolveCommitFunc
+	// Tenants tracks failure_policy hold/stop and manual freezes (v2.4).
+	Tenants *tenant.Manager
 
 	mu               sync.Mutex
 	scheduling       bool
@@ -336,6 +339,7 @@ type Reconciler struct {
 	running          []compose.RunningImage
 	warnedQueue      map[string]time.Time
 	bypasses         map[string]ciBypassGrant
+	prevTenantHolds  map[string]tenant.HoldState
 }
 
 // NewReconciler creates a new reconciler.
@@ -460,6 +464,7 @@ func (r *Reconciler) dispatch() {
 	sort.SliceStable(apps, func(i, j int) bool {
 		return apps[i].Name < apps[j].Name
 	})
+	r.evaluateTenants(apps)
 	blocked := r.blockedApps(apps)
 	r.noteProjects(apps)
 	r.publishRunningImages(apps)
@@ -521,7 +526,8 @@ func (r *Reconciler) dispatch() {
 		if app.Status == "synced" {
 			r.handleWatchFileDrift(app)
 		}
-		if app.Status == "synced" || app.Status == "failed" || app.Status == "image_not_found" {
+		if app.Status == "synced" || app.Status == "failed" || app.Status == "image_not_found" ||
+			(app.Status == "pending" && imageNotFoundApp(app)) {
 			if reason := r.varsDriftReason(app); reason != "" {
 				r.requeuePending(app, reason)
 			}
@@ -553,7 +559,9 @@ func (r *Reconciler) dispatch() {
 		if r.inTransientPause(app) {
 			continue
 		}
-		if app.Status != "pending" && r.imageMissHold(app) {
+		// image_not_found (including pending-without-containers) holds until
+		// desired state changes; do not spin on pending retries.
+		if r.imageMissHold(app) {
 			continue
 		}
 		if r.configHold(app) {
@@ -757,6 +765,34 @@ func (r *Reconciler) syncLooksStale(app *App) bool {
 
 func (r *Reconciler) syncApp(app *App) error {
 	syncStartedAt := time.Now()
+	if skip, reason := r.tenantBlocksApply(app); skip {
+		if r.Logger != nil {
+			r.Logger.Info("Skipping apply; tenant policy holds updates", "app", app.Name, "reason", reason)
+		}
+		now := time.Now()
+		_ = r.Registry.UpdateStatus(app.ID, app.Status, &now)
+		if app.Status == "pending" || app.Status == "syncing" {
+			// Keep last healthy/synced revision running; do not advance.
+			if synced := strings.TrimSpace(app.LastSyncedCommit); synced != "" {
+				_ = r.Registry.UpdateStatus(app.ID, "synced", &now)
+			}
+		}
+		return nil
+	}
+	if !r.dependsReady(app) {
+		if r.Logger != nil {
+			r.Logger.Info("Waiting for depends_on before apply", "app", app.Name, "depends_on", app.Policy().DependsOn)
+		}
+		now := time.Now()
+		_ = r.Registry.UpdateStatus(app.ID, "pending", &now)
+		return nil
+	}
+	if over, msg := r.tenantResourceExceeded(app); over {
+		se := syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, msg)
+		r.declareOnce(app, se)
+		metrics.ObserveSync(app.ID, app.Name, 0, se)
+		return nil
+	}
 	gen, _ := r.Registry.DesiredGeneration(app.ID)
 	if err := r.Registry.UpdateStatus(app.ID, "syncing", &syncStartedAt); err != nil && r.Logger != nil {
 		r.Logger.Warn("Failed to mark app syncing", "app_id", app.ID, "error", err)
@@ -888,8 +924,16 @@ func (r *Reconciler) syncApp(app *App) error {
 	if err != nil {
 		se := syncerr.Classify(err)
 		status := "error"
+		imageMissPending := false
 		if imageNotFoundError(se) {
-			status = "image_not_found"
+			// No running containers: treat as pending (not an error alert),
+			// while still holding retries until desired state changes.
+			if !r.projectHasContainers(app) {
+				status = "pending"
+				imageMissPending = true
+			} else {
+				status = "image_not_found"
+			}
 		} else if declaredFailure(se) {
 			status = "failed"
 		}
@@ -906,7 +950,11 @@ func (r *Reconciler) syncApp(app *App) error {
 		if r.Logger != nil {
 			switch {
 			case imageNotFoundError(se):
-				r.Logger.Warn("Image not found; not retrying until desired state changes", "app", app.Name, "reason", redactAppText(app, se.Message))
+				if imageMissPending {
+					r.Logger.Info("Image not found for app without containers; holding as pending", "app", app.Name, "reason", redactAppText(app, se.Message))
+				} else {
+					r.Logger.Warn("Image not found; not retrying until desired state changes", "app", app.Name, "reason", redactAppText(app, se.Message))
+				}
 			case declaredFailure(se):
 				if attempt > 1 {
 					r.Logger.Info("Retrying transient failure", "app", app.Name, "reason", se.Message, "attempt", attempt, "next", wait.String())
@@ -935,7 +983,11 @@ func (r *Reconciler) syncApp(app *App) error {
 			if fresh, ferr := r.Registry.Get(app.ID); ferr == nil && fresh != nil &&
 				strings.TrimSpace(fresh.LastSeenCommit) == strings.TrimSpace(target) &&
 				deploypolicy.VarsEqual(fresh.Policy().Vars, fleetVars) {
-				_ = r.Registry.UpdateStatus(app.ID, "image_not_found", nil)
+				holdStatus := "image_not_found"
+				if imageMissPending {
+					holdStatus = "pending"
+				}
+				_ = r.Registry.UpdateStatus(app.ID, holdStatus, nil)
 				superseded = false
 			}
 		} else if transientFailure(se) {
@@ -1041,6 +1093,26 @@ func imageNotFoundApp(app *App) bool {
 		return true
 	}
 	return imageNotFoundError(&syncerr.Error{Code: app.LastSyncErrorCode, Message: app.LastSyncError})
+}
+
+// projectHasContainers reports whether the app currently has any compose
+// containers (running or stopped). Missing probe/executor means "unknown";
+// treat as having containers so image_not_found stays the stricter status.
+func (r *Reconciler) projectHasContainers(app *App) bool {
+	if r == nil || app == nil {
+		return true
+	}
+	probe, ok := r.Executor.(projectHealthProbe)
+	if !ok {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	state, err := probe.ProjectHealth(ctx, app.ComposeProject())
+	if err != nil {
+		return true
+	}
+	return state.ContainerCount > 0
 }
 
 func transientFailure(se *syncerr.Error) bool {

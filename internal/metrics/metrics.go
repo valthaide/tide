@@ -20,6 +20,7 @@ const namespace = "tide"
 type AppSnapshot struct {
 	ID                 string
 	Name               string
+	Tenant             string
 	Status             string
 	Suspended          bool
 	LastSyncAt         time.Time
@@ -160,6 +161,24 @@ var (
 		Name:      "last_sync_timestamp_seconds",
 		Help:      "Unix timestamp of the last successful git check or apply for an app.",
 	}, []string{"app"})
+
+	TenantHeld = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "tenant_held",
+		Help:      "1 while a tenant is frozen by hold policy or manual tidectl hold.",
+	}, []string{"tenant", "reason"})
+
+	HostAppStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "host_apps",
+		Help:      "Number of apps on this host by status (host-level rollup).",
+	}, []string{"status"})
+
+	TenantAppStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "tenant_apps",
+		Help:      "Number of apps in a tenant by status (tenant-level rollup).",
+	}, []string{"tenant", "status"})
 )
 
 var (
@@ -456,6 +475,10 @@ func SetQueueAppWaits(waits map[string]time.Duration, allApps ...string) {
 }
 
 func snapshotImageNotFound(app AppSnapshot) float64 {
+	// Pending without containers is not an error alert surface.
+	if strings.TrimSpace(app.Status) == "pending" {
+		return 0
+	}
 	if strings.TrimSpace(app.Status) == "image_not_found" || strings.TrimSpace(app.LastSyncErrorCode) == syncerr.CodeImageNotFound {
 		return 1
 	}
@@ -516,6 +539,9 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		DirtyWorktreeTotal,
 		BuildInfo,
 		FleetHostFileMissing,
+		TenantHeld,
+		HostAppStatus,
+		TenantAppStatus,
 		AppReloadsTotal,
 		GitFetchErrorsTotal,
 		GitLastSuccessTimestamp,
@@ -588,7 +614,7 @@ func newAppsCollector(lister AppLister) *appsCollector {
 		syncStatusDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "app_sync_status"),
 			"Current sync status of an app (1 for the active status).",
-			[]string{"app_id", "app_name", "status"},
+			[]string{"app_id", "app_name", "tenant", "status"},
 			nil,
 		),
 		lastSyncTimestampDesc: prometheus.NewDesc(
@@ -600,7 +626,7 @@ func newAppsCollector(lister AppLister) *appsCollector {
 		lastSyncErrorDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "app_last_sync_error"),
 			"Whether the app currently has a last sync error (1=yes, 0=no).",
-			[]string{"app_id", "app_name", "code", "stage", "error"},
+			[]string{"app_id", "app_name", "tenant", "code", "stage", "error"},
 			nil,
 		),
 		commitDriftDesc: prometheus.NewDesc(
@@ -677,17 +703,26 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 	now := time.Now()
 	apps := c.lister.ListAppSnapshots()
 	statusCounts := map[string]float64{}
+	tenantStatus := map[string]map[string]float64{}
 
 	for _, app := range apps {
 		id := strings.TrimSpace(app.ID)
 		name := strings.TrimSpace(app.Name)
+		ten := strings.TrimSpace(app.Tenant)
+		if ten == "" {
+			ten = "_"
+		}
 		status := strings.TrimSpace(app.Status)
 		if status == "" {
 			status = "unknown"
 		}
 		statusCounts[status]++
+		if tenantStatus[ten] == nil {
+			tenantStatus[ten] = map[string]float64{}
+		}
+		tenantStatus[ten][status]++
 
-		ch <- prometheus.MustNewConstMetric(c.syncStatusDesc, prometheus.GaugeValue, 1, id, name, status)
+		ch <- prometheus.MustNewConstMetric(c.syncStatusDesc, prometheus.GaugeValue, 1, id, name, ten, status)
 
 		var lastSync float64
 		if !app.LastSyncAt.IsZero() {
@@ -705,11 +740,14 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 			stage = "none"
 		}
 		errText := ""
-		if strings.TrimSpace(app.LastSyncError) != "" {
+		// image_not_found with status pending (no containers) is not an error.
+		pendingImageMiss := strings.TrimSpace(app.Status) == "pending" &&
+			(code == syncerr.CodeImageNotFound || strings.Contains(strings.ToLower(app.LastSyncError), "image_not_found"))
+		if strings.TrimSpace(app.LastSyncError) != "" && !pendingImageMiss {
 			hasError = 1
 			errText = metricErrorText(app.LastSyncError)
 		}
-		ch <- prometheus.MustNewConstMetric(c.lastSyncErrorDesc, prometheus.GaugeValue, hasError, id, name, code, stage, errText)
+		ch <- prometheus.MustNewConstMetric(c.lastSyncErrorDesc, prometheus.GaugeValue, hasError, id, name, ten, code, stage, errText)
 
 		var suspended float64
 		if app.Suspended {
@@ -767,8 +805,16 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.syncSuccessAgeSecondsDesc, prometheus.GaugeValue, age, id, name)
 	}
 
+	HostAppStatus.Reset()
 	for status, count := range statusCounts {
 		ch <- prometheus.MustNewConstMetric(c.appsDesc, prometheus.GaugeValue, count, status)
+		HostAppStatus.WithLabelValues(status).Set(count)
+	}
+	TenantAppStatus.Reset()
+	for ten, byStatus := range tenantStatus {
+		for status, count := range byStatus {
+			TenantAppStatus.WithLabelValues(ten, status).Set(count)
+		}
 	}
 }
 
@@ -1133,6 +1179,28 @@ func ClearSyncErrorInfo(app string) {
 		return
 	}
 	syncErrorInfo.DeletePartialMatch(prometheus.Labels{"app": app})
+}
+
+// TenantHoldSample is one held tenant for metrics export.
+type TenantHoldSample struct {
+	Tenant string
+	Reason string
+}
+
+// SetTenantHolds replaces tide_tenant_held series from the current hold list.
+func SetTenantHolds(holds []TenantHoldSample) {
+	TenantHeld.Reset()
+	for _, h := range holds {
+		ten := strings.TrimSpace(h.Tenant)
+		reason := strings.TrimSpace(h.Reason)
+		if ten == "" {
+			continue
+		}
+		if reason == "" {
+			reason = "unknown"
+		}
+		TenantHeld.WithLabelValues(ten, reason).Set(1)
+	}
 }
 
 // ObserveFleetSuccess records a successful fleet reconcile.

@@ -34,6 +34,7 @@ const (
 	CodeRegistryDenied     = "registry_not_allowed"
 	CodeUnsetVar           = "unset_var"
 	CodeDockerAPI          = "docker_api_incompatible"
+	CodeRegistration       = "registration_failed"
 	CodeUnknown            = "unknown"
 )
 

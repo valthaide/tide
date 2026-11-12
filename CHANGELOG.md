@@ -90,6 +90,23 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.4.0 (2026-11-12)
+- **Tenants as a first-class entity**: optional `tenant` on each registration (omit for single apps like mon). Metrics and status roll up at app, tenant (`tide_tenant_apps`, `tide_tenant_held`), and host (`tide_host_apps`) levels. App sync/error series carry a `tenant` label.
+- **Tenant failure policies** (`tenants.<name>.failure_policy`, overridable per app):
+  - `isolate` (default): one app failure stays local.
+  - `hold`: if any tenant app fails reconcile, Tide freezes updates for the whole tenant while leaving running stacks untouched (recommended for shared dev).
+  - `stop` (explicit only): when a `critical: true` app stays unhealthy past `critical_grace` (default 5m), Tide stops sibling apps and requeues them when the critical app recovers.
+- **Resources and startup order**: `cpu_limit` / `memory_limit` on tenant and app; applies that would exceed the tenant budget are rejected. Cross-registration `depends_on` delays apply until dependencies are synced.
+- **Alerts**: example rules in `examples/alerts/tide.yaml` — `TideFleetStale` only when host fleet reconcile is not succeeding; per-app errors include `tenant`+`app`; `TideTenantHeld` when a tenant is frozen.
+- **CLI**: `tidectl status [--tenant NAME]`, `tidectl hold TENANT`, `tidectl release TENANT`. API: `GET /api/v1/tenants`, `POST .../hold`, `POST .../release`.
+- **Compatibility**: without the new fields behaviour matches v2.3.2 (per-registration isolation). Upgrading does not recreate containers.
+
+### v2.3.2 (2026-11-12)
+- **Per-registration fleet isolation**: each host-file registration is upserted with its own preflight/migration path. One registration failure is marked on that app only; sibling registrations continue in the same cycle. Host-wide YAML/schema errors still stop the whole host reconcile.
+- **Last-known-good source**: a failed registration upsert/preflight leaves the previous applied source and running containers untouched (files of the old compose path are not required for the running stack; new config is staged and applied only after successful preflight).
+- **Soft per-app validation**: unknown template / invalid `app_dir` and other `apps[N]` issues disable only that registration; the rest of the host file still applies.
+- **`image_not_found` without containers is `pending`**: when an app has no compose containers, a missing image is recorded as `pending` (not an error alert). Registration create/update (including template switches) still works; retries remain held until desired state changes. Apps that already have containers keep status `image_not_found`.
+
 ### v2.3.1 (2026-11-12)
 - **Template `app_dir` for apps living in a repository subdirectory**:
   - A fleet/API registration may set `app_dir: backend` (or `tools/pgadmin`, etc.). Tide then runs `docker compose --project-directory <repo>/<app_dir> -f <fleet template> [-f <app_dir>/compose.override.yaml] …`. `.env`, `env_file`, and relative paths resolve from `<app_dir>`; a missing override is still silently skipped. Empty `app_dir` keeps the repository root, matching v2.3.0. The compose project name is unchanged, so containers are not recreated solely by introducing `app_dir`.

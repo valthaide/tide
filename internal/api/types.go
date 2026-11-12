@@ -83,6 +83,8 @@ type App struct {
 	Volumes []VolumeRef `json:"volumes,omitempty"`
 	// PublicVars are fleet variables safe to show. Filled on read, not stored.
 	PublicVars map[string]string `json:"public_vars,omitempty"`
+	// Tenant is filled on read from deploy policy for status/CLI filters.
+	Tenant string `json:"tenant,omitempty"`
 	// Tags is the public _TAG and _IMAGE values, for table output.
 	Tags string `json:"tags,omitempty"`
 	// Oneshot is the latest one-shot status, such as "migrate completed exit 0".
@@ -278,6 +280,7 @@ func (a *App) ApplyPolicy() {
 	a.WatchFiles = p.WatchFiles
 	a.PruneVolumes = p.PruneVolumes
 	a.HealthTimeout = p.HealthTimeout
+	a.Tenant = p.Tenant
 }
 
 // ComposeProject is the docker compose project name for this app.

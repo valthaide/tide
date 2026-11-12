@@ -40,11 +40,17 @@ type HostDocument struct {
 	Apps                   []AppSpec             `yaml:"apps" desc:"Applications that should run on this host."`
 }
 
-// TenantSpec groups CI gate rules shared across apps belonging to one tenant.
+// TenantSpec groups CI gate rules and failure/resource policy for one tenant.
 type TenantSpec struct {
 	RequiredJobs        []string        `yaml:"required_jobs" desc:"CI jobs that must succeed for apps of this tenant."`
 	SharedRequiredJobs  []string        `yaml:"shared_required_jobs" desc:"Required CI jobs shared across the tenant's apps."`
 	TrustedWebPipelines *TrustedWebSpec `yaml:"trusted_web_pipelines" desc:"Acceptance rules for manual (web) pipelines for this tenant."`
+	// FailurePolicy is isolate (default), hold, or stop. See Tide v2.4 tenant docs.
+	FailurePolicy string `yaml:"failure_policy" desc:"When an app fails reconcile: isolate (default), hold (freeze tenant updates), or stop (stop siblings after critical grace)."`
+	// CriticalGrace is how long a critical app may be unhealthy before stop policy acts. Default 5m.
+	CriticalGrace string `yaml:"critical_grace" desc:"Grace period before stop policy halts sibling apps, e.g. 5m."`
+	CPULimit      string `yaml:"cpu_limit" desc:"Declared CPU budget for the tenant (e.g. 2.0). Used to refuse new applies that would exceed the sum of app limits."`
+	MemoryLimit   string `yaml:"memory_limit" desc:"Declared memory budget for the tenant (e.g. 4g). Used to refuse new applies that would exceed the sum of app limits."`
 }
 
 // TrustedWebSpec configures optional acceptance of manual (`web`) GitLab pipelines.
@@ -96,6 +102,14 @@ type AppSpec struct {
 	ReconcileInterval      string            `yaml:"reconcile_interval" desc:"Reconcile interval for this app, e.g. 5m."`
 	RetryRejected          string            `yaml:"retry_rejected" desc:"Retry policy for rejected commits of this app."`
 	Priority               *int              `yaml:"priority" desc:"Queue priority for this app (higher runs first)."`
+	// Critical marks an app that can trigger tenant stop policy.
+	Critical bool `yaml:"critical" desc:"When true and the tenant failure_policy is stop, siblings are stopped if this app stays unhealthy past critical_grace."`
+	// FailurePolicy optionally overrides the tenant failure_policy for this app (isolate|hold|stop).
+	FailurePolicy string `yaml:"failure_policy" desc:"Optional override of the tenant failure_policy for this app."`
+	// DependsOn lists other registration names on this host that must be synced before this app applies.
+	DependsOn []string `yaml:"depends_on" desc:"Other app names on this host that must reach synced before this registration applies."`
+	CPULimit  string   `yaml:"cpu_limit" desc:"Declared CPU limit for this app (e.g. 0.5). Counted against the tenant cpu_limit when set."`
+	MemoryLimit string `yaml:"memory_limit" desc:"Declared memory limit for this app (e.g. 512m). Counted against the tenant memory_limit when set."`
 }
 
 // PolicyException allows one compose rule for one service while policy mode is warn.

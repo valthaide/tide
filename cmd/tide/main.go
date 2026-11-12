@@ -26,6 +26,7 @@ import (
 	"github.com/valthaide/tide/internal/redact"
 	"github.com/valthaide/tide/internal/secrets"
 	"github.com/valthaide/tide/internal/store"
+	"github.com/valthaide/tide/internal/tenant"
 	"github.com/valthaide/tide/internal/tlsutil"
 )
 
@@ -166,6 +167,8 @@ func runController(args []string, stdout, stderr io.Writer) int {
 		}
 		logger.Info("Reconciler config", "max_concurrent", reconcilerCfg.MaxConcurrent, "pull_parallel", reconcilerCfg.PullParallel, "interval", reconcilerCfg.Interval.String(), "sync_timeout", reconcilerCfg.SyncTimeout.String())
 		reconciler = controller.NewReconciler(registry, executor, logger, reconcilerCfg)
+		tenants := tenant.NewManager(dataDir)
+		reconciler.Tenants = tenants
 		if reconcilerCfg.PullParallel > 0 {
 			reconciler.EnablePullLimit(reconcilerCfg.PullParallel)
 			executor.PullGate = reconciler
@@ -187,6 +190,20 @@ func runController(args []string, stdout, stderr io.Writer) int {
 			fleetReconciler.OnHost = func(doc *fleet.HostDocument) {
 				if doc != nil && doc.ReconcileConcurrency > 0 {
 					reconciler.SetLimit(doc.ReconcileConcurrency)
+				}
+				if doc != nil && reconciler.Tenants != nil {
+					specs := map[string]tenant.Spec{}
+					for name, ts := range doc.Tenants {
+						grace, _ := time.ParseDuration(strings.TrimSpace(ts.CriticalGrace))
+						specs[name] = tenant.Spec{
+							Name:          name,
+							FailurePolicy: ts.FailurePolicy,
+							CriticalGrace: grace,
+							CPULimit:      ts.CPULimit,
+							MemoryLimit:   ts.MemoryLimit,
+						}
+					}
+					reconciler.Tenants.UpdateSpecs(specs)
 				}
 			}
 			go fleetReconciler.Run(ctx)
@@ -230,6 +247,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 	appHandler.SyncTimeout = reconcilerCfg.SyncTimeout
 	if reconciler != nil {
 		appHandler.SyncGate = reconciler
+		appHandler.Tenants = reconciler.Tenants
 	}
 
 	webhookHandler := controller.NewWebhookHandlerFromEnv(registry, logger)
@@ -281,6 +299,9 @@ func runController(args []string, stdout, stderr io.Writer) int {
 				r.Post("/gc", appHandler.ImageGC)
 				r.Get("/queue", appHandler.GetQueue)
 				r.Get("/operations/{id}", appHandler.GetOperation)
+				r.Get("/tenants", appHandler.ListTenants)
+				r.Post("/tenants/{tenant}/hold", appHandler.HoldTenant)
+				r.Post("/tenants/{tenant}/release", appHandler.ReleaseTenant)
 			}
 		})
 	})

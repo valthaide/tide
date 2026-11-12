@@ -51,12 +51,12 @@ tide_app_commit_drift{app_id="app-1",app_name="demo"} 0
 tide_app_commit_drift{app_id="app-2",app_name="broken"} 1
 # HELP tide_app_last_sync_error Whether the app currently has a last sync error (1=yes, 0=no).
 # TYPE tide_app_last_sync_error gauge
-tide_app_last_sync_error{app_id="app-1",app_name="demo",code="none",error="",stage="none"} 0
-tide_app_last_sync_error{app_id="app-2",app_name="broken",code="none",error="boom",stage="none"} 1
+tide_app_last_sync_error{app_id="app-1",app_name="demo",code="none",error="",stage="none",tenant="_"} 0
+tide_app_last_sync_error{app_id="app-2",app_name="broken",code="none",error="boom",stage="none",tenant="_"} 1
 # HELP tide_app_sync_status Current sync status of an app (1 for the active status).
 # TYPE tide_app_sync_status gauge
-tide_app_sync_status{app_id="app-1",app_name="demo",status="synced"} 1
-tide_app_sync_status{app_id="app-2",app_name="broken",status="error"} 1
+tide_app_sync_status{app_id="app-1",app_name="demo",status="synced",tenant="_"} 1
+tide_app_sync_status{app_id="app-2",app_name="broken",status="error",tenant="_"} 1
 # HELP tide_apps Number of registered apps by status.
 # TYPE tide_apps gauge
 tide_apps{status="error"} 1

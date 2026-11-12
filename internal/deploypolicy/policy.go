@@ -83,6 +83,23 @@ type Policy struct {
 	CreateVolumes bool `json:"create_volumes,omitempty" yaml:"create_volumes"`
 	// VolumeNamePattern is the host regular expression for volumes this controller may create.
 	VolumeNamePattern string `json:"volume_name_pattern,omitempty" yaml:"volume_name_pattern"`
+	// Critical marks an app that can trigger tenant stop policy.
+	Critical bool `json:"critical,omitempty" yaml:"critical"`
+	// FailurePolicy optionally overrides the tenant failure_policy (isolate|hold|stop).
+	FailurePolicy string `json:"failure_policy,omitempty" yaml:"failure_policy"`
+	// DependsOn lists other registration names that must be synced before this app applies.
+	DependsOn []string `json:"depends_on,omitempty" yaml:"depends_on"`
+	// CPULimit is the declared CPU budget for this app (e.g. "0.5").
+	CPULimit string `json:"cpu_limit,omitempty" yaml:"cpu_limit"`
+	// MemoryLimit is the declared memory budget for this app (e.g. "512m").
+	MemoryLimit string `json:"memory_limit,omitempty" yaml:"memory_limit"`
+	// TenantFailurePolicy is the inherited tenant failure_policy (isolate|hold|stop).
+	TenantFailurePolicy string `json:"tenant_failure_policy,omitempty" yaml:"tenant_failure_policy"`
+	// TenantCPULimit / TenantMemoryLimit are inherited tenant budgets.
+	TenantCPULimit    string `json:"tenant_cpu_limit,omitempty" yaml:"tenant_cpu_limit"`
+	TenantMemoryLimit string `json:"tenant_memory_limit,omitempty" yaml:"tenant_memory_limit"`
+	// TenantCriticalGrace is the inherited stop-policy grace duration string.
+	TenantCriticalGrace string `json:"tenant_critical_grace,omitempty" yaml:"tenant_critical_grace"`
 }
 
 // PolicyException is one allowed compose policy rule for one service.
@@ -98,6 +115,14 @@ func (p *Policy) Normalize() {
 		return
 	}
 	p.Tenant = strings.TrimSpace(p.Tenant)
+	p.FailurePolicy = strings.ToLower(strings.TrimSpace(p.FailurePolicy))
+	p.TenantFailurePolicy = strings.ToLower(strings.TrimSpace(p.TenantFailurePolicy))
+	p.CPULimit = strings.TrimSpace(p.CPULimit)
+	p.MemoryLimit = strings.TrimSpace(p.MemoryLimit)
+	p.TenantCPULimit = strings.TrimSpace(p.TenantCPULimit)
+	p.TenantMemoryLimit = strings.TrimSpace(p.TenantMemoryLimit)
+	p.TenantCriticalGrace = strings.TrimSpace(p.TenantCriticalGrace)
+	p.DependsOn = normalizeStringList(p.DependsOn)
 	p.PipelineRef = strings.TrimSpace(p.PipelineRef)
 	p.RequiredJobs = normalizeStringList(p.RequiredJobs)
 	p.SharedRequiredJobs = normalizeStringList(p.SharedRequiredJobs)

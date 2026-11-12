@@ -227,6 +227,7 @@ func (r *Registry) ListAppSnapshots() []metrics.AppSnapshot {
 		out = append(out, metrics.AppSnapshot{
 			ID:                 app.ID,
 			Name:               app.Name,
+			Tenant:             app.Policy().Tenant,
 			Status:             app.Status,
 			Suspended:          app.Suspended,
 			LastSyncAt:         app.LastSyncAt,
@@ -608,6 +609,21 @@ func (r *Registry) MarkPending(id string) error {
 		return fmt.Errorf("app id is required")
 	}
 	return r.UpdateStatus(id, "pending", nil)
+}
+
+// MarkFailed records a per-registration or sync failure without changing the
+// applied compose source. Used by fleet when one registration is invalid or
+// its upsert/preflight fails while other apps on the host continue.
+func (r *Registry) MarkFailed(id, code, stage, message string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("app id is required")
+	}
+	app, err := r.Get(id)
+	if err != nil {
+		return err
+	}
+	se := syncerr.New(code, stage, message)
+	return r.UpdateSyncResultErr(id, "failed", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
 }
 
 // UpdateRollback stores the last healthy revision and a revision that must not be retried.

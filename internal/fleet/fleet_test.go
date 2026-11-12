@@ -241,6 +241,15 @@ func (f *fakeApps) MarkPending(id string) error {
 	}
 	return nil
 }
+func (f *fakeApps) MarkFailed(id, code, stage, message string) error {
+	if app := f.byID(id); app != nil {
+		app.Status = "failed"
+		app.LastSyncErrorCode = code
+		app.LastSyncErrorStage = stage
+		app.LastSyncError = message
+	}
+	return nil
+}
 func (f *fakeApps) SetSuspended(id string, suspended bool) error {
 	f.suspendCalls = append(f.suspendCalls, suspended)
 	if app := f.byID(id); app != nil {
@@ -401,6 +410,7 @@ func TestFleetSourceChangesRouteThroughMigratorAndKeepOldSourceOnError(t *testin
 	}
 
 	// 3. Failed migration to a new repo_url leaves old source intact and never calls Cleaner.Destroy.
+	// Per-registration isolation: the host cycle still succeeds so sibling apps can apply.
 	mig.err = os.ErrNotExist
 	docBrokenRepo := &HostDocument{Apps: []AppSpec{{
 		Name:        "tenko-dev1",
@@ -408,13 +418,47 @@ func TestFleetSourceChangesRouteThroughMigratorAndKeepOldSourceOnError(t *testin
 		Branch:      "main",
 		ComposePath: "docker-compose.yml",
 	}}}
-	if err := r.applyDesired(context.Background(), docBrokenRepo); err == nil {
-		t.Fatal("expected failed migration to return error")
+	if err := r.applyDesired(context.Background(), docBrokenRepo); err != nil {
+		t.Fatalf("per-registration failure must not fail the host cycle: %v", err)
 	}
 	if app.RepoURL != "https://git.example/tenko/monorepo.git" || app.Branch != "release" || app.ComposePath != "compose.prod.yml" {
 		t.Fatalf("failed fleet migration mutated existing source: %+v", app)
 	}
+	if app.Status != "failed" || app.LastSyncErrorCode == "" {
+		t.Fatalf("expected registration marked failed, got status=%s code=%s", app.Status, app.LastSyncErrorCode)
+	}
 	if len(cleaner.ids) != 0 {
 		t.Fatalf("Cleaner.Destroy called on failed migration: %v", cleaner.ids)
+	}
+}
+
+func TestApplyDesiredIsolatesRegistrationFailures(t *testing.T) {
+	good := &api.App{
+		ID: "good", Name: "good", RepoURL: "https://git.example/good.git",
+		Branch: "main", ComposePath: "docker-compose.yml", RepoAuthMethod: "public", Status: "synced",
+	}
+	bad := &api.App{
+		ID: "bad", Name: "bad", RepoURL: "https://git.example/bad.git",
+		Branch: "main", ComposePath: "docker-compose.yml", RepoAuthMethod: "public", Status: "synced",
+		DeployPolicyJSON: deploypolicy.Encode(deploypolicy.Policy{Vars: map[string]string{"TAG": "1"}}),
+	}
+	apps := &fakeApps{list: []*api.App{good, bad}}
+	mig := &fakeRepoMigrator{err: os.ErrNotExist, apps: apps}
+	r := &Reconciler{Apps: apps, Cleaner: &fakeCleaner{}, RepoMigrator: mig}
+	doc := &HostDocument{Apps: []AppSpec{
+		{Name: "good", RepoURL: good.RepoURL, Branch: "main", ComposePath: "docker-compose.yml", Vars: map[string]string{"TAG": "2"}},
+		{Name: "bad", RepoURL: "https://git.example/bad-new.git", Branch: "main", ComposePath: "docker-compose.yml"},
+	}}
+	if err := r.applyDesired(context.Background(), doc); err != nil {
+		t.Fatalf("host cycle must continue: %v", err)
+	}
+	if good.Status != "pending" {
+		t.Fatalf("good app should still receive vars update, status=%s", good.Status)
+	}
+	if bad.RepoURL != "https://git.example/bad.git" {
+		t.Fatalf("bad app source changed despite failed migration: %s", bad.RepoURL)
+	}
+	if bad.Status != "failed" {
+		t.Fatalf("bad app status=%s", bad.Status)
 	}
 }

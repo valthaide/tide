@@ -26,6 +26,21 @@
           "description": "Compose file inside the app repository. Mutually exclusive with template.",
           "type": "string"
         },
+        "cpu_limit": {
+          "description": "Declared CPU limit for this app (e.g. 0.5). Counted against the tenant cpu_limit when set.",
+          "type": "string"
+        },
+        "critical": {
+          "description": "When true and the tenant failure_policy is stop, siblings are stopped if this app stays unhealthy past critical_grace.",
+          "type": "boolean"
+        },
+        "depends_on": {
+          "description": "Other app names on this host that must reach synced before this registration applies.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "deploy_key_file": {
           "description": "Path to the SSH deploy key for repo_auth_method deploy_key.",
           "type": "string"
@@ -37,8 +52,16 @@
           },
           "type": "array"
         },
+        "failure_policy": {
+          "description": "Optional override of the tenant failure_policy for this app.",
+          "type": "string"
+        },
         "health_timeout": {
           "description": "How long to wait for containers to become healthy, e.g. 45s.",
+          "type": "string"
+        },
+        "memory_limit": {
+          "description": "Declared memory limit for this app (e.g. 512m). Counted against the tenant memory_limit when set.",
           "type": "string"
         },
         "name": {
@@ -211,6 +234,22 @@
     "TenantSpec": {
       "additionalProperties": false,
       "properties": {
+        "cpu_limit": {
+          "description": "Declared CPU budget for the tenant (e.g. 2.0). Used to refuse new applies that would exceed the sum of app limits.",
+          "type": "string"
+        },
+        "critical_grace": {
+          "description": "Grace period before stop policy halts sibling apps, e.g. 5m.",
+          "type": "string"
+        },
+        "failure_policy": {
+          "description": "When an app fails reconcile: isolate (default), hold (freeze tenant updates), or stop (stop siblings after critical grace).",
+          "type": "string"
+        },
+        "memory_limit": {
+          "description": "Declared memory budget for the tenant (e.g. 4g). Used to refuse new applies that would exceed the sum of app limits.",
+          "type": "string"
+        },
         "required_jobs": {
           "description": "CI jobs that must succeed for apps of this tenant.",
           "items": {
@@ -294,7 +333,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/valthaide/tide/releases/download/v2.3.1/host.schema.json",
+  "$id": "https://github.com/valthaide/tide/releases/download/v2.4.0/host.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Applications that should run on one host, declared in hosts/<fqdn>.yaml of a fleet repository. Generated from the Tide fleet parser structs; do not edit by hand.",
@@ -408,6 +447,6 @@
   "x-tide": {
     "fleet_format_version": 1,
     "latest_schema": "https://github.com/valthaide/tide/releases/latest/download/host.schema.json",
-    "tide_version": "v2.3.1"
+    "tide_version": "v2.4.0"
   }
 }

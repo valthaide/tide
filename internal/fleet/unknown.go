@@ -91,6 +91,7 @@ func unknownAppFields(seq *yaml.Node) []string {
 		"require_digest": {}, "public_vars": {}, "allowed_registries": {},
 		"env_files": {}, "policy_exceptions": {},
 		"reconcile_interval": {}, "retry_rejected": {}, "priority": {},
+		"critical": {}, "failure_policy": {}, "depends_on": {}, "cpu_limit": {}, "memory_limit": {},
 	}
 	var out []string
 	for i, app := range seq.Content {

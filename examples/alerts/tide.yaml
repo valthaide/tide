@@ -1,0 +1,44 @@
+# Example Prometheus alert rules for Tide v2.4+.
+# TideFleetStale fires only when the host fleet reconcile is not succeeding at all.
+# Per-app failures use tenant+app labels; TideTenantHeld covers hold policy / manual hold.
+groups:
+  - name: tide
+    rules:
+      - alert: TideFleetStale
+        expr: |
+          (
+            time() - tide_fleet_last_success_timestamp_seconds > 900
+            and on() tide_fleet_host_file_missing == 0
+          )
+          or
+          (
+            tide_fleet_last_success_timestamp_seconds == 0
+            and on() up{job="tide"} == 1
+          )
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Tide fleet reconcile is stale on {{ $labels.instance }}"
+          description: "No successful fleet host reconcile for over 15 minutes. Per-app failures alone must not fire this alert."
+
+      - alert: TideAppError
+        expr: |
+          tide_app_last_sync_error{code!="none",code!="image_not_found"} == 1
+          unless on(app_name, tenant)
+          (tide_app_sync_status{status="pending"} == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tide app {{ $labels.app_name }} (tenant {{ $labels.tenant }}) is in error"
+          description: "code={{ $labels.code }} stage={{ $labels.stage }} error={{ $labels.error }}"
+
+      - alert: TideTenantHeld
+        expr: tide_tenant_held == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tide tenant {{ $labels.tenant }} is held ({{ $labels.reason }})"
+          description: "Updates are frozen for this tenant by hold policy or tidectl hold."
