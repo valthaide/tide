@@ -34,11 +34,22 @@ groups:
           summary: "Tide app {{ $labels.app_name }} (tenant {{ $labels.tenant }}) is in error"
           description: "code={{ $labels.code }} stage={{ $labels.stage }} error={{ $labels.error }}"
 
+      # Pending image_not_found must never fire this counter-based alert.
+      - alert: TideAppSyncErrors
+        expr: |
+          increase(tide_app_sync_errors_total{code!="image_not_found"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tide app {{ $labels.app_name }} sync errors increasing"
+          description: "code={{ $labels.code }} stage={{ $labels.stage }}"
+
       - alert: TideTenantHeld
-        expr: tide_tenant_held == 1
+        expr: tide_tenant_held{reason=~"auto|manual"} == 1
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "Tide tenant {{ $labels.tenant }} is held ({{ $labels.reason }})"
-          description: "Updates are frozen for this tenant by hold policy or tidectl hold."
+          description: "Updates are frozen for healthy apps. reason=auto clears when holding apps sync; reason=manual needs tidectl release."

@@ -766,16 +766,10 @@ func (r *Reconciler) syncLooksStale(app *App) bool {
 func (r *Reconciler) syncApp(app *App) error {
 	syncStartedAt := time.Now()
 	if skip, reason := r.tenantBlocksApply(app); skip {
+		// Healthy apps skip new applies while the tenant is held. Failed/pending
+		// apps are not blocked (see tenant.NeedsReconcileDespiteHold).
 		if r.Logger != nil {
 			r.Logger.Info("Skipping apply; tenant policy holds updates", "app", app.Name, "reason", reason)
-		}
-		now := time.Now()
-		_ = r.Registry.UpdateStatus(app.ID, app.Status, &now)
-		if app.Status == "pending" || app.Status == "syncing" {
-			// Keep last healthy/synced revision running; do not advance.
-			if synced := strings.TrimSpace(app.LastSyncedCommit); synced != "" {
-				_ = r.Registry.UpdateStatus(app.ID, "synced", &now)
-			}
 		}
 		return nil
 	}
@@ -998,7 +992,7 @@ func (r *Reconciler) syncApp(app *App) error {
 		if superseded && r.Logger != nil {
 			r.Logger.Info("Desired state changed during sync; queued again", "app", app.Name, "skipped", 1)
 		}
-		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), se)
+		metrics.ObserveSyncResult(app.ID, app.Name, time.Since(syncStartedAt), se, status)
 		if declaredFailure(se) {
 			if strings.TrimSpace(app.LastSyncError) != strings.TrimSpace(se.Message) {
 				r.noteDeploy(app, "failed", target, deploypolicy.EncodeVars(policy.Vars), "", deployTrigger(app, target))

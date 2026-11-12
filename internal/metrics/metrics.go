@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -820,6 +821,12 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 
 // ObserveSync records sync attempt metrics.
 func ObserveSync(appID, appName string, duration time.Duration, err error) {
+	ObserveSyncResult(appID, appName, duration, err, "")
+}
+
+// ObserveSyncResult is ObserveSync with an optional resulting status.
+// Pending image_not_found is recorded as a sync attempt but not as TideAppSyncErrors.
+func ObserveSyncResult(appID, appName string, duration time.Duration, err error, status string) {
 	result := "success"
 	if err != nil {
 		result = "error"
@@ -831,8 +838,15 @@ func ObserveSync(appID, appName string, duration time.Duration, err error) {
 		if c, ok := err.(coded); ok {
 			code, stage = c.GetCode(), c.GetStage()
 		}
-		SyncErrorsTotal.WithLabelValues(appID, appName, code, stage).Inc()
-		SetSyncErrorInfo(appName, code, stage)
+		pendingImageMiss := strings.TrimSpace(status) == "pending" &&
+			(code == syncerr.CodeImageNotFound || strings.Contains(strings.ToLower(fmt.Sprint(err)), "image_not_found"))
+		if !pendingImageMiss {
+			SyncErrorsTotal.WithLabelValues(appID, appName, code, stage).Inc()
+			SetSyncErrorInfo(appName, code, stage)
+		} else {
+			ClearSyncErrorInfo(appName)
+			result = "pending"
+		}
 		if code == "git_auth" {
 			GitAuthFailuresTotal.WithLabelValues("app", appName).Inc()
 		}

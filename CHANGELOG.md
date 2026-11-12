@@ -90,6 +90,13 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.4.1 (2026-11-12)
+- **Hold does not block failed/pending reconcile**: while a tenant is held, healthy apps skip new applies, but failed and pending apps keep syncing each cycle when their spec changes or an image appears.
+- **Auto-hold clears itself**: when every holding app reaches `synced`, Tide drops the auto hold in the same cycle and requeues deferred sibling updates. `tidectl release` is only required for manual holds.
+- **Manual vs auto release**: `tidectl hold` lasts until `tidectl release`. Releasing an auto hold suppresses re-arming until the tenant is fully healthy again; the next new failure may re-hold (ongoing failures do not re-arm on the next Evaluate).
+- **Source switch without containers**: compose_path → template/`app_dir` with `image_not_found` and no containers adopts the new desired source as `pending` (old compose file is no longer required). With running containers, the old source stays, the app is marked `error`, and the next cycle retries.
+- **Observability**: `tide_tenant_held{reason="auto|manual"}`; `tidectl status --tenant` shows hold reason and `holding_apps`. Pending `image_not_found` does not increment `tide_app_sync_errors_total` (TideAppSyncErrors).
+
 ### v2.4.0 (2026-11-12)
 - **Tenants as a first-class entity**: optional `tenant` on each registration (omit for single apps like mon). Metrics and status roll up at app, tenant (`tide_tenant_apps`, `tide_tenant_held`), and host (`tide_host_apps`) levels. App sync/error series carry a `tenant` label.
 - **Tenant failure policies** (`tenants.<name>.failure_policy`, overridable per app):

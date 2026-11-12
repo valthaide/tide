@@ -23,15 +23,16 @@ func (r *Reconciler) evaluateTenants(apps []*App) {
 		}
 		views = append(views, appView(app))
 	}
-	toStop := r.Tenants.Evaluate(views)
+	toStop, cleared := r.Tenants.Evaluate(views)
 	holds := r.Tenants.ListHolds()
 	samples := make([]metrics.TenantHoldSample, 0, len(holds))
 	for _, st := range holds {
-		samples = append(samples, metrics.TenantHoldSample{Tenant: st.Tenant, Reason: st.Reason})
+		samples = append(samples, metrics.TenantHoldSample{Tenant: st.Tenant, Reason: tenant.NormalizeHoldReason(st.Reason, st.Manual)})
 	}
 	metrics.SetTenantHolds(samples)
 
-	// When a policy_stop hold clears, requeue previously stopped siblings.
+	// When an auto hold clears, requeue healthy siblings so deferred updates apply
+	// in the same cycle, and requeue previously stopped apps after policy stop.
 	if r.prevTenantHolds == nil {
 		r.prevTenantHolds = map[string]tenant.HoldState{}
 	}
@@ -39,19 +40,33 @@ func (r *Reconciler) evaluateTenants(apps []*App) {
 	for _, st := range holds {
 		current[st.Tenant] = st
 	}
-	for name, prev := range r.prevTenantHolds {
-		if prev.Reason != tenant.ReasonPolicyStop {
-			continue
-		}
-		if _, still := current[name]; still {
-			continue
-		}
-		for _, appName := range prev.Stopped {
-			if existing := r.Registry.FindByName(appName); existing != nil {
-				_ = r.Registry.MarkPending(existing.ID)
-				if r.Logger != nil {
-					r.Logger.Info("Critical app recovered; requeueing stopped sibling", "tenant", name, "app", appName)
+	clearedSet := map[string]struct{}{}
+	for _, name := range cleared {
+		clearedSet[name] = struct{}{}
+	}
+	for name := range clearedSet {
+		prev := r.prevTenantHolds[name]
+		for _, app := range apps {
+			if app == nil || strings.TrimSpace(app.Policy().Tenant) != name {
+				continue
+			}
+			// Stopped siblings after policy_stop, or synced apps that deferred updates.
+			shouldRequeue := false
+			for _, stopped := range prev.Stopped {
+				if stopped == app.Name {
+					shouldRequeue = true
+					break
 				}
+			}
+			if app.Status == "synced" || app.Status == "rolled_back" {
+				shouldRequeue = true
+			}
+			if !shouldRequeue {
+				continue
+			}
+			_ = r.Registry.MarkPending(app.ID)
+			if r.Logger != nil {
+				r.Logger.Info("Tenant hold cleared; requeueing deferred app", "tenant", name, "app", app.Name)
 			}
 		}
 	}

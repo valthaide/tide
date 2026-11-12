@@ -403,6 +403,31 @@ func (r *Reconciler) MigrateRepo(
 		if prepErr != nil {
 			se := syncerr.Classify(prepErr)
 			failReason := classifyMigrationPrepReason(se)
+			// No containers + missing image: adopt the new desired source as pending
+			// so the old compose path is no longer required. With containers, keep
+			// the old source, mark an error, and retry on the next cycle.
+			if imageNotFoundError(se) && !req.DryRun {
+				if !r.projectHasContainers(existing) {
+					if adoptErr := r.adoptDesiredSourcePending(existing, req, method, newRepoURL, branch, revision, composePath, template, appDir, targetSHA, newSecret, policy, se); adoptErr != nil {
+						plan.Mode = compose.MigrationModeFailed
+						plan.Reason = failReason
+						recordOutcome("preflight_failed_runtime", compose.MigrationModeFailed, failReason, ciRes, se)
+						logFailed(failReason, se)
+						return plan, se
+					}
+					plan.Mode = compose.MigrationModeFailed
+					plan.Reason = "image_not_found_pending"
+					plan.Applied = true
+					recordOutcome("source_adopted_pending", "pending", "image_not_found", ciRes, se)
+					if r.Logger != nil {
+						r.Logger.Info("Adopted new source as pending; image not found and no containers",
+							"app", existing.Name, "template", template, "app_dir", appDir)
+					}
+					return plan, nil
+				}
+				_ = r.Registry.UpdateSyncResultErr(existing.ID, "error", time.Now(), existing.LastSyncedCommit, existing.LastSyncedCommitMessage, "", se)
+				_ = r.Registry.UpdateRollback(existing.ID, existing.LastHealthyCommit, targetSHA, existing.LastHealthyVars, deploypolicy.EncodeVars(policy.Vars))
+			}
 			plan.Mode = compose.MigrationModeFailed
 			plan.Reason = failReason
 			recordOutcome("preflight_failed_runtime", compose.MigrationModeFailed, failReason, ciRes, se)
@@ -633,6 +658,69 @@ func (r *Reconciler) MigrateRepo(
 		)
 	}
 	return plan, nil
+}
+
+// adoptDesiredSourcePending writes the new registration source while leaving
+// containers untouched and status=pending (image_not_found, no runtime yet).
+func (r *Reconciler) adoptDesiredSourcePending(
+	existing *api.App,
+	req api.RepoMigrationRequest,
+	method, newRepoURL, branch, revision, composePath, template, appDir, targetSHA string,
+	newSecret []byte,
+	policy deploypolicy.Policy,
+	se *syncerr.Error,
+) error {
+	if r == nil || existing == nil || r.Registry == nil {
+		return fmt.Errorf("registry unavailable")
+	}
+	encodedPolicy := deploypolicy.Encode(policy)
+	pollInterval := strings.TrimSpace(req.PollInterval)
+	if pollInterval == "" {
+		pollInterval = existing.PollInterval
+	}
+	if err := r.Registry.UpdateApp(existing.ID, existing.Name, branch, composePath, pollInterval, nil); err != nil {
+		return err
+	}
+	if err := r.Registry.UpdateRepository(existing.ID, newRepoURL, method, branch, revision, composePath, template, appDir); err != nil {
+		return err
+	}
+	if err := r.Registry.UpdateDeployPolicy(existing.ID, encodedPolicy); err != nil {
+		return err
+	}
+	switch method {
+	case repoauth.MethodPublic:
+		_ = r.Registry.ClearRepoSecret(existing.ID)
+	case repoauth.MethodToken:
+		if strings.TrimSpace(req.DeployKey) == "" {
+			if req.FromFleet {
+				_ = r.Registry.ClearRepoSecret(existing.ID)
+			}
+		} else {
+			_ = r.Registry.UpdateRepoSecret(existing.ID, string(newSecret))
+		}
+	case repoauth.MethodDeployKey:
+		if len(newSecret) > 0 {
+			_ = r.Registry.UpdateRepoSecret(existing.ID, string(newSecret))
+		}
+	}
+	if targetSHA != "" {
+		_ = r.Registry.UpdateCommitWithMessage(existing.ID, targetSHA, "")
+	}
+	_ = r.Registry.UpdateRollback(existing.ID, existing.LastHealthyCommit, targetSHA, existing.LastHealthyVars, deploypolicy.EncodeVars(policy.Vars))
+	_ = r.Registry.UpdateSyncResultErr(existing.ID, "pending", time.Now(), existing.LastSyncedCommit, existing.LastSyncedCommitMessage, "", se)
+	existing.RepoURL = newRepoURL
+	existing.RepoAuthMethod = method
+	existing.Branch = branch
+	existing.Revision = revision
+	existing.ComposePath = composePath
+	existing.Template = template
+	existing.AppDir = appDir
+	existing.Status = "pending"
+	existing.LastSyncErrorCode = se.GetCode()
+	existing.LastSyncError = se.Message
+	existing.DeployPolicyJSON = encodedPolicy
+	existing.ApplyPolicy()
+	return nil
 }
 
 func classifyMigrationPrepReason(se *syncerr.Error) string {

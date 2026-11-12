@@ -25,7 +25,7 @@ func TestManualHoldPersists(t *testing.T) {
 	}
 }
 
-func TestPolicyHoldFreezesTenant(t *testing.T) {
+func TestPolicyHoldFreezesTenantAndClearsWhenSynced(t *testing.T) {
 	m := NewManager(t.TempDir())
 	m.UpdateSpecs(map[string]Spec{"dev": {Name: "dev", FailurePolicy: PolicyHold}})
 	m.Evaluate([]AppView{
@@ -33,19 +33,85 @@ func TestPolicyHoldFreezesTenant(t *testing.T) {
 		{Name: "web", Tenant: "dev", Status: "synced"},
 	})
 	st, ok := m.Hold("dev")
-	if !ok || st.Reason != ReasonPolicyHold {
+	if !ok || st.Reason != ReasonAuto {
 		t.Fatalf("%+v ok=%v", st, ok)
 	}
-	blocked, reason := m.UpdatesBlocked(AppView{Name: "web", Tenant: "dev"})
-	if !blocked || reason != ReasonPolicyHold {
+	if len(st.HoldingApps) != 1 || st.HoldingApps[0] != "api" {
+		t.Fatalf("holding_apps: %v", st.HoldingApps)
+	}
+	blocked, reason := m.UpdatesBlocked(AppView{Name: "web", Tenant: "dev", Status: "synced"})
+	if !blocked || reason != ReasonAuto {
 		t.Fatalf("blocked=%v reason=%s", blocked, reason)
 	}
-	m.Evaluate([]AppView{
+	// Failed/pending apps keep reconciling despite hold.
+	if blocked, _ := m.UpdatesBlocked(AppView{Name: "api", Tenant: "dev", Status: "failed"}); blocked {
+		t.Fatal("failed app must not be blocked by hold")
+	}
+	if blocked, _ := m.UpdatesBlocked(AppView{Name: "front", Tenant: "dev", Status: "pending", LastSyncError: "image_not_found"}); blocked {
+		t.Fatal("pending app must not be blocked by hold")
+	}
+
+	_, cleared := m.Evaluate([]AppView{
 		{Name: "api", Tenant: "dev", Status: "synced"},
 		{Name: "web", Tenant: "dev", Status: "synced"},
 	})
 	if _, ok := m.Hold("dev"); ok {
 		t.Fatal("hold should clear when all apps healthy")
+	}
+	if len(cleared) != 1 || cleared[0] != "dev" {
+		t.Fatalf("cleared=%v", cleared)
+	}
+}
+
+func TestManualReleaseOfAutoHoldSuppressesUntilHealthy(t *testing.T) {
+	m := NewManager(t.TempDir())
+	m.UpdateSpecs(map[string]Spec{"dev": {Name: "dev", FailurePolicy: PolicyHold}})
+	m.Evaluate([]AppView{
+		{Name: "api", Tenant: "dev", Status: "failed", LastSyncError: "boom"},
+		{Name: "web", Tenant: "dev", Status: "synced"},
+	})
+	if _, ok := m.Hold("dev"); !ok {
+		t.Fatal("expected auto hold")
+	}
+	m.Release("dev")
+	if _, ok := m.Hold("dev"); ok {
+		t.Fatal("release must clear hold")
+	}
+	// Same ongoing failures must not re-arm hold on the next Evaluate.
+	m.Evaluate([]AppView{
+		{Name: "api", Tenant: "dev", Status: "failed", LastSyncError: "boom"},
+		{Name: "web", Tenant: "dev", Status: "synced"},
+	})
+	if _, ok := m.Hold("dev"); ok {
+		t.Fatal("auto hold must stay suppressed until next failure after healthy")
+	}
+	// Recovery clears the suppress latch.
+	m.Evaluate([]AppView{
+		{Name: "api", Tenant: "dev", Status: "synced"},
+		{Name: "web", Tenant: "dev", Status: "synced"},
+	})
+	// A new failure re-arms hold.
+	m.Evaluate([]AppView{
+		{Name: "api", Tenant: "dev", Status: "failed", LastSyncError: "again"},
+		{Name: "web", Tenant: "dev", Status: "synced"},
+	})
+	st, ok := m.Hold("dev")
+	if !ok || st.Reason != ReasonAuto {
+		t.Fatalf("expected re-armed auto hold, got %+v ok=%v", st, ok)
+	}
+}
+
+func TestManualHoldDoesNotAutoClear(t *testing.T) {
+	m := NewManager(t.TempDir())
+	m.UpdateSpecs(map[string]Spec{"dev": {Name: "dev", FailurePolicy: PolicyHold}})
+	m.ManualHold("dev", "experiment")
+	m.Evaluate([]AppView{
+		{Name: "api", Tenant: "dev", Status: "synced"},
+		{Name: "web", Tenant: "dev", Status: "synced"},
+	})
+	st, ok := m.Hold("dev")
+	if !ok || !st.Manual || st.Reason != ReasonManual {
+		t.Fatalf("manual hold must survive healthy evaluate: %+v ok=%v", st, ok)
 	}
 }
 
@@ -57,7 +123,7 @@ func TestPolicyStopAfterGrace(t *testing.T) {
 		{Name: "frontend", Tenant: "prod", Status: "synced"},
 	})
 	time.Sleep(2 * time.Millisecond)
-	toStop := m.Evaluate([]AppView{
+	toStop, _ := m.Evaluate([]AppView{
 		{Name: "backend", Tenant: "prod", Status: "failed", Critical: true, LastSyncError: "down"},
 		{Name: "frontend", Tenant: "prod", Status: "synced"},
 	})

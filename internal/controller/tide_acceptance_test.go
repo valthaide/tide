@@ -295,6 +295,16 @@ type fakeMigRuntime struct {
 	unchangedServices []string
 	keptVols          []string
 	stopped           []string
+	// noContainers makes ProjectHealth report an empty project (v2.4.1
+	// pending-adopt path). Default false keeps the "has containers" path.
+	noContainers bool
+}
+
+func (f *fakeMigRuntime) ProjectHealth(context.Context, string) (compose.ProjectRuntimeState, error) {
+	if f.noContainers {
+		return compose.ProjectRuntimeState{}, nil
+	}
+	return compose.ProjectRuntimeState{ContainerCount: 1, RunningCount: 1}, nil
 }
 
 func (f *fakeMigRuntime) PrepareRepoMigration(_ context.Context, p compose.MigrationPrepParams) (compose.MigrationPrepared, error) {
@@ -407,8 +417,13 @@ func TestSafeRepoMigrationPreflightDataPreservationDryRunAndRollback(t *testing.
 		t.Fatalf("old app was stopped despite unavailable image! downCalls=%d", rt.downCalls)
 	}
 	stillOld, _ := reg.Get(app.ID)
-	if stillOld.RepoURL != oldRepo || stillOld.Status != "synced" {
-		t.Fatalf("old app state altered after failed preflight: %+v", stillOld)
+	if stillOld.RepoURL != oldRepo || stillOld.ComposePath != "compose.yaml" {
+		t.Fatalf("old source altered after failed preflight: %+v", stillOld)
+	}
+	// With running containers, missing image marks error and retries next cycle
+	// without adopting the new source (v2.4.1).
+	if stillOld.Status != "error" || stillOld.LastSyncErrorCode != syncerr.CodeImageNotFound {
+		t.Fatalf("expected error hold with old source: status=%s code=%s", stillOld.Status, stillOld.LastSyncErrorCode)
 	}
 
 	// 2. Red CI on target repo -> must NOT stop old app.
