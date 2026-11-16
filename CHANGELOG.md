@@ -90,6 +90,12 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.5.1 (2026-11-16)
+- **`app_dir` before first clone is not an error**: `envFilePaths` no longer stats the app directory before `applyRuntime` creates it; required-env and env-hash checks are skipped until the checkout exists. Fixes the `app_dir_not_found` crash and the `vars_changed` sync loop on fresh `app_dir` apps.
+- **Backoff on repeated errors**: when the error reason and code do not change, retries pause with exponential backoff from 5 seconds up to 5 minutes instead of spinning every cycle. New metric `tide_sync_backoff_seconds{app}` shows the current pause.
+- **Fleet revision metric**: `tide_fleet_revision_info{host,sha}` (short 12-char commit SHA, value 1, one series per host) so dashboards can show which fleet commit each host runs.
+- **Uniform `host` label**: every metric on `/metrics` now carries `host=<fqdn>` (full hostname as in node_exporter), so dashboard filters no longer lose hosts.
+
 ### v2.5.0 (2026-11-16)
 - **Unified `env_files` hash**: compose absolute `env_file` paths and fleet `env_files` share one `envHash` (`path=sha256(content)\n`). Drift detection, post-health apply recording, force sync, and repo migration all use the same function — fixes the redeploy loop when fleet-only env files changed while only the compose hash was stored.
 - **Adopt without redeploy**: empty `LastAppliedEnvHash`, or path-only additions (new `env_files` on an already-running app), record the hash with `env_hash_adopted` / `tide_env_hash_adopted_total` and leave containers alone. Store keeps `last_applied_env_paths` next to the hash.

@@ -243,11 +243,11 @@ var (
 		Help:      "Running digest differs from the pinned digest (1=drift).",
 	}, []string{"app", "service"})
 
-	fleetRevisionInfo = prometheus.NewGauge(prometheus.GaugeOpts{
+	fleetRevisionInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "fleet_revision_info",
-		Help:      "1 when a fleet checkout revision has been observed (SHA is omitted from labels).",
-	})
+		Help:      "Fleet checkout revision observed by this host (value always 1).",
+	}, []string{"host", "sha"})
 
 	appVarsInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
@@ -354,6 +354,12 @@ var (
 		Name:      "app_reconcile_attempt",
 		Help:      "Current retry attempt for an app.",
 	}, []string{"app"})
+
+	syncBackoff = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "sync_backoff_seconds",
+		Help:      "Current pause between sync retries for an app repeating the same error.",
+	}, []string{"app"})
 )
 
 // ImageSample is one running service image reported by the reconciler.
@@ -413,13 +419,25 @@ var fleetSHA string
 func SetFleetRevision(sha string) {
 	sha = strings.TrimSpace(sha)
 	fleetMu.Lock()
+	prev := fleetSHA
 	fleetSHA = sha
 	fleetMu.Unlock()
-	if sha != "" {
-		fleetRevisionInfo.Set(1)
-	} else {
-		fleetRevisionInfo.Set(0)
+	host := Host()
+	if prev != "" && prev != sha {
+		fleetRevisionInfo.DeleteLabelValues(host, shortFleetSHA(prev))
 	}
+	if sha == "" {
+		return
+	}
+	fleetRevisionInfo.WithLabelValues(host, shortFleetSHA(sha)).Set(1)
+}
+
+func shortFleetSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 func FleetSHA() string {
@@ -599,6 +617,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		appNextReconcile,
 		appReconcileOverdue,
 		appReconcileAttempt,
+		syncBackoff,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {
@@ -609,9 +628,10 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 	return nil
 }
 
-// Handler returns an HTTP handler for GET /metrics.
+// Handler returns an HTTP handler for GET /metrics. Every series carries the
+// uniform host label so dashboards can join Tide metrics with node exporter.
 func Handler(registry prometheus.Gatherer) http.Handler {
-	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	return promhttp.HandlerFor(hostLabelGatherer{gatherer: registry}, promhttp.HandlerOpts{})
 }
 
 type appsCollector struct {
@@ -1092,6 +1112,7 @@ func ForgetApp(name, id, repo string, repoStillUsed bool) {
 			SyncErrorsTotal.DeletePartialMatch(labels)
 			envHashApplied.DeletePartialMatch(labels)
 			RepoMigrationsTotal.DeletePartialMatch(labels)
+			syncBackoff.DeletePartialMatch(labels)
 			GitAuthFailuresTotal.DeletePartialMatch(prometheus.Labels{"name": name})
 		}
 	}
@@ -1155,6 +1176,18 @@ func SetLastSyncTimestamp(app string) {
 		app = "unknown"
 	}
 	LastSyncTimestamp.WithLabelValues(app).Set(float64(time.Now().Unix()))
+}
+
+// SetSyncBackoff sets tide_sync_backoff_seconds{app}; 0 means no pause.
+func SetSyncBackoff(app string, seconds float64) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	syncBackoff.WithLabelValues(app).Set(seconds)
 }
 
 func repoLabel(raw string) string {

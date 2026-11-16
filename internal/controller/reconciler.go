@@ -324,6 +324,7 @@ type Reconciler struct {
 	nudge            chan struct{}
 	retryMu          sync.Mutex
 	retryAfter       map[string]transientRetry
+	repeatBackoff    map[string]repeatBackoffState
 	imageMissSeen    map[string]string
 	wg               sync.WaitGroup
 	watchHashErrSeen map[string]string    // appID -> last error text (rate-limit logs)
@@ -363,6 +364,7 @@ func NewReconciler(registry *Registry, executor AppRuntime, logger *slog.Logger,
 		inFlight:         make(map[string]struct{}),
 		nudge:            make(chan struct{}, 1),
 		retryAfter:       map[string]transientRetry{},
+		repeatBackoff:    map[string]repeatBackoffState{},
 		watchHashErrSeen: make(map[string]string),
 		ciWaitSince:      make(map[string]time.Time),
 		forceApply:       map[string]struct{}{},
@@ -734,6 +736,9 @@ func (r *Reconciler) requeuePending(app *App, reason string) {
 	if r.inTransientPause(app) && !retryPauseBroken(app, reason, r.retrySeen(app.ID)) {
 		return
 	}
+	if r.repeatErrorPaused(app, reason) {
+		return
+	}
 	created := r.enqueue(app, triggerForReason(reason), reason, appPriority(app))
 	if !created {
 		return
@@ -927,13 +932,15 @@ func (r *Reconciler) syncApp(app *App) error {
 		r.declareOnce(app, se)
 		return nil
 	}
-	if err := checkRequiredEnv(policy.RequiredEnv, fileVars); err != nil {
-		se := syncerr.Classify(err)
-		metrics.SetEnvKeyMissing(app.Name, policy.RequiredEnv, fileVars)
-		r.declareOnce(app, se)
-		return nil
+	if r.checkoutExists(app.ID) {
+		if err := checkRequiredEnv(policy.RequiredEnv, fileVars); err != nil {
+			se := syncerr.Classify(err)
+			metrics.SetEnvKeyMissing(app.Name, policy.RequiredEnv, fileVars)
+			r.declareOnce(app, se)
+			return nil
+		}
+		metrics.ClearEnvKeyMissing(app.Name)
 	}
-	metrics.ClearEnvKeyMissing(app.Name)
 	fleetVars := opts.Vars
 	opts.Vars = mergeInterpolation(fileVars, fleetVars, app.Name, app.ComposeProject())
 	if cur, err := r.envHash(app); err == nil && cur.Hash != "" && app.LastAppliedEnvHash != "" && cur.Hash != app.LastAppliedEnvHash {
@@ -1081,6 +1088,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	r.recordAppliedWatchHash(app)
 	if syncErr == "" {
 		r.clearTransient(app.ID)
+		r.clearRepeatBackoff(app.ID, app.Name)
 		_ = r.Registry.RecordRevision(app.ID, target, deploypolicy.EncodeVars(policy.Vars), metrics.FleetSHA(), revisionImages(r, app))
 		r.noteDeploy(app, "applied", target, deploypolicy.EncodeVars(policy.Vars), revisionImages(r, app), deployTrigger(app, target))
 		metrics.ObserveSync(app.ID, app.Name, time.Since(syncStartedAt), nil)
@@ -1094,6 +1102,75 @@ type transientRetry struct {
 	attempts int
 	next     time.Time
 	seen     string
+}
+
+type repeatBackoffState struct {
+	key      string
+	attempts int
+	next     time.Time
+	wait     time.Duration
+}
+
+func repeatedErrorBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	wait := 5 * time.Second
+	for i := 1; i < attempt; i++ {
+		wait *= 2
+		if wait >= 5*time.Minute {
+			return 5 * time.Minute
+		}
+	}
+	return wait
+}
+
+// repeatErrorPaused paces requeues that repeat the same requeue reason and
+// sync error code: 5s doubling up to 5m. It reports whether this requeue
+// must be skipped because the pause has not elapsed yet.
+func (r *Reconciler) repeatErrorPaused(app *App, reason string) bool {
+	code := strings.TrimSpace(app.LastSyncErrorCode)
+	if code == "" {
+		r.clearRepeatBackoff(app.ID, app.Name)
+		return false
+	}
+	key := reason + "|" + code
+	now := time.Now()
+	r.retryMu.Lock()
+	if r.repeatBackoff == nil {
+		r.repeatBackoff = map[string]repeatBackoffState{}
+	}
+	st := r.repeatBackoff[app.ID]
+	if st.key == key && !st.next.IsZero() && now.Before(st.next) {
+		wait := st.wait
+		r.retryMu.Unlock()
+		metrics.SetSyncBackoff(app.Name, wait.Seconds())
+		return true
+	}
+	if st.key != key {
+		st = repeatBackoffState{key: key}
+	}
+	st.attempts++
+	st.wait = repeatedErrorBackoff(st.attempts)
+	st.next = now.Add(st.wait)
+	r.repeatBackoff[app.ID] = st
+	wait := st.wait
+	r.retryMu.Unlock()
+	metrics.SetSyncBackoff(app.Name, wait.Seconds())
+	return false
+}
+
+func (r *Reconciler) clearRepeatBackoff(appID, appName string) {
+	if r == nil {
+		return
+	}
+	r.retryMu.Lock()
+	_, had := r.repeatBackoff[appID]
+	delete(r.repeatBackoff, appID)
+	r.retryMu.Unlock()
+	if had {
+		metrics.SetSyncBackoff(appName, 0)
+	}
 }
 
 func imageNotFoundError(se *syncerr.Error) bool {

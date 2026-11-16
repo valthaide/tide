@@ -23,10 +23,22 @@ func (e *ComposeExecutor) ExternalEnvHashForApp(appID, composePath string) (stri
 	return HashEnvFilePaths(paths)
 }
 
+// CheckoutExists reports whether the app repository checkout is materialized.
+func (e *ComposeExecutor) CheckoutExists(appID string) bool {
+	if e == nil || strings.TrimSpace(appID) == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(e.WorkDir, appID, "repo"))
+	return err == nil && info.IsDir()
+}
+
 // ExternalEnvPathsForApp lists absolute external env_file paths for an app checkout.
 func (e *ComposeExecutor) ExternalEnvPathsForApp(appID, composePath string) ([]string, error) {
 	if e == nil {
 		return nil, fmt.Errorf("compose executor is nil")
+	}
+	if !e.CheckoutExists(appID) {
+		return nil, nil
 	}
 	if strings.TrimSpace(composePath) == "" {
 		composePath = "compose.yaml"
@@ -53,6 +65,9 @@ func (e *ComposeExecutor) ExternalEnvHashForSource(appID, composePath, template,
 func (e *ComposeExecutor) ExternalEnvPathsForSource(appID, composePath, template, appDir string) ([]string, error) {
 	if e == nil {
 		return nil, fmt.Errorf("compose executor is nil")
+	}
+	if !e.CheckoutExists(appID) {
+		return nil, nil
 	}
 	repoDir := filepath.Join(e.WorkDir, appID, "repo")
 	if strings.TrimSpace(template) == "" {

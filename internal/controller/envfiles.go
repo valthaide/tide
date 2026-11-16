@@ -80,6 +80,20 @@ type envPathLister interface {
 	ExternalEnvPathsForApp(appID, composePath string) ([]string, error)
 }
 
+type checkoutStater interface {
+	CheckoutExists(appID string) bool
+}
+
+func (r *Reconciler) checkoutExists(appID string) bool {
+	if r == nil || r.Executor == nil {
+		return true
+	}
+	if stater, ok := r.Executor.(checkoutStater); ok {
+		return stater.CheckoutExists(appID)
+	}
+	return true
+}
+
 // envHash combines absolute compose env_file paths with policy.EnvFiles.
 // Format: sha256 of sorted unique "path=sha256(content)\n" lines.
 func (r *Reconciler) envHash(app *App) (envHashResult, error) {

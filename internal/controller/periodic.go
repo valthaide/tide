@@ -646,6 +646,7 @@ func (r *Reconciler) RetryApp(app *api.App) error {
 		return fmt.Errorf("sync already in progress")
 	}
 	r.clearTransient(app.ID)
+	r.clearRepeatBackoff(app.ID, app.Name)
 	if r.Registry != nil {
 		_ = r.Registry.ClearRetry(app.ID)
 	}
