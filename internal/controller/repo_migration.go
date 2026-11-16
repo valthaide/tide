@@ -332,6 +332,14 @@ func (r *Reconciler) MigrateRepo(
 		logFailed("credentials_error", se)
 		return plan, se
 	}
+	if err := r.renderAppSecrets(ctx, existing); err != nil {
+		se := syncerr.Classify(err)
+		plan.Mode = compose.MigrationModeFailed
+		plan.Reason = se.Code
+		recordOutcome("preflight_failed_secrets", compose.MigrationModeFailed, se.Code, ciRes, se)
+		logFailed(se.Code, se)
+		return plan, se
+	}
 	migPaths := append([]string(nil), policy.EnvFiles...)
 	fileVars, missing := readEnvFiles(migPaths)
 	if missing != "" {

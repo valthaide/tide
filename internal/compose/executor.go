@@ -25,7 +25,6 @@ import (
 	"github.com/valthaide/tide/internal/metrics"
 	"github.com/valthaide/tide/internal/redact"
 	"github.com/valthaide/tide/internal/repoauth"
-	"github.com/valthaide/tide/internal/secrets"
 	"github.com/valthaide/tide/internal/syncerr"
 )
 
@@ -33,7 +32,6 @@ import (
 type ComposeExecutor struct {
 	WorkDir string
 	Logger  *slog.Logger
-	Secrets *secrets.Manager
 	// FleetCheckoutDir is the fleet checkout root holding templates/<name>/.
 	// It is wired from the fleet reconciler; TIDE_FLEET_CHECKOUT_DIR is a fallback.
 	FleetCheckoutDir string
@@ -214,24 +212,6 @@ func (e *ComposeExecutor) ApplyImages(
 	}
 	for _, private := range []string{filepath.Join(appDirAbs, ".ssh"), filepath.Join(appDirAbs, ".envs")} {
 		_ = fsperm.HardenPrivateSubtree(private)
-	}
-
-	if e.Secrets != nil {
-		appendLogSection(&syncLog, "Secrets")
-		resolved, resErr := e.Secrets.ResolveEnvs(ctx, envVars)
-		if resErr != nil {
-			appendLogLine(&syncLog, resErr.Error())
-			emitProgress()
-			return redact.String(strings.TrimSpace(syncLog.String())), syncerr.Wrap(syncerr.CodeSecretsVault, syncerr.StageSecrets, resErr)
-		}
-		envVars = resolved
-		if prepErr := e.Secrets.PrepareRepo(ctx, repoDir); prepErr != nil {
-			appendLogLine(&syncLog, prepErr.Error())
-			emitProgress()
-			return redact.String(strings.TrimSpace(syncLog.String())), syncerr.Wrap(syncerr.CodeSecretsSOPS, syncerr.StageSecrets, prepErr)
-		}
-		appendLogLine(&syncLog, "ok")
-		emitProgress()
 	}
 
 	// Resolve the compose source. Template mode reads the base file from the

@@ -74,8 +74,12 @@ func runController(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	secretsCfg := secrets.LoadConfigFromEnv()
-	for _, w := range secretsCfg.Warnings() {
+	secretsCfg, secretsWarnings, secretsErr := secrets.LoadConfig()
+	if secretsErr != nil {
+		logger.Error("Failed to load secrets provider config", "error", secretsErr)
+		return 1
+	}
+	for _, w := range secretsWarnings {
 		logger.Warn(w)
 	}
 
@@ -137,13 +141,16 @@ func runController(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	secretsMgr := secrets.NewManager(secretsCfg)
-	if secretsCfg.VaultEnabled {
-		logger.Info("Vault secrets enabled", "addr", secretsCfg.VaultAddr)
+	secretsProvider, providerErr := secrets.NewProvider(secretsCfg, logger)
+	if providerErr != nil {
+		logger.Error("Failed to initialize secrets provider", "error", providerErr)
+		return 1
+	}
+	if secretsProvider.Enabled() {
+		logger.Info("OpenBao secrets provider configured", "addr", secretsCfg.Addr, "auth", secretsCfg.Auth, "mount", secretsCfg.Mount)
 	}
 
 	executor := compose.NewComposeExecutor(logger)
-	executor.Secrets = secretsMgr
 	if runtimeDir := envcompat.Getenv("TIDE_RUNTIME_DIR"); runtimeDir != "" {
 		executor.WorkDir = runtimeDir
 	}
@@ -169,6 +176,10 @@ func runController(args []string, stdout, stderr io.Writer) int {
 		reconciler = controller.NewReconciler(registry, executor, logger, reconcilerCfg)
 		tenants := tenant.NewManager(dataDir)
 		reconciler.Tenants = tenants
+		reconciler.Secrets = secretsProvider
+		if secretsProvider.Enabled() {
+			go secretsProvider.Run(ctx, reconciler.SecretsSpecs)
+		}
 		if reconcilerCfg.PullParallel > 0 {
 			reconciler.EnablePullLimit(reconcilerCfg.PullParallel)
 			executor.PullGate = reconciler
@@ -245,6 +256,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 
 	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
 	appHandler.SyncTimeout = reconcilerCfg.SyncTimeout
+	appHandler.Secrets = secretsProvider
 	if reconciler != nil {
 		appHandler.SyncGate = reconciler
 		appHandler.Tenants = reconciler.Tenants
@@ -301,6 +313,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 				r.Get("/queue", appHandler.GetQueue)
 				r.Get("/operations/{id}", appHandler.GetOperation)
 				r.Get("/tenants", appHandler.ListTenants)
+				r.Get("/secrets/status", appHandler.GetSecretsStatus)
 				r.Post("/tenants/{tenant}/hold", appHandler.HoldTenant)
 				r.Post("/tenants/{tenant}/release", appHandler.ReleaseTenant)
 			}

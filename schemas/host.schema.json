@@ -173,6 +173,35 @@
           "description": "Pinned tag or commit SHA; overrides branch tracking.",
           "type": "string"
         },
+        "secret_file": {
+          "description": "Rendered secret env file path. Default: /var/lib/tide/secrets/<app>.env. Automatically added to env_files.",
+          "type": "string"
+        },
+        "secret_from": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SecretFromSpec"
+          },
+          "description": "Derived values: output key mapped to an explicit {path, key} source.",
+          "type": "object"
+        },
+        "secret_keys": {
+          "description": "Keys that land in the rendered secret file. Empty means all keys from secret_paths. Automatically added to required_env.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "secret_paths": {
+          "description": "KV v2 paths read by the openbao provider, in merge order (last wins). Supports {prefix}, {tenant}, {app} placeholders.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "secrets_provider": {
+          "description": "Secrets source for this app: none, agent, or openbao. Overrides tenant and host.",
+          "type": "string"
+        },
         "shared_required_jobs": {
           "description": "Required CI jobs shared with other apps from the same repository.",
           "items": {
@@ -246,6 +275,20 @@
       },
       "type": "object"
     },
+    "SecretFromSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "description": "Key inside the KV entry.",
+          "type": "string"
+        },
+        "path": {
+          "description": "KV v2 path (relative to the mount) holding the value.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "TenantSpec": {
       "additionalProperties": false,
       "properties": {
@@ -293,6 +336,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "secrets_provider": {
+          "description": "Secrets source for this tenant's apps: none, agent, or openbao.",
+          "type": "string"
         },
         "shared_required_jobs": {
           "description": "Required CI jobs shared across the tenant's apps.",
@@ -370,7 +417,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/valthaide/tide/releases/download/v2.5.0/host.schema.json",
+  "$id": "https://github.com/valthaide/tide/releases/download/v2.6.0/host.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Applications that should run on one host, declared in hosts/<fqdn>.yaml of a fleet repository. Generated from the Tide fleet parser structs; do not edit by hand.",
@@ -467,6 +514,10 @@
       ],
       "type": "integer"
     },
+    "secrets_provider": {
+      "description": "Secrets source for apps: none (default), agent, or openbao. Inherited by tenants and apps.",
+      "type": "string"
+    },
     "shared_required_jobs": {
       "description": "Required CI jobs shared by all apps on this host.",
       "items": {
@@ -506,6 +557,6 @@
   "x-tide": {
     "fleet_format_version": 1,
     "latest_schema": "https://github.com/valthaide/tide/releases/latest/download/host.schema.json",
-    "tide_version": "v2.5.0"
+    "tide_version": "v2.6.0"
   }
 }

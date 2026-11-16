@@ -19,6 +19,7 @@ import (
 	"github.com/valthaide/tide/internal/envcompat"
 	"github.com/valthaide/tide/internal/fleetcheck"
 	"github.com/valthaide/tide/internal/metrics"
+	"github.com/valthaide/tide/internal/secrets"
 	"github.com/valthaide/tide/internal/syncerr"
 	"github.com/valthaide/tide/internal/tenant"
 )
@@ -314,6 +315,8 @@ type Reconciler struct {
 	ResolveMigrationCommit ResolveCommitFunc
 	// Tenants tracks failure_policy hold/stop and manual freezes (v2.4).
 	Tenants *tenant.Manager
+	// Secrets renders app secret env files from the OpenBao provider (v2.6).
+	Secrets *secrets.Provider
 
 	mu               sync.Mutex
 	scheduling       bool
@@ -913,6 +916,11 @@ func (r *Reconciler) syncApp(app *App) error {
 		opts.Vars = deploypolicy.DecodeVars(app.LastHealthyVars)
 		opts.NoBuild = true
 		opts.BuildMode = deploypolicy.BuildForbidden
+	}
+	if err := r.renderAppSecrets(ctx, app); err != nil {
+		se := syncerr.Classify(err)
+		r.declareOnce(app, se)
+		return nil
 	}
 	envPaths, pathErr := r.envFilePaths(app)
 	if pathErr != nil {

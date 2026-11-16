@@ -65,7 +65,7 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 ### 9. Security, Encryption & Secret Redaction (`internal/apiauth`, `internal/redact`, `internal/secrets`, `internal/tlsutil`)
 - **HTTPS by default** (`:8443`) with automatic self-signed certificate generation or custom `TIDE_TLS_CERT` / `TIDE_TLS_KEY`.
 - **API authentication & authorization**: mandatory Bearer token auth (on-disk SHA-256 hash + generated `bootstrap_token`), named operator tokens (`TIDE_OPERATOR_TOKENS`) for audit attribution, and dedicated `TIDE_FORCE_TOKENS` for CI bypass privileges.
-- **HashiCorp Vault integration** (`vault://path#key`) and external host `env_files`.
+- **OpenBao secrets integration** (direct KV v2 provider with cert/approle/jwt/token auth, encrypted offline cache) and external host `env_files`.
 - **Credential-safe Git & Registry execution**: HTTPS Git tokens are injected via transient `GIT_CONFIG` `http.<host>.extraheader` environment variables (never written to `.git/config`), and `docker login` pipes passwords via `stdin` into an ephemeral per-sync `DOCKER_CONFIG` directory removed immediately after pull.
 - **Log secret redaction**: `redact` wraps `slog` to scrub secret env values, URL userinfo, and GitLab token prefixes (`glpat-*`, `gldt-*`, `glrt-*`); rendered `docker compose config` output is never logged at any level, and missing local image checks (`docker image inspect`) log at `DEBUG`.
 
@@ -90,6 +90,13 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.6.0 (2026-11-16)
+- **Direct OpenBao secrets provider** (`secrets_provider: openbao` on host, tenant, or app; `vault` accepted as an alias): cert / approle / jwt / token auth via env vars or `/etc/tide/secrets-provider.hcl`, token kept only in memory, login at startup, renew at 2/3 TTL, re-login on revocation, login backoff capped at 5 minutes. Legacy `TIDE_VAULT_ADDR` / `TIDE_VAULT_TOKEN` are mapped with a deprecation warning.
+- **Fleet fields**: `secret_paths` (KV v2 paths with `{prefix}` / `{tenant}` / `{app}` templates, later paths override earlier ones), `secret_keys` (automatically appended to `required_env`), `secret_from` (explicit `path` + `key` mapping), `secret_file` (default `/var/lib/tide/secrets/<app>.env`, automatically appended to `env_files`). Rendered before `compose up` with atomic `0600` writes; values containing `'`, newline, or NUL are rejected as `secrets_invalid_value` without leaking the value.
+- **Offline cache**: last good render is stored AES-GCM encrypted under `.cache/<app>.json` (key at `/etc/tide/cache.key`). When OpenBao is unreachable, deploys proceed from cache (`secrets_stale`); without a cache the sync fails with `secrets_unavailable`. KV `metadata` is polled once a minute; a new version triggers re-render and env drift detection.
+- **Removed `vault://` inline secrets**: the `vault://path#key` syntax and the old secrets manager are deleted; `tidectl validate` rejects `secret_*` fields without `secrets_provider: openbao` and any combination of the agent path with the direct provider on the same app.
+- **Observability**: metrics `tide_secrets_provider_up`, `tide_secrets_login_total{result}`, `tide_secrets_token_ttl_seconds`, `tide_secrets_fetch_total{app,result}`, `tide_secrets_last_success_timestamp_seconds`, `tide_secrets_stale{app}`, `tide_secrets_version{app,path}`; `GET /api/v1/secrets/status[?app=]`; `tidectl secrets status [app]`; alerts `TideSecretsStale`, `TideSecretsLoginFailing`.
+
 ### v2.5.1 (2026-11-16)
 - **`app_dir` before first clone is not an error**: `envFilePaths` no longer stats the app directory before `applyRuntime` creates it; required-env and env-hash checks are skipped until the checkout exists. Fixes the `app_dir_not_found` crash and the `vars_changed` sync loop on fresh `app_dir` apps.
 - **Backoff on repeated errors**: when the error reason and code do not change, retries pause with exponential backoff from 5 seconds up to 5 minutes instead of spinning every cycle. New metric `tide_sync_backoff_seconds{app}` shows the current pause.
@@ -102,7 +109,7 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 - **Debounce**: `env_debounce` (default 30s) / `env_debounce_max` (default 5m) on host, tenant, app, or `TIDE_ENV_DEBOUNCE` / `TIDE_ENV_DEBOUNCE_MAX`. Content must stay stable for the window (or hit max wait) before `env_file_changed` redeploys with `--force-recreate`.
 - **`required_env`**: keys must be present and non-empty in env files before pull/`compose up` (`env_key_missing`). Fleet `vars` do not satisfy the check. `__INVALID__` counts as empty. Empty env files fail as `env_file_empty`.
 - **Observability**: `tidectl env status <app>`; metrics `tide_env_key_missing`, `tide_env_file_insecure`, `tide_env_debounce_pending`; example alerts `TideEnvKeyMissing`, `TideEnvDriftStuck` (provider alerts stubbed for v2.6).
-- **OpenBao direct provider**: deferred to **v2.6.0**. Agent-written `secrets.env` + §1/§2 is the supported path in v2.5.0 (`secrets_provider` remains unset/`none`).
+- **OpenBao direct provider**: deferred to **v2.6.0** (shipped there). Agent-written `secrets.env` + §1/§2 is the supported path in v2.5.x (`secrets_provider` remains unset/`none`).
 
 ### v2.4.1 (2026-11-12)
 - **Hold does not block failed/pending reconcile**: while a tenant is held, healthy apps skip new applies, but failed and pending apps keep syncing each cycle when their spec changes or an image appears.

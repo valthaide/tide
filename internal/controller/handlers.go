@@ -24,6 +24,7 @@ import (
 	"github.com/valthaide/tide/internal/fleetcheck"
 	"github.com/valthaide/tide/internal/metrics"
 	"github.com/valthaide/tide/internal/redact"
+	"github.com/valthaide/tide/internal/secrets"
 	"github.com/valthaide/tide/internal/syncerr"
 	"github.com/valthaide/tide/internal/tenant"
 )
@@ -94,6 +95,7 @@ type Handler struct {
 	Version     string
 	SyncTimeout time.Duration
 	Tenants     *tenant.Manager
+	Secrets     *secrets.Provider
 }
 
 // NewHandler creates a new controller handler.

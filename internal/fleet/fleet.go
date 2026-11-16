@@ -41,6 +41,7 @@ type HostDocument struct {
 	RequiredEnv            []string              `yaml:"required_env" desc:"Host-level required env keys inherited by apps."`
 	EnvDebounce            string                `yaml:"env_debounce" desc:"Host default: how long env hash must stay stable before redeploy, e.g. 30s."`
 	EnvDebounceMax         string                `yaml:"env_debounce_max" desc:"Host default: max wait for a stable env hash, e.g. 5m."`
+	SecretsProvider        string                `yaml:"secrets_provider" desc:"Secrets source for apps: none (default), agent, or openbao. Inherited by tenants and apps."`
 	Apps                   []AppSpec             `yaml:"apps" desc:"Applications that should run on this host."`
 }
 
@@ -59,6 +60,7 @@ type TenantSpec struct {
 	RequiredEnv   []string `yaml:"required_env" desc:"Tenant-level required env keys merged into apps."`
 	EnvDebounce   string   `yaml:"env_debounce" desc:"Tenant default env debounce window."`
 	EnvDebounceMax string  `yaml:"env_debounce_max" desc:"Tenant default max env debounce wait."`
+	SecretsProvider string `yaml:"secrets_provider" desc:"Secrets source for this tenant's apps: none, agent, or openbao."`
 }
 
 // TrustedWebSpec configures optional acceptance of manual (`web`) GitLab pipelines.
@@ -121,6 +123,17 @@ type AppSpec struct {
 	DependsOn []string `yaml:"depends_on" desc:"Other app names on this host that must reach synced before this registration applies."`
 	CPULimit  string   `yaml:"cpu_limit" desc:"Declared CPU limit for this app (e.g. 0.5). Counted against the tenant cpu_limit when set."`
 	MemoryLimit string `yaml:"memory_limit" desc:"Declared memory limit for this app (e.g. 512m). Counted against the tenant memory_limit when set."`
+	SecretsProvider string `yaml:"secrets_provider" desc:"Secrets source for this app: none, agent, or openbao. Overrides tenant and host."`
+	SecretPaths []string `yaml:"secret_paths" desc:"KV v2 paths read by the openbao provider, in merge order (last wins). Supports {prefix}, {tenant}, {app} placeholders."`
+	SecretKeys []string `yaml:"secret_keys" desc:"Keys that land in the rendered secret file. Empty means all keys from secret_paths. Automatically added to required_env."`
+	SecretFrom map[string]SecretFromSpec `yaml:"secret_from" desc:"Derived values: output key mapped to an explicit {path, key} source."`
+	SecretFile string `yaml:"secret_file" desc:"Rendered secret env file path. Default: /var/lib/tide/secrets/<app>.env. Automatically added to env_files."`
+}
+
+// SecretFromSpec maps one output env key to an explicit KV path and key.
+type SecretFromSpec struct {
+	Path string `yaml:"path" desc:"KV v2 path (relative to the mount) holding the value."`
+	Key  string `yaml:"key" desc:"Key inside the KV entry."`
 }
 
 // PolicyException allows one compose rule for one service while policy mode is warn.
@@ -220,6 +233,11 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 	}
 	doc.Host = strings.TrimSpace(doc.Host)
 	doc.Build = deploypolicy.NormalizeBuild(doc.Build)
+	doc.SecretsProvider = deploypolicy.NormalizeSecretsProvider(doc.SecretsProvider)
+	for name, ts := range doc.Tenants {
+		ts.SecretsProvider = deploypolicy.NormalizeSecretsProvider(ts.SecretsProvider)
+		doc.Tenants[name] = ts
+	}
 	for i := range doc.Apps {
 		doc.Apps[i].Name = strings.TrimSpace(doc.Apps[i].Name)
 		doc.Apps[i].Tenant = strings.TrimSpace(doc.Apps[i].Tenant)
@@ -247,6 +265,8 @@ func ParseHostDocument(data []byte) (*HostDocument, error) {
 		doc.Apps[i].Build = deploypolicy.NormalizeBuild(doc.Apps[i].Build)
 		doc.Apps[i].Vars = deploypolicy.NormalizeVars(doc.Apps[i].Vars)
 		doc.Apps[i].Project = strings.TrimSpace(doc.Apps[i].Project)
+		doc.Apps[i].SecretsProvider = deploypolicy.NormalizeSecretsProvider(doc.Apps[i].SecretsProvider)
+		doc.Apps[i].SecretFile = strings.TrimSpace(doc.Apps[i].SecretFile)
 	}
 	return &doc, nil
 }

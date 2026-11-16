@@ -45,6 +45,13 @@ Tide is a single-host GitOps controller for Docker Compose stacks, paired with t
 | `TIDE_GIT_TOKEN` | Git HTTPS token (`read_repository`) |
 | `TIDE_GITLAB_API_TOKEN` | GitLab API token (`read_api`) |
 | `TIDE_STRICT_CI_GATE` | Require a trusted pipeline even when `trigger`/`api` pipelines exist |
+| `TIDE_SECRETS_PROVIDER` | Secrets provider: `none` (default), `agent`, or `openbao` (`vault` alias) |
+| `TIDE_OPENBAO_ADDR` | OpenBao server address for the direct secrets provider |
+| `TIDE_OPENBAO_AUTH` | OpenBao auth method: `cert` (default), `approle`, `jwt`, or `token` |
+| `TIDE_OPENBAO_CACERT` | CA certificate for verifying the OpenBao server TLS |
+| `TIDE_OPENBAO_CLIENT_CERT` / `TIDE_OPENBAO_CLIENT_KEY` | Client certificate and key for `cert` auth |
+| `TIDE_OPENBAO_MOUNT` | KV v2 mount path polled by the provider (default `kv`) |
+| `TIDE_SECRETS_DIR` | Rendered secrets directory (default `/var/lib/tide/secrets`) |
 
 ## CLI Usage
 

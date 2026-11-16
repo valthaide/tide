@@ -71,6 +71,18 @@ type Policy struct {
 	AllowedRegistries []string `json:"allowed_registries,omitempty" yaml:"allowed_registries"`
 	// EnvFiles are host files outside git. Their values interpolate compose and are not logged.
 	EnvFiles []string `json:"env_files,omitempty" yaml:"env_files"`
+	// SecretsProvider selects where secret env values come from: none (default),
+	// agent, or openbao. Inherited host -> tenant -> app.
+	SecretsProvider string `json:"secrets_provider,omitempty" yaml:"secrets_provider"`
+	// SecretPaths are KV v2 paths (relative to the mount) read by the openbao
+	// provider, in merge order; the last path wins.
+	SecretPaths []string `json:"secret_paths,omitempty" yaml:"secret_paths"`
+	// SecretKeys limits which keys land in the rendered file. Empty means all keys.
+	SecretKeys []string `json:"secret_keys,omitempty" yaml:"secret_keys"`
+	// SecretFrom maps an output key to an explicit path+key source.
+	SecretFrom map[string]SecretFrom `json:"secret_from,omitempty" yaml:"secret_from"`
+	// SecretFile is the rendered env file path. Empty uses the controller default.
+	SecretFile string `json:"secret_file,omitempty" yaml:"secret_file"`
 	// RequiredEnv lists keys that must be present and non-empty in env files before deploy.
 	RequiredEnv []string `json:"required_env,omitempty" yaml:"required_env"`
 	// EnvDebounce is how long env hash must stay stable before redeploy (default 30s).
@@ -115,6 +127,63 @@ type PolicyException struct {
 	Reason  string `json:"reason,omitempty" yaml:"reason"`
 }
 
+// SecretFrom maps one output env key to an explicit KV path and key.
+type SecretFrom struct {
+	Path string `json:"path" yaml:"path"`
+	Key  string `json:"key" yaml:"key"`
+}
+
+const (
+	SecretsProviderNone    = "none"
+	SecretsProviderAgent   = "agent"
+	SecretsProviderOpenBao = "openbao"
+)
+
+// NormalizeSecretsProvider canonicalizes a secrets_provider value; vault is
+// kept as a deprecated alias of openbao.
+func NormalizeSecretsProvider(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "":
+		return ""
+	case SecretsProviderNone:
+		return SecretsProviderNone
+	case SecretsProviderAgent:
+		return SecretsProviderAgent
+	case "vault", SecretsProviderOpenBao:
+		return SecretsProviderOpenBao
+	default:
+		return strings.ToLower(strings.TrimSpace(v))
+	}
+}
+
+// DefaultSecretsDir is where rendered secret env files live unless overridden.
+func DefaultSecretsDir() string {
+	if d := strings.TrimSpace(envcompat.Getenv("TIDE_SECRETS_DIR")); d != "" {
+		return d
+	}
+	return "/var/lib/tide/secrets"
+}
+
+// EffectiveSecretsProvider resolves the app value, then TIDE_SECRETS_PROVIDER,
+// then none.
+func (p Policy) EffectiveSecretsProvider() string {
+	if v := NormalizeSecretsProvider(p.SecretsProvider); v != "" {
+		return v
+	}
+	if v := NormalizeSecretsProvider(envcompat.Getenv("TIDE_SECRETS_PROVIDER")); v != "" {
+		return v
+	}
+	return SecretsProviderNone
+}
+
+// EffectiveSecretFile returns the rendered secret file for an app.
+func (p Policy) EffectiveSecretFile(appName string) string {
+	if f := strings.TrimSpace(p.SecretFile); f != "" {
+		return f
+	}
+	return DefaultSecretsDir() + "/" + strings.TrimSpace(appName) + ".env"
+}
+
 // Normalize trims fields and defaults.
 func (p *Policy) Normalize() {
 	if p == nil {
@@ -149,6 +218,10 @@ func (p *Policy) Normalize() {
 	p.Project = strings.TrimSpace(p.Project)
 	p.EnvFiles = normalizeStringList(p.EnvFiles)
 	p.RequiredEnv = normalizeStringList(p.RequiredEnv)
+	p.SecretsProvider = NormalizeSecretsProvider(p.SecretsProvider)
+	p.SecretPaths = normalizeStringList(p.SecretPaths)
+	p.SecretKeys = normalizeStringList(p.SecretKeys)
+	p.SecretFile = strings.TrimSpace(p.SecretFile)
 	p.EnvDebounce = strings.TrimSpace(p.EnvDebounce)
 	p.EnvDebounceMax = strings.TrimSpace(p.EnvDebounceMax)
 	out := p.WatchFiles[:0]

@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/deploypolicy"
+	"github.com/valthaide/tide/internal/envcompat"
 	"github.com/valthaide/tide/internal/fleetcheck"
 )
 
@@ -91,6 +93,7 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 	}
 	issues = append(issues, validateEnvFiles("", "env_files", doc.EnvFiles)...)
 	issues = append(issues, validateRequiredEnv("", "required_env", doc.RequiredEnv, nil, nil)...)
+	issues = append(issues, validateSecretsProviderValue("", "secrets_provider", doc.SecretsProvider)...)
 	for field, raw := range map[string]string{"env_debounce": doc.EnvDebounce, "env_debounce_max": doc.EnvDebounceMax} {
 		if strings.TrimSpace(raw) == "" {
 			continue
@@ -117,6 +120,7 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 		}
 		issues = append(issues, validateEnvFiles("", tPrefix+".env_files", tSpec.EnvFiles)...)
 		issues = append(issues, validateRequiredEnv("", tPrefix+".required_env", tSpec.RequiredEnv, nil, nil)...)
+		issues = append(issues, validateSecretsProviderValue("", tPrefix+".secrets_provider", tSpec.SecretsProvider)...)
 		for field, raw := range map[string]string{"env_debounce": tSpec.EnvDebounce, "env_debounce_max": tSpec.EnvDebounceMax} {
 			if strings.TrimSpace(raw) == "" {
 				continue
@@ -201,6 +205,8 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 		}
 		issues = append(issues, validateEnvFiles(app.Name, prefix+".env_files", app.EnvFiles)...)
 		issues = append(issues, validateRequiredEnv(app.Name, prefix, app.RequiredEnv, app.Vars, app.PublicVars)...)
+		issues = append(issues, validateSecretsProviderValue(app.Name, prefix+".secrets_provider", app.SecretsProvider)...)
+		issues = append(issues, validateAppSecrets(app, prefix, doc)...)
 		for field, raw := range map[string]string{"env_debounce": app.EnvDebounce, "env_debounce_max": app.EnvDebounceMax} {
 			if strings.TrimSpace(raw) == "" {
 				continue
@@ -506,6 +512,105 @@ func validateRequiredEnv(app, pathPrefix string, keys []string, vars map[string]
 			continue
 		}
 		seen[key] = struct{}{}
+	}
+	return issues
+}
+
+func validateSecretsProviderValue(app, path, value string) []fleetcheck.Issue {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	switch deploypolicy.NormalizeSecretsProvider(value) {
+	case deploypolicy.SecretsProviderNone, deploypolicy.SecretsProviderAgent, deploypolicy.SecretsProviderOpenBao:
+		return nil
+	}
+	return []fleetcheck.Issue{{App: app, Path: path, Rule: "invalid_secrets_provider", Message: "invalid_secrets_provider: must be none, agent, or openbao"}}
+}
+
+func validateAppSecrets(app AppSpec, prefix string, doc *HostDocument) []fleetcheck.Issue {
+	var issues []fleetcheck.Issue
+	hasSecrets := len(app.SecretPaths) > 0 || len(app.SecretKeys) > 0 || len(app.SecretFrom) > 0 || strings.TrimSpace(app.SecretFile) != ""
+	provider := deploypolicy.NormalizeSecretsProvider(app.SecretsProvider)
+	if provider == "" && doc != nil {
+		if ts, ok := doc.Tenants[strings.TrimSpace(app.Tenant)]; ok {
+			provider = deploypolicy.NormalizeSecretsProvider(ts.SecretsProvider)
+		}
+		if provider == "" {
+			provider = deploypolicy.NormalizeSecretsProvider(doc.SecretsProvider)
+		}
+	}
+	if provider == "" {
+		provider = deploypolicy.NormalizeSecretsProvider(envcompat.Getenv("TIDE_SECRETS_PROVIDER"))
+	}
+	if provider == "" {
+		provider = deploypolicy.SecretsProviderNone
+	}
+	if provider == deploypolicy.SecretsProviderAgent && hasSecrets {
+		issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".secret_paths", Rule: "secrets_agent_provider_conflict", Message: "secrets_agent_provider_conflict: agent and openbao providers cannot be combined on one app"})
+	}
+	if provider == deploypolicy.SecretsProviderNone && hasSecrets {
+		issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".secret_paths", Rule: "secrets_provider_required", Message: "secrets_provider_required: secret_paths/secret_keys/secret_from/secret_file require secrets_provider: openbao"})
+	}
+	if provider != deploypolicy.SecretsProviderOpenBao {
+		return issues
+	}
+	if hasSecrets && len(app.SecretPaths) == 0 && len(app.SecretFrom) == 0 {
+		issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".secret_paths", Rule: "secret_paths_required", Message: "secret_paths_required: secrets_provider openbao needs at least one secret_paths or secret_from entry"})
+	}
+	for i, path := range app.SecretPaths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		field := fmt.Sprintf("%s.secret_paths[%d]", prefix, i)
+		if strings.HasPrefix(path, "/") || strings.Contains(path, "..") {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: field, Rule: "invalid_secret_path", Message: "invalid_secret_path: path must be relative to the mount without .."})
+		}
+	}
+	issues = append(issues, validateSecretKeys(app, prefix)...)
+	for key, from := range app.SecretFrom {
+		key = strings.TrimSpace(key)
+		field := prefix + ".secret_from." + key
+		if !requiredEnvNameRe.MatchString(key) {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: field, Rule: "invalid_secret_key", Message: "invalid_secret_key: name must match ^[A-Z_][A-Z0-9_]*$"})
+		}
+		if strings.TrimSpace(from.Path) == "" || strings.HasPrefix(strings.TrimSpace(from.Path), "/") || strings.Contains(from.Path, "..") {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: field, Rule: "invalid_secret_path", Message: "invalid_secret_path: secret_from path must be relative to the mount without .."})
+		}
+		if strings.TrimSpace(from.Key) == "" {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: field, Rule: "invalid_secret_from", Message: "invalid_secret_from: key is required"})
+		}
+	}
+	if file := strings.TrimSpace(app.SecretFile); file != "" {
+		if !strings.HasPrefix(file, "/") || strings.Contains(file, "..") {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".secret_file", Rule: "invalid_secret_file", Message: "invalid_secret_file: path must be absolute without .."})
+		}
+	}
+	return issues
+}
+
+func validateSecretKeys(app AppSpec, prefix string) []fleetcheck.Issue {
+	var issues []fleetcheck.Issue
+	varSet := map[string]struct{}{}
+	for k := range app.Vars {
+		varSet[k] = struct{}{}
+	}
+	for _, k := range app.PublicVars {
+		varSet[strings.TrimSpace(k)] = struct{}{}
+	}
+	for i, key := range app.SecretKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		field := fmt.Sprintf("%s.secret_keys[%d]", prefix, i)
+		if !requiredEnvNameRe.MatchString(key) {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: field, Rule: "invalid_secret_key", Message: "invalid_secret_key: name must match ^[A-Z_][A-Z0-9_]*$"})
+		}
+		if _, ok := varSet[key]; ok {
+			issues = append(issues, fleetcheck.Issue{App: app.Name, Path: field, Rule: "secret_key_conflicts_vars", Message: "secret_key_conflicts_vars: key also present in vars/public_vars: " + key})
+		}
 	}
 	return issues
 }

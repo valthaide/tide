@@ -360,6 +360,48 @@ var (
 		Name:      "sync_backoff_seconds",
 		Help:      "Current pause between sync retries for an app repeating the same error.",
 	}, []string{"app"})
+
+	secretsProviderUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "secrets_provider_up",
+		Help:      "1 when the secrets provider is authenticated and reachable.",
+	}, []string{"provider"})
+
+	secretsLoginTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "secrets_login_total",
+		Help:      "Secrets provider login attempts by result.",
+	}, []string{"result"})
+
+	secretsTokenTTL = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "secrets_token_ttl_seconds",
+		Help:      "Lease duration of the current secrets provider token.",
+	})
+
+	secretsFetchTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "secrets_fetch_total",
+		Help:      "Secrets fetches by app and result (ok, stale, error, path_missing).",
+	}, []string{"app", "result"})
+
+	secretsLastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "secrets_last_success_timestamp_seconds",
+		Help:      "Unix time of the last successful secrets render for an app.",
+	}, []string{"app"})
+
+	secretsStale = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "secrets_stale",
+		Help:      "1 while an app deploys from the cached secrets set.",
+	}, []string{"app"})
+
+	secretsVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "secrets_version",
+		Help:      "Current KV v2 version number of a secrets path (no values).",
+	}, []string{"app", "path"})
 )
 
 // ImageSample is one running service image reported by the reconciler.
@@ -618,6 +660,13 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		appReconcileOverdue,
 		appReconcileAttempt,
 		syncBackoff,
+		secretsProviderUp,
+		secretsLoginTotal,
+		secretsTokenTTL,
+		secretsFetchTotal,
+		secretsLastSuccess,
+		secretsStale,
+		secretsVersion,
 		newAppsCollector(lister),
 	}
 	for _, c := range collectors {
@@ -1113,6 +1162,10 @@ func ForgetApp(name, id, repo string, repoStillUsed bool) {
 			envHashApplied.DeletePartialMatch(labels)
 			RepoMigrationsTotal.DeletePartialMatch(labels)
 			syncBackoff.DeletePartialMatch(labels)
+			secretsFetchTotal.DeletePartialMatch(labels)
+			secretsLastSuccess.DeletePartialMatch(labels)
+			secretsStale.DeletePartialMatch(labels)
+			secretsVersion.DeletePartialMatch(labels)
 			GitAuthFailuresTotal.DeletePartialMatch(prometheus.Labels{"name": name})
 		}
 	}
@@ -1188,6 +1241,81 @@ func SetSyncBackoff(app string, seconds float64) {
 		seconds = 0
 	}
 	syncBackoff.WithLabelValues(app).Set(seconds)
+}
+
+// SetSecretsProviderUp sets tide_secrets_provider_up{provider}.
+func SetSecretsProviderUp(provider string, up bool) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = "openbao"
+	}
+	v := 0.0
+	if up {
+		v = 1
+	}
+	secretsProviderUp.WithLabelValues(provider).Set(v)
+}
+
+// ObserveSecretsLogin counts one provider login attempt.
+func ObserveSecretsLogin(result string) {
+	if result != "success" {
+		result = "error"
+	}
+	secretsLoginTotal.WithLabelValues(result).Inc()
+}
+
+// SetSecretsTokenTTL sets tide_secrets_token_ttl_seconds.
+func SetSecretsTokenTTL(seconds float64) {
+	if seconds < 0 {
+		seconds = 0
+	}
+	secretsTokenTTL.Set(seconds)
+}
+
+// ObserveSecretsFetch counts one secrets fetch/render for an app.
+func ObserveSecretsFetch(app, result string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	switch result {
+	case "ok", "stale", "path_missing":
+	default:
+		result = "error"
+	}
+	secretsFetchTotal.WithLabelValues(app, result).Inc()
+}
+
+// SetSecretsLastSuccess sets tide_secrets_last_success_timestamp_seconds{app}.
+func SetSecretsLastSuccess(app string, at time.Time) {
+	app = strings.TrimSpace(app)
+	if app == "" || at.IsZero() {
+		return
+	}
+	secretsLastSuccess.WithLabelValues(app).Set(float64(at.Unix()))
+}
+
+// SetSecretsStale sets tide_secrets_stale{app}.
+func SetSecretsStale(app string, stale bool) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		return
+	}
+	v := 0.0
+	if stale {
+		v = 1
+	}
+	secretsStale.WithLabelValues(app).Set(v)
+}
+
+// SetSecretsVersion sets tide_secrets_version{app,path}.
+func SetSecretsVersion(app, path string, version int) {
+	app = strings.TrimSpace(app)
+	path = strings.TrimSpace(path)
+	if app == "" || path == "" || version < 1 {
+		return
+	}
+	secretsVersion.WithLabelValues(app, path).Set(float64(version))
 }
 
 func repoLabel(raw string) string {

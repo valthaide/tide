@@ -68,7 +68,7 @@ func UnknownFields(data []byte) ([]string, error) {
 			"reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources",
 			"strict_pipeline_gate", "shared_required_jobs", "trusted_web_pipelines", "tenants",
 			"create_volumes", "volume_name_pattern",
-			"env_files", "required_env", "env_debounce", "env_debounce_max":
+			"env_files", "required_env", "env_debounce", "env_debounce_max", "secrets_provider":
 		case "apps":
 			unknown = append(unknown, unknownAppFields(val)...)
 		default:
@@ -94,6 +94,7 @@ func unknownAppFields(seq *yaml.Node) []string {
 		"policy_exceptions": {},
 		"reconcile_interval": {}, "retry_rejected": {}, "priority": {},
 		"critical": {}, "failure_policy": {}, "depends_on": {}, "cpu_limit": {}, "memory_limit": {},
+		"secrets_provider": {}, "secret_paths": {}, "secret_keys": {}, "secret_from": {}, "secret_file": {},
 	}
 	var out []string
 	for i, app := range seq.Content {

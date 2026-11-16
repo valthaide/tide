@@ -793,6 +793,20 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 		tenantMem = strings.TrimSpace(tenantSpec.MemoryLimit)
 		tenantGrace = strings.TrimSpace(tenantSpec.CriticalGrace)
 	}
+	secretsProvider := deploypolicy.NormalizeSecretsProvider(spec.SecretsProvider)
+	if secretsProvider == "" && hasTenant {
+		secretsProvider = deploypolicy.NormalizeSecretsProvider(tenantSpec.SecretsProvider)
+	}
+	if secretsProvider == "" && doc != nil {
+		secretsProvider = deploypolicy.NormalizeSecretsProvider(doc.SecretsProvider)
+	}
+	secretFrom := map[string]deploypolicy.SecretFrom{}
+	for key, from := range spec.SecretFrom {
+		secretFrom[strings.TrimSpace(key)] = deploypolicy.SecretFrom{
+			Path: strings.TrimSpace(from.Path),
+			Key:  strings.TrimSpace(from.Key),
+		}
+	}
 	p := deploypolicy.Policy{
 		Tenant:                 spec.Tenant,
 		RequirePipelineSuccess: spec.RequirePipelineSuccess,
@@ -831,6 +845,15 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 		TenantCPULimit:         tenantCPU,
 		TenantMemoryLimit:      tenantMem,
 		TenantCriticalGrace:    tenantGrace,
+		SecretsProvider:        secretsProvider,
+		SecretPaths:            append([]string(nil), spec.SecretPaths...),
+		SecretKeys:             append([]string(nil), spec.SecretKeys...),
+		SecretFrom:             secretFrom,
+		SecretFile:             strings.TrimSpace(spec.SecretFile),
+	}
+	if p.EffectiveSecretsProvider() == deploypolicy.SecretsProviderOpenBao {
+		p.RequiredEnv = mergeStringLists(p.RequiredEnv, p.SecretKeys)
+		p.EnvFiles = mergeStringLists(p.EnvFiles, []string{p.EffectiveSecretFile(spec.Name)})
 	}
 	for _, ex := range spec.PolicyExceptions {
 		p.PolicyExceptions = append(p.PolicyExceptions, deploypolicy.PolicyException{

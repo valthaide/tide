@@ -116,16 +116,6 @@ func (e *ComposeExecutor) PrepareRepoMigration(ctx context.Context, p MigrationP
 	_ = fsperm.RelaxCheckoutTree(stagingRepoDir)
 
 	envVars := p.EnvVars
-	if e.Secrets != nil {
-		resolved, resErr := e.Secrets.ResolveEnvs(ctx, envVars)
-		if resErr != nil {
-			return out, syncerr.Wrap(syncerr.CodeSecretsVault, syncerr.StageSecrets, resErr)
-		}
-		envVars = resolved
-		if prepErr := e.Secrets.PrepareRepo(ctx, stagingRepoDir); prepErr != nil {
-			return out, syncerr.Wrap(syncerr.CodeSecretsSOPS, syncerr.StageSecrets, prepErr)
-		}
-	}
 
 	composeRel := strings.TrimSpace(p.NewComposePath)
 	template := strings.TrimSpace(p.NewTemplate)

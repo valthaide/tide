@@ -1,7 +1,7 @@
 # Example Prometheus alert rules for Tide v2.5+.
 # TideFleetStale fires only when the host fleet reconcile is not succeeding at all.
 # Per-app failures use tenant+app labels; TideTenantHeld covers hold policy / manual hold.
-# Env/OpenBao alerts: TideEnvKeyMissing, TideEnvDriftStuck; provider alerts are stubs until v2.6.
+# Env/OpenBao alerts: TideEnvKeyMissing, TideEnvDriftStuck, TideSecretsStale, TideSecretsLoginFailing.
 groups:
   - name: tide
     rules:
