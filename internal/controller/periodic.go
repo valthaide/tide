@@ -491,6 +491,13 @@ func (r *Reconciler) desiredSettled(app *App) bool {
 	if r.templateDriftReason(app) != "" {
 		return false
 	}
+	// External env_files content change also keeps an unchanged git commit;
+	// settle only after the unified env hash has been applied. Compare hashes
+	// directly (no debounce) so a ready env_file_changed queue item is not
+	// dropped when the debounce window was already cleared.
+	if r.envHashNeedsApply(app) {
+		return false
+	}
 	seen := strings.TrimSpace(app.LastSeenCommit)
 	synced := strings.TrimSpace(app.LastSyncedCommit)
 	if seen != "" && seen != synced {

@@ -8,52 +8,81 @@ import (
 	"github.com/valthaide/tide/internal/syncerr"
 )
 
-func TestExternalEnvHash(t *testing.T) {
-	repo := t.TempDir()
-	envDir := t.TempDir()
-	envPath := filepath.Join(envDir, "app.env")
-	if err := os.WriteFile(envPath, []byte("FOO=bar\n"), 0600); err != nil {
+func TestHashEnvFilePathsOrderAndDedup(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.env")
+	b := filepath.Join(dir, "b.env")
+	if err := os.WriteFile(a, []byte("A=1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	compose := "services:\n  web:\n    image: nginx\n    env_file:\n      - " + envPath + "\n"
-	if err := os.WriteFile(filepath.Join(repo, "compose.yaml"), []byte(compose), 0600); err != nil {
+	if err := os.WriteFile(b, []byte("B=2\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	h1, err := ExternalEnvHash(repo, "compose.yaml")
+	h1, err := HashEnvFilePaths([]string{b, a, a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h1 == "" {
-		t.Fatal("expected non-empty hash")
-	}
-	h2, err := ExternalEnvHash(repo, "compose.yaml")
-	if err != nil || h2 != h1 {
-		t.Fatalf("hash unstable: %v %q %q", err, h1, h2)
-	}
-	if err := os.WriteFile(envPath, []byte("FOO=baz\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	h3, err := ExternalEnvHash(repo, "compose.yaml")
+	h2, err := HashEnvFilePaths([]string{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h3 == h1 {
-		t.Fatal("expected hash to change when env file changes")
+	if h1 != h2 || h1 == "" {
+		t.Fatalf("expected stable deduped hash, got %q vs %q", h1, h2)
 	}
 }
 
-func TestExternalEnvHashMissing(t *testing.T) {
-	repo := t.TempDir()
-	compose := "services:\n  web:\n    image: nginx\n    env_file:\n      - /nonexistent/tide-env-test.env\n"
-	if err := os.WriteFile(filepath.Join(repo, "compose.yaml"), []byte(compose), 0600); err != nil {
+func TestHashEnvFilePathsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "empty.env")
+	if err := os.WriteFile(p, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ExternalEnvHash(repo, "compose.yaml")
+	_, err := HashEnvFilePaths([]string{p})
 	if err == nil {
-		t.Fatal("expected missing env_file error")
+		t.Fatal("expected empty file error")
 	}
-	se, ok := err.(*syncerr.Error)
-	if !ok || se.Code != syncerr.CodeEnvFileMissing {
-		t.Fatalf("expected env_file_missing, got %#v", err)
+	se := syncerr.Classify(err)
+	if se.Code != syncerr.CodeEnvFileEmpty {
+		t.Fatalf("code=%s want env_file_empty", se.Code)
+	}
+}
+
+func TestHashEnvFilePathsMissing(t *testing.T) {
+	_, err := HashEnvFilePaths([]string{filepath.Join(t.TempDir(), "missing.env")})
+	if err == nil {
+		t.Fatal("expected missing")
+	}
+	se := syncerr.Classify(err)
+	if se.Code != syncerr.CodeEnvFileMissing {
+		t.Fatalf("code=%s", se.Code)
+	}
+}
+
+func TestExternalEnvHashFilesCombined(t *testing.T) {
+	dir := t.TempDir()
+	env := filepath.Join(dir, "secrets.env")
+	appDir := filepath.Join(dir, "app")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env, []byte("K=v\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	composePath := filepath.Join(appDir, "compose.yaml")
+	// Relative env_file outside projectDir is treated as external.
+	content := "services:\n  api:\n    image: x\n    env_file:\n      - ../secrets.env\n"
+	if err := os.WriteFile(composePath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := ExternalEnvHashFiles(appDir, []string{composePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, err := HashEnvFilePaths([]string{env})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash != direct {
+		t.Fatalf("compose hash %q != path hash %q", hash, direct)
 	}
 }

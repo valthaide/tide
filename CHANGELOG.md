@@ -90,6 +90,14 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.5.0 (2026-11-16)
+- **Unified `env_files` hash**: compose absolute `env_file` paths and fleet `env_files` share one `envHash` (`path=sha256(content)\n`). Drift detection, post-health apply recording, force sync, and repo migration all use the same function — fixes the redeploy loop when fleet-only env files changed while only the compose hash was stored.
+- **Adopt without redeploy**: empty `LastAppliedEnvHash`, or path-only additions (new `env_files` on an already-running app), record the hash with `env_hash_adopted` / `tide_env_hash_adopted_total` and leave containers alone. Store keeps `last_applied_env_paths` next to the hash.
+- **Debounce**: `env_debounce` (default 30s) / `env_debounce_max` (default 5m) on host, tenant, app, or `TIDE_ENV_DEBOUNCE` / `TIDE_ENV_DEBOUNCE_MAX`. Content must stay stable for the window (or hit max wait) before `env_file_changed` redeploys with `--force-recreate`.
+- **`required_env`**: keys must be present and non-empty in env files before pull/`compose up` (`env_key_missing`). Fleet `vars` do not satisfy the check. `__INVALID__` counts as empty. Empty env files fail as `env_file_empty`.
+- **Observability**: `tidectl env status <app>`; metrics `tide_env_key_missing`, `tide_env_file_insecure`, `tide_env_debounce_pending`; example alerts `TideEnvKeyMissing`, `TideEnvDriftStuck` (provider alerts stubbed for v2.6).
+- **OpenBao direct provider**: deferred to **v2.6.0**. Agent-written `secrets.env` + §1/§2 is the supported path in v2.5.0 (`secrets_provider` remains unset/`none`).
+
 ### v2.4.1 (2026-11-12)
 - **Hold does not block failed/pending reconcile**: while a tenant is held, healthy apps skip new applies, but failed and pending apps keep syncing each cycle when their spec changes or an image appears.
 - **Auto-hold clears itself**: when every holding app reaches `synced`, Tide drops the auto hold in the same cycle and requeues deferred sibling updates. `tidectl release` is only required for manual holds.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -331,13 +332,30 @@ func (r *Reconciler) MigrateRepo(
 		logFailed("credentials_error", se)
 		return plan, se
 	}
-	fileVars, missing := readEnvFiles(policy.EnvFiles)
+	migPaths := append([]string(nil), policy.EnvFiles...)
+	fileVars, missing := readEnvFiles(migPaths)
 	if missing != "" {
-		se := syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageValidate, "env_file_missing: "+missing)
+		code := syncerr.CodeEnvFileMissing
+		reason := "env_file_missing"
+		msg := "env_file_missing: " + missing
+		if info, err := os.Stat(missing); err == nil && info.Size() == 0 {
+			code = syncerr.CodeEnvFileEmpty
+			reason = "env_file_empty"
+			msg = "env_file_empty: " + missing
+		}
+		se := syncerr.New(code, syncerr.StageValidate, msg)
 		plan.Mode = compose.MigrationModeFailed
-		plan.Reason = "env_file_missing"
-		recordOutcome("preflight_failed_env_file", compose.MigrationModeFailed, "env_file_missing", ciRes, se)
-		logFailed("env_file_missing", se)
+		plan.Reason = reason
+		recordOutcome("preflight_failed_env_file", compose.MigrationModeFailed, reason, ciRes, se)
+		logFailed(reason, se)
+		return plan, se
+	}
+	if err := checkRequiredEnv(policy.RequiredEnv, fileVars); err != nil {
+		se := syncerr.Classify(err)
+		plan.Mode = compose.MigrationModeFailed
+		plan.Reason = syncerr.CodeEnvKeyMissing
+		recordOutcome("preflight_failed_required_env", compose.MigrationModeFailed, syncerr.CodeEnvKeyMissing, ciRes, se)
+		logFailed(syncerr.CodeEnvKeyMissing, se)
 		return plan, se
 	}
 

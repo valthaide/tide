@@ -85,6 +85,9 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_applied_env_hash TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_applied_env_paths TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if _, err := s.pool.Exec(ctx, `ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_applied_watch_hash TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -306,6 +309,7 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		COALESCE(suspended, FALSE),
 		COALESCE(operator_suspended, FALSE),
 		COALESCE(last_applied_env_hash, ''),
+		COALESCE(last_applied_env_paths, ''),
 		COALESCE(last_applied_watch_hash, ''),
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
@@ -349,6 +353,7 @@ func (s *PostgresStore) GetApp(ctx context.Context, id string) (*api.App, error)
 		&fleetSuspended,
 		&operatorSuspended,
 		&app.LastAppliedEnvHash,
+		&app.LastAppliedEnvPaths,
 		&app.LastAppliedWatchHash,
 		&app.DeployPolicyJSON,
 		&app.LastHealthyCommit,
@@ -397,6 +402,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(suspended, FALSE),
 		COALESCE(operator_suspended, FALSE),
 		COALESCE(last_applied_env_hash, ''),
+		COALESCE(last_applied_env_paths, ''),
 		COALESCE(last_applied_watch_hash, ''),
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
@@ -445,6 +451,7 @@ func (s *PostgresStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&fleetSuspended,
 			&operatorSuspended,
 			&app.LastAppliedEnvHash,
+			&app.LastAppliedEnvPaths,
 			&app.LastAppliedWatchHash,
 			&app.DeployPolicyJSON,
 			&app.LastHealthyCommit,
@@ -595,8 +602,8 @@ func (s *PostgresStore) ClearAppRepoSecret(ctx context.Context, appID string) er
 	return err
 }
 
-func (s *PostgresStore) UpdateAppEnvHash(ctx context.Context, id, envHash string) error {
-	ct, err := s.pool.Exec(ctx, `UPDATE apps SET last_applied_env_hash = $1 WHERE id = $2`, envHash, id)
+func (s *PostgresStore) UpdateAppEnvHash(ctx context.Context, id, envHash, envPaths string) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE apps SET last_applied_env_hash = $1, last_applied_env_paths = $2 WHERE id = $3`, envHash, envPaths, id)
 	if err != nil {
 		return err
 	}

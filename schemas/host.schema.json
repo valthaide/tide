@@ -45,6 +45,14 @@
           "description": "Path to the SSH deploy key for repo_auth_method deploy_key.",
           "type": "string"
         },
+        "env_debounce": {
+          "description": "How long env hash must stay stable before redeploy, e.g. 30s.",
+          "type": "string"
+        },
+        "env_debounce_max": {
+          "description": "Max wait for a stable env hash, e.g. 5m.",
+          "type": "string"
+        },
         "env_files": {
           "description": "External env files on the host whose changes trigger reconciliation.",
           "items": {
@@ -142,6 +150,13 @@
         "require_pipeline_success": {
           "description": "Require a green CI pipeline for the deployed commit.",
           "type": "boolean"
+        },
+        "required_env": {
+          "description": "Keys that must be present and non-empty in env files before deploy.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "required_jobs": {
           "description": "CI jobs that must succeed for this app.",
@@ -242,6 +257,21 @@
           "description": "Grace period before stop policy halts sibling apps, e.g. 5m.",
           "type": "string"
         },
+        "env_debounce": {
+          "description": "Tenant default env debounce window.",
+          "type": "string"
+        },
+        "env_debounce_max": {
+          "description": "Tenant default max env debounce wait.",
+          "type": "string"
+        },
+        "env_files": {
+          "description": "Tenant-level external env files merged into apps.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "failure_policy": {
           "description": "When an app fails reconcile: isolate (default), hold (freeze tenant updates), or stop (stop siblings after critical grace).",
           "type": "string"
@@ -249,6 +279,13 @@
         "memory_limit": {
           "description": "Declared memory budget for the tenant (e.g. 4g). Used to refuse new applies that would exceed the sum of app limits.",
           "type": "string"
+        },
+        "required_env": {
+          "description": "Tenant-level required env keys merged into apps.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "required_jobs": {
           "description": "CI jobs that must succeed for apps of this tenant.",
@@ -333,7 +370,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/valthaide/tide/releases/download/v2.4.0/host.schema.json",
+  "$id": "https://github.com/valthaide/tide/releases/download/v2.5.0/host.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Applications that should run on one host, declared in hosts/<fqdn>.yaml of a fleet repository. Generated from the Tide fleet parser structs; do not edit by hand.",
@@ -364,6 +401,21 @@
       "description": "Allow Tide to create missing external Docker volumes.",
       "type": "boolean"
     },
+    "env_debounce": {
+      "description": "Host default: how long env hash must stay stable before redeploy, e.g. 30s.",
+      "type": "string"
+    },
+    "env_debounce_max": {
+      "description": "Host default: max wait for a stable env hash, e.g. 5m.",
+      "type": "string"
+    },
+    "env_files": {
+      "description": "Host-level external env files inherited by apps.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "host": {
       "description": "Hostname (FQDN) this file describes. Defaults to the controller host when empty.",
       "type": "string"
@@ -392,6 +444,13 @@
     },
     "require_pipeline_sources": {
       "description": "Pipeline sources that gate deployments, inherited by apps.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "required_env": {
+      "description": "Host-level required env keys inherited by apps.",
       "items": {
         "type": "string"
       },
@@ -447,6 +506,6 @@
   "x-tide": {
     "fleet_format_version": 1,
     "latest_schema": "https://github.com/valthaide/tide/releases/latest/download/host.schema.json",
-    "tide_version": "v2.4.0"
+    "tide_version": "v2.5.0"
   }
 }

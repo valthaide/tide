@@ -440,9 +440,9 @@ func (r *Registry) UpdateRepoSecret(id, secret string) error {
 	return r.store.UpsertAppCredential(context.Background(), cred)
 }
 
-// UpdateEnvHash stores the last successfully applied external env_file content hash.
-func (r *Registry) UpdateEnvHash(id, hash string) error {
-	return r.store.UpdateAppEnvHash(context.Background(), id, hash)
+// UpdateEnvHash stores the last successfully applied external env_file content hash and paths.
+func (r *Registry) UpdateEnvHash(id, hash, paths string) error {
+	return r.store.UpdateAppEnvHash(context.Background(), id, hash, paths)
 }
 
 // UpdateWatchHash stores the last applied watch_files content hash.

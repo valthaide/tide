@@ -1,5 +1,5 @@
-# yaml-language-server: $schema=https://github.com/valthaide/tide/releases/download/v2.4.0/host.schema.json
-$schema: https://github.com/valthaide/tide/releases/download/v2.4.0/host.schema.json
+# yaml-language-server: $schema=https://github.com/valthaide/tide/releases/download/v2.5.0/host.schema.json
+$schema: https://github.com/valthaide/tide/releases/download/v2.5.0/host.schema.json
 schema: 1
 host: example.internal
 tenants:

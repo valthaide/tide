@@ -17,6 +17,8 @@ const (
 	CodeCredentials        = "credentials"
 	CodeTimeout            = "timeout"
 	CodeEnvFileMissing     = "env_file_missing"
+	CodeEnvFileEmpty       = "env_file_empty"
+	CodeEnvKeyMissing      = "env_key_missing"
 	CodeBlockedByCI        = "blocked_by_ci"
 	CodeDirtyWorktree      = "dirty_worktree"
 	CodeUnhealthy          = "unhealthy"

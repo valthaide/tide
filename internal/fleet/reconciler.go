@@ -813,7 +813,10 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 		RequireDigest:          effectiveBool(spec.RequireDigest, hostDigest),
 		PublicVars:             spec.PublicVars,
 		AllowedRegistries:      regs,
-		EnvFiles:               spec.EnvFiles,
+		EnvFiles:               mergeStringLists(hostEnvFiles(doc), tenantEnvFiles(hasTenant, tenantSpec), spec.EnvFiles),
+		RequiredEnv:            mergeStringLists(hostRequiredEnv(doc), tenantRequiredEnv(hasTenant, tenantSpec), spec.RequiredEnv),
+		EnvDebounce:            inherited(spec.EnvDebounce, inherited(tenantEnvDebounce(hasTenant, tenantSpec), hostEnvDebounce(doc))),
+		EnvDebounceMax:         inherited(spec.EnvDebounceMax, inherited(tenantEnvDebounceMax(hasTenant, tenantSpec), hostEnvDebounceMax(doc))),
 		CreateVolumes:          doc != nil && doc.CreateVolumes,
 		VolumeNamePattern:      hostVolumePattern(doc),
 		ReconcileInterval:      inherited(spec.ReconcileInterval, hostInterval(doc)),
@@ -856,6 +859,81 @@ func effectiveBool(app, host *bool) bool {
 		return *host
 	}
 	return false
+}
+
+func mergeStringLists(parts ...[]string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, part := range parts {
+		for _, item := range part {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func hostEnvFiles(doc *HostDocument) []string {
+	if doc == nil {
+		return nil
+	}
+	return doc.EnvFiles
+}
+
+func hostRequiredEnv(doc *HostDocument) []string {
+	if doc == nil {
+		return nil
+	}
+	return doc.RequiredEnv
+}
+
+func hostEnvDebounce(doc *HostDocument) string {
+	if doc == nil {
+		return ""
+	}
+	return doc.EnvDebounce
+}
+
+func hostEnvDebounceMax(doc *HostDocument) string {
+	if doc == nil {
+		return ""
+	}
+	return doc.EnvDebounceMax
+}
+
+func tenantEnvFiles(ok bool, t TenantSpec) []string {
+	if !ok {
+		return nil
+	}
+	return t.EnvFiles
+}
+
+func tenantRequiredEnv(ok bool, t TenantSpec) []string {
+	if !ok {
+		return nil
+	}
+	return t.RequiredEnv
+}
+
+func tenantEnvDebounce(ok bool, t TenantSpec) string {
+	if !ok {
+		return ""
+	}
+	return t.EnvDebounce
+}
+
+func tenantEnvDebounceMax(ok bool, t TenantSpec) string {
+	if !ok {
+		return ""
+	}
+	return t.EnvDebounceMax
 }
 
 func (r *Reconciler) resolveAppSecret(spec AppSpec, method string) (string, error) {

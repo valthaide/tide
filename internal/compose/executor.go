@@ -419,6 +419,15 @@ func (e *ComposeExecutor) ApplyImages(
 	if !prep.noBuild {
 		upArgs = append(upArgs, "--build")
 	}
+	if opts.ForceRecreate {
+		upArgs = append(upArgs, "--force-recreate")
+		for _, svc := range opts.ForceRecreateServices {
+			svc = strings.TrimSpace(svc)
+			if svc != "" {
+				upArgs = append(upArgs, svc)
+			}
+		}
+	}
 
 	_, err = e.runCommandWithTranscript(
 		upCtx,

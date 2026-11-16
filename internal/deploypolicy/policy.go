@@ -71,6 +71,12 @@ type Policy struct {
 	AllowedRegistries []string `json:"allowed_registries,omitempty" yaml:"allowed_registries"`
 	// EnvFiles are host files outside git. Their values interpolate compose and are not logged.
 	EnvFiles []string `json:"env_files,omitempty" yaml:"env_files"`
+	// RequiredEnv lists keys that must be present and non-empty in env files before deploy.
+	RequiredEnv []string `json:"required_env,omitempty" yaml:"required_env"`
+	// EnvDebounce is how long env hash must stay stable before redeploy (default 30s).
+	EnvDebounce string `json:"env_debounce,omitempty" yaml:"env_debounce"`
+	// EnvDebounceMax caps how long to wait for a stable env hash (default 5m).
+	EnvDebounceMax string `json:"env_debounce_max,omitempty" yaml:"env_debounce_max"`
 	// PolicyExceptions name service rules that warn mode may allow.
 	PolicyExceptions []PolicyException `json:"policy_exceptions,omitempty" yaml:"policy_exceptions"`
 	// ReconcileInterval is a Go duration or off. Empty inherits the controller default.
@@ -141,6 +147,10 @@ func (p *Policy) Normalize() {
 	p.Build = NormalizeBuild(p.Build)
 	p.Vars = NormalizeVars(p.Vars)
 	p.Project = strings.TrimSpace(p.Project)
+	p.EnvFiles = normalizeStringList(p.EnvFiles)
+	p.RequiredEnv = normalizeStringList(p.RequiredEnv)
+	p.EnvDebounce = strings.TrimSpace(p.EnvDebounce)
+	p.EnvDebounceMax = strings.TrimSpace(p.EnvDebounceMax)
 	out := p.WatchFiles[:0]
 	for _, w := range p.WatchFiles {
 		w.Path = strings.TrimSpace(w.Path)

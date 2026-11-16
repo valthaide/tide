@@ -84,6 +84,9 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err := addSQLiteColumnIfMissing(db, "apps", "last_applied_env_hash TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	if err := addSQLiteColumnIfMissing(db, "apps", "last_applied_env_paths TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	if err := addSQLiteColumnIfMissing(db, "apps", "last_applied_watch_hash TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
@@ -314,6 +317,7 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 		COALESCE(suspended, 0),
 		COALESCE(operator_suspended, 0),
 		COALESCE(last_applied_env_hash, ''),
+		COALESCE(last_applied_env_paths, ''),
 		COALESCE(last_applied_watch_hash, ''),
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
@@ -357,6 +361,7 @@ func (s *SQLiteStore) GetApp(ctx context.Context, id string) (*api.App, error) {
 			&suspended,
 			&operatorSuspended,
 			&app.LastAppliedEnvHash,
+			&app.LastAppliedEnvPaths,
 			&app.LastAppliedWatchHash,
 			&app.DeployPolicyJSON,
 			&app.LastHealthyCommit,
@@ -406,6 +411,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 		COALESCE(suspended, 0),
 		COALESCE(operator_suspended, 0),
 		COALESCE(last_applied_env_hash, ''),
+		COALESCE(last_applied_env_paths, ''),
 		COALESCE(last_applied_watch_hash, ''),
 		COALESCE(deploy_policy_json, ''),
 		COALESCE(last_healthy_commit, ''),
@@ -454,6 +460,7 @@ func (s *SQLiteStore) ListApps(ctx context.Context) ([]*api.App, error) {
 			&suspended,
 			&operatorSuspended,
 			&app.LastAppliedEnvHash,
+			&app.LastAppliedEnvPaths,
 			&app.LastAppliedWatchHash,
 			&app.DeployPolicyJSON,
 			&app.LastHealthyCommit,
@@ -638,8 +645,8 @@ func (s *SQLiteStore) ClearAppRepoSecret(ctx context.Context, appID string) erro
 	return err
 }
 
-func (s *SQLiteStore) UpdateAppEnvHash(ctx context.Context, id, envHash string) error {
-	result, err := s.execContext(ctx, `UPDATE apps SET last_applied_env_hash = ? WHERE id = ?`, envHash, id)
+func (s *SQLiteStore) UpdateAppEnvHash(ctx context.Context, id, envHash, envPaths string) error {
+	result, err := s.execContext(ctx, `UPDATE apps SET last_applied_env_hash = ?, last_applied_env_paths = ? WHERE id = ?`, envHash, envPaths, id)
 	if err != nil {
 		return err
 	}

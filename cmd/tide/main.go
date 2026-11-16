@@ -286,6 +286,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 					r.Get("/{id}/history", appHandler.ListHistory)
 					r.Get("/{id}/audit", appHandler.ListAppAudit)
 					r.Get("/{id}/containers", appHandler.ListAppContainers)
+					r.Get("/{id}/env", appHandler.GetAppEnvStatus)
 					r.Patch("/{id}", appHandler.UpdateApp)
 					r.Post("/{id}/migrate-repo", appHandler.MigrateAppRepo)
 					r.Post("/{id}/sync", appHandler.ForceSyncApp)

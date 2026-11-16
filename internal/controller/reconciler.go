@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -340,6 +341,7 @@ type Reconciler struct {
 	warnedQueue      map[string]time.Time
 	bypasses         map[string]ciBypassGrant
 	prevTenantHolds  map[string]tenant.HoldState
+	envPending       map[string]*envDebounceState
 }
 
 // NewReconciler creates a new reconciler.
@@ -666,59 +668,63 @@ func (r *Reconciler) runtimeDriftReason(project string, snapshot map[string]comp
 }
 
 func (r *Reconciler) envFileDriftReason(app *App) string {
-	if app == nil || r.Executor == nil {
+	if app == nil {
 		return ""
 	}
-	if _, ok := r.Executor.(EnvFileHasher); !ok {
-		if _, ok := r.Executor.(sourceEnvFileHasher); !ok {
-			return ""
-		}
-	}
-	hash, err := r.externalEnvHash(app)
+	cur, err := r.envHash(app)
 	if err != nil {
 		se := syncerr.Classify(err)
-		if se.Code == syncerr.CodeEnvFileMissing {
+		switch se.Code {
+		case syncerr.CodeEnvFileMissing, syncerr.CodeEnvFileEmpty:
 			_ = r.Registry.UpdateSyncResultErr(app.ID, "error", time.Now(), app.LastSyncedCommit, app.LastSyncedCommitMessage, "", se)
 			metrics.SetEnvDrift(app.Name, true)
 			if r.Logger != nil {
-				r.Logger.Error("env_file missing", "app_id", app.ID, "code", se.Code)
+				r.Logger.Error("env_file invalid", "app_id", app.ID, "code", se.Code)
 			}
 		}
 		return ""
 	}
-	extra, missing := fleetEnvHash(app.Policy().EnvFiles)
-	if missing != "" {
-		se := syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageValidate, "env_file_missing: "+missing)
-		r.declareOnce(app, se)
-		return ""
-	}
-	if extra != "" {
-		if hash == "" {
-			hash = extra
+	for _, p := range cur.Paths {
+		if envFileInsecure(p) {
+			metrics.SetEnvFileInsecure(app.Name, p, true)
+			if r.Logger != nil {
+				r.Logger.Warn("env_file insecure permissions", "app_id", app.ID, "path", p)
+			}
 		} else {
-			hash = hash + "+" + extra
+			metrics.SetEnvFileInsecure(app.Name, p, false)
 		}
 	}
-	if hash == "" {
+	if cur.Hash == "" {
+		r.clearEnvDebounce(app.ID, app.Name)
 		metrics.SetEnvDrift(app.Name, false)
 		return ""
 	}
-	if app.LastAppliedEnvHash == "" {
-		// First observation after upgrade: record without forcing a redeploy.
-		_ = r.Registry.UpdateEnvHash(app.ID, hash)
+	if shouldAdoptEnvHash(app, cur) {
+		_ = r.Registry.UpdateEnvHash(app.ID, cur.Hash, encodeEnvPaths(cur.Paths))
+		app.LastAppliedEnvHash = cur.Hash
+		app.LastAppliedEnvPaths = encodeEnvPaths(cur.Paths)
+		r.clearEnvDebounce(app.ID, app.Name)
 		metrics.SetEnvDrift(app.Name, false)
 		metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())
+		metrics.IncEnvHashAdopted(app.Name)
+		if r.Logger != nil {
+			r.Logger.Info("env_hash_adopted", "app_id", app.ID, "paths", len(cur.Paths))
+		}
 		return ""
 	}
-	if hash != app.LastAppliedEnvHash {
-		metrics.SetEnvDrift(app.Name, true)
-		if r.Logger != nil {
-			r.Logger.Info("env_file changed", "app_id", app.ID)
-		}
-		return "env_file_changed"
+	if cur.Hash == app.LastAppliedEnvHash {
+		r.clearEnvDebounce(app.ID, app.Name)
+		metrics.SetEnvDrift(app.Name, false)
+		return ""
 	}
-	metrics.SetEnvDrift(app.Name, false)
-	return ""
+	metrics.SetEnvDrift(app.Name, true)
+	if !r.envDebounceReady(app, cur.Hash, time.Now()) {
+		return ""
+	}
+	if r.Logger != nil {
+		r.Logger.Info("env_file changed", "app_id", app.ID)
+	}
+	return "env_file_changed"
 }
 
 func (r *Reconciler) requeuePending(app *App, reason string) {
@@ -903,14 +909,36 @@ func (r *Reconciler) syncApp(app *App) error {
 		opts.NoBuild = true
 		opts.BuildMode = deploypolicy.BuildForbidden
 	}
-	fileVars, missing := readEnvFiles(policy.EnvFiles)
-	if missing != "" {
-		se := syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageValidate, "env_file_missing: "+missing)
+	envPaths, pathErr := r.envFilePaths(app)
+	if pathErr != nil {
+		se := syncerr.Classify(pathErr)
 		r.declareOnce(app, se)
 		return nil
 	}
+	fileVars, missing := readEnvFiles(envPaths)
+	if missing != "" {
+		code := syncerr.CodeEnvFileMissing
+		msg := "env_file_missing: " + missing
+		if info, err := os.Stat(missing); err == nil && info.Size() == 0 {
+			code = syncerr.CodeEnvFileEmpty
+			msg = "env_file_empty: " + missing
+		}
+		se := syncerr.New(code, syncerr.StageValidate, msg)
+		r.declareOnce(app, se)
+		return nil
+	}
+	if err := checkRequiredEnv(policy.RequiredEnv, fileVars); err != nil {
+		se := syncerr.Classify(err)
+		metrics.SetEnvKeyMissing(app.Name, policy.RequiredEnv, fileVars)
+		r.declareOnce(app, se)
+		return nil
+	}
+	metrics.ClearEnvKeyMissing(app.Name)
 	fleetVars := opts.Vars
 	opts.Vars = mergeInterpolation(fileVars, fleetVars, app.Name, app.ComposeProject())
+	if cur, err := r.envHash(app); err == nil && cur.Hash != "" && app.LastAppliedEnvHash != "" && cur.Hash != app.LastAppliedEnvHash {
+		opts.ForceRecreate = true
+	}
 
 	progress := newSyncProgressReporter(r.Registry, r.Logger, app.ID, syncProgressFlushInterval)
 	output, err := r.applyRuntime(ctx, app, envVars, repoSecret, target, opts, progress.Update)
@@ -1972,14 +2000,17 @@ func (r *Reconciler) logWatchResult(app, action, path, reloadURL, service string
 }
 
 func (r *Reconciler) recordAppliedEnvHash(app *App) {
-	if app == nil || r.Executor == nil {
+	if app == nil {
 		return
 	}
-	hash, err := r.externalEnvHash(app)
-	if err != nil || hash == "" {
+	cur, err := r.envHash(app)
+	if err != nil || cur.Hash == "" {
 		return
 	}
-	_ = r.Registry.UpdateEnvHash(app.ID, hash)
+	_ = r.Registry.UpdateEnvHash(app.ID, cur.Hash, encodeEnvPaths(cur.Paths))
+	app.LastAppliedEnvHash = cur.Hash
+	app.LastAppliedEnvPaths = encodeEnvPaths(cur.Paths)
+	r.clearEnvDebounce(app.ID, app.Name)
 	metrics.SetEnvDrift(app.Name, false)
 	metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())
 }

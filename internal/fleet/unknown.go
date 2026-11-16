@@ -67,7 +67,8 @@ func UnknownFields(data []byte) ([]string, error) {
 		case "$schema", "host", "build", "require_digest", "allowed_registries", "reconcile_interval",
 			"reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources",
 			"strict_pipeline_gate", "shared_required_jobs", "trusted_web_pipelines", "tenants",
-			"create_volumes", "volume_name_pattern":
+			"create_volumes", "volume_name_pattern",
+			"env_files", "required_env", "env_debounce", "env_debounce_max":
 		case "apps":
 			unknown = append(unknown, unknownAppFields(val)...)
 		default:
@@ -89,7 +90,8 @@ func unknownAppFields(seq *yaml.Node) []string {
 		"trusted_web_pipelines": {}, "watch_files": {}, "build": {}, "vars": {}, "project": {},
 		"sync_timeout": {}, "pull_timeout": {}, "oneshot_timeout": {},
 		"require_digest": {}, "public_vars": {}, "allowed_registries": {},
-		"env_files": {}, "policy_exceptions": {},
+		"env_files": {}, "required_env": {}, "env_debounce": {}, "env_debounce_max": {},
+		"policy_exceptions": {},
 		"reconcile_interval": {}, "retry_rejected": {}, "priority": {},
 		"critical": {}, "failure_policy": {}, "depends_on": {}, "cpu_limit": {}, "memory_limit": {},
 	}

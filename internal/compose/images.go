@@ -68,6 +68,11 @@ type ApplyOptions struct {
 	// FleetCheckoutDir is the fleet checkout root holding templates/.
 	// Empty falls back to the executor's configured checkout.
 	FleetCheckoutDir string
+	// ForceRecreate adds --force-recreate to compose up (env_file content changes).
+	ForceRecreate bool
+	// ForceRecreateServices limits --force-recreate to these services.
+	// Empty with ForceRecreate recreates the whole project.
+	ForceRecreateServices []string
 }
 
 // SlotGate limits how many image pulls run at once.

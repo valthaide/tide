@@ -47,6 +47,8 @@ type App struct {
 	LastSyncErrorStage      string                   `json:"last_sync_error_stage,omitempty"`
 	LastSyncAt              time.Time                `json:"last_sync_at"`
 	LastAppliedEnvHash      string                   `json:"last_applied_env_hash,omitempty"`
+	// LastAppliedEnvPaths is a JSON array of absolute env file paths last adopted/applied.
+	LastAppliedEnvPaths string `json:"last_applied_env_paths,omitempty"`
 	LastAppliedWatchHash    string                   `json:"last_applied_watch_hash,omitempty"`
 	DeployPolicyJSON        string                   `json:"-"`
 	RequirePipelineSuccess  bool                     `json:"require_pipeline_success"`
@@ -241,6 +243,25 @@ type RepoMigrationPlan struct {
 	ImagesVerified    []string `json:"images_verified"`
 	DryRun            bool     `json:"dry_run"`
 	Applied           bool     `json:"applied"`
+}
+
+// EnvFileStatus is one external env file without secret values.
+type EnvFileStatus struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// EnvStatus is the env_files drift snapshot for one app (no values).
+type EnvStatus struct {
+	AppID            string          `json:"app_id"`
+	AppName          string          `json:"app_name"`
+	Files            []EnvFileStatus `json:"files"`
+	CurrentHash      string          `json:"current_hash,omitempty"`
+	AppliedHash      string          `json:"applied_hash,omitempty"`
+	AppliedPaths     []string        `json:"applied_paths,omitempty"`
+	Drift            bool            `json:"drift"`
+	AppliedAtUnix    int64           `json:"applied_at_unix,omitempty"`
 }
 
 // ImageRef is one running compose service image.

@@ -89,6 +89,17 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 	if doc.ReconcileConcurrency < 0 {
 		issues = append(issues, fleetcheck.Issue{Path: "reconcile_concurrency", Rule: "invalid_concurrency", Message: "invalid_concurrency: reconcile_concurrency"})
 	}
+	issues = append(issues, validateEnvFiles("", "env_files", doc.EnvFiles)...)
+	issues = append(issues, validateRequiredEnv("", "required_env", doc.RequiredEnv, nil, nil)...)
+	for field, raw := range map[string]string{"env_debounce": doc.EnvDebounce, "env_debounce_max": doc.EnvDebounceMax} {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if _, issue := fleetcheck.ParseDuration(raw); issue != nil {
+			issue.Path = field
+			issues = append(issues, *issue)
+		}
+	}
 	for tName, tSpec := range doc.Tenants {
 		tPrefix := "tenants." + tName
 		if fp := strings.TrimSpace(tSpec.FailurePolicy); fp != "" {
@@ -101,6 +112,17 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 		if raw := strings.TrimSpace(tSpec.CriticalGrace); raw != "" {
 			if _, issue := fleetcheck.ParseDuration(raw); issue != nil {
 				issue.Path = tPrefix + ".critical_grace"
+				issues = append(issues, *issue)
+			}
+		}
+		issues = append(issues, validateEnvFiles("", tPrefix+".env_files", tSpec.EnvFiles)...)
+		issues = append(issues, validateRequiredEnv("", tPrefix+".required_env", tSpec.RequiredEnv, nil, nil)...)
+		for field, raw := range map[string]string{"env_debounce": tSpec.EnvDebounce, "env_debounce_max": tSpec.EnvDebounceMax} {
+			if strings.TrimSpace(raw) == "" {
+				continue
+			}
+			if _, issue := fleetcheck.ParseDuration(raw); issue != nil {
+				issue.Path = tPrefix + "." + field
 				issues = append(issues, *issue)
 			}
 		}
@@ -175,6 +197,18 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 			}
 			if dep == app.Name {
 				issues = append(issues, fleetcheck.Issue{App: app.Name, Path: prefix + ".depends_on", Rule: "depends_on_self", Message: "depends_on_self: app cannot depend on itself"})
+			}
+		}
+		issues = append(issues, validateEnvFiles(app.Name, prefix+".env_files", app.EnvFiles)...)
+		issues = append(issues, validateRequiredEnv(app.Name, prefix, app.RequiredEnv, app.Vars, app.PublicVars)...)
+		for field, raw := range map[string]string{"env_debounce": app.EnvDebounce, "env_debounce_max": app.EnvDebounceMax} {
+			if strings.TrimSpace(raw) == "" {
+				continue
+			}
+			if _, issue := fleetcheck.ParseDuration(raw); issue != nil {
+				issue.App = app.Name
+				issue.Path = prefix + "." + field
+				issues = append(issues, *issue)
 			}
 		}
 		// Template references must resolve inside the fleet checkout. The
@@ -415,6 +449,65 @@ func sortStrings(values []string) {
 			values[j], values[j-1] = values[j-1], values[j]
 		}
 	}
+}
+
+var requiredEnvNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+func validateEnvFiles(app, pathPrefix string, paths []string) []fleetcheck.Issue {
+	var issues []fleetcheck.Issue
+	for i, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		field := pathPrefix
+		if pathPrefix != "" && !strings.HasSuffix(pathPrefix, "]") {
+			field = fmt.Sprintf("%s[%d]", pathPrefix, i)
+		}
+		if !filepath.IsAbs(p) {
+			issues = append(issues, fleetcheck.Issue{App: app, Path: field, Rule: "invalid_env_file", Message: "invalid_env_file: path must be absolute"})
+			continue
+		}
+		if strings.Contains(p, "..") {
+			issues = append(issues, fleetcheck.Issue{App: app, Path: field, Rule: "invalid_env_file", Message: "invalid_env_file: path must not contain .."})
+		}
+	}
+	return issues
+}
+
+func validateRequiredEnv(app, pathPrefix string, keys []string, vars map[string]string, publicVars []string) []fleetcheck.Issue {
+	var issues []fleetcheck.Issue
+	varSet := map[string]struct{}{}
+	for k := range vars {
+		varSet[k] = struct{}{}
+	}
+	for _, k := range publicVars {
+		varSet[strings.TrimSpace(k)] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	for i, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		field := pathPrefix
+		if strings.Contains(pathPrefix, "apps[") {
+			field = fmt.Sprintf("%s.required_env[%d]", pathPrefix, i)
+		} else if pathPrefix == "required_env" || strings.HasSuffix(pathPrefix, ".required_env") {
+			field = fmt.Sprintf("%s[%d]", pathPrefix, i)
+		}
+		if !requiredEnvNameRe.MatchString(key) {
+			issues = append(issues, fleetcheck.Issue{App: app, Path: field, Rule: "invalid_required_env", Message: "invalid_required_env: name must match ^[A-Z_][A-Z0-9_]*$"})
+		}
+		if _, ok := varSet[key]; ok {
+			issues = append(issues, fleetcheck.Issue{App: app, Path: field, Rule: "required_env_conflicts_vars", Message: "required_env_conflicts_vars: key also present in vars/public_vars: " + key})
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+	}
+	return issues
 }
 
 func dedupeIssues(in []fleetcheck.Issue) []fleetcheck.Issue {

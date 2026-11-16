@@ -1,6 +1,7 @@
-# Example Prometheus alert rules for Tide v2.4+.
+# Example Prometheus alert rules for Tide v2.5+.
 # TideFleetStale fires only when the host fleet reconcile is not succeeding at all.
 # Per-app failures use tenant+app labels; TideTenantHeld covers hold policy / manual hold.
+# Env/OpenBao alerts: TideEnvKeyMissing, TideEnvDriftStuck; provider alerts are stubs until v2.6.
 groups:
   - name: tide
     rules:
@@ -53,3 +54,39 @@ groups:
         annotations:
           summary: "Tide tenant {{ $labels.tenant }} is held ({{ $labels.reason }})"
           description: "Updates are frozen for healthy apps. reason=auto clears when holding apps sync; reason=manual needs tidectl release."
+
+      - alert: TideEnvKeyMissing
+        expr: max by (app) (tide_env_key_missing) == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tide app {{ $labels.app }} is missing required env keys"
+          description: "required_env keys are absent or empty in host env files. Deploy is blocked; running containers are untouched."
+
+      - alert: TideEnvDriftStuck
+        expr: tide_env_drift == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tide app {{ $labels.app }} env drift stuck"
+          description: "External env_files hash differs from last applied for over 15 minutes."
+
+      - alert: TideSecretsStale
+        expr: tide_secrets_stale == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tide app {{ $labels.app }} secrets are stale"
+          description: "OpenBao provider could not refresh secrets; deploy is using cache. Metric appears when the direct provider is enabled (v2.6)."
+
+      - alert: TideSecretsLoginFailing
+        expr: increase(tide_secrets_login_total{result="error"}[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tide OpenBao/Vault login failures"
+          description: "secrets_provider login errors are increasing. Metric appears when the direct provider is enabled (v2.6)."

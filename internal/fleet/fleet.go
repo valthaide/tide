@@ -37,6 +37,10 @@ type HostDocument struct {
 	Tenants                map[string]TenantSpec `yaml:"tenants" desc:"Per-tenant CI gate rules, keyed by tenant name."`
 	CreateVolumes          bool                  `yaml:"create_volumes" desc:"Allow Tide to create missing external Docker volumes."`
 	VolumeNamePattern      string                `yaml:"volume_name_pattern" desc:"Regex external volume names must match when create_volumes is on."`
+	EnvFiles               []string              `yaml:"env_files" desc:"Host-level external env files inherited by apps."`
+	RequiredEnv            []string              `yaml:"required_env" desc:"Host-level required env keys inherited by apps."`
+	EnvDebounce            string                `yaml:"env_debounce" desc:"Host default: how long env hash must stay stable before redeploy, e.g. 30s."`
+	EnvDebounceMax         string                `yaml:"env_debounce_max" desc:"Host default: max wait for a stable env hash, e.g. 5m."`
 	Apps                   []AppSpec             `yaml:"apps" desc:"Applications that should run on this host."`
 }
 
@@ -51,6 +55,10 @@ type TenantSpec struct {
 	CriticalGrace string `yaml:"critical_grace" desc:"Grace period before stop policy halts sibling apps, e.g. 5m."`
 	CPULimit      string `yaml:"cpu_limit" desc:"Declared CPU budget for the tenant (e.g. 2.0). Used to refuse new applies that would exceed the sum of app limits."`
 	MemoryLimit   string `yaml:"memory_limit" desc:"Declared memory budget for the tenant (e.g. 4g). Used to refuse new applies that would exceed the sum of app limits."`
+	EnvFiles      []string `yaml:"env_files" desc:"Tenant-level external env files merged into apps."`
+	RequiredEnv   []string `yaml:"required_env" desc:"Tenant-level required env keys merged into apps."`
+	EnvDebounce   string   `yaml:"env_debounce" desc:"Tenant default env debounce window."`
+	EnvDebounceMax string  `yaml:"env_debounce_max" desc:"Tenant default max env debounce wait."`
 }
 
 // TrustedWebSpec configures optional acceptance of manual (`web`) GitLab pipelines.
@@ -98,6 +106,9 @@ type AppSpec struct {
 	PublicVars             []string          `yaml:"public_vars" desc:"Vars safe to show in status output."`
 	AllowedRegistries      []string          `yaml:"allowed_registries" desc:"Registry allowlist for this app."`
 	EnvFiles               []string          `yaml:"env_files" desc:"External env files on the host whose changes trigger reconciliation."`
+	RequiredEnv            []string          `yaml:"required_env" desc:"Keys that must be present and non-empty in env files before deploy."`
+	EnvDebounce            string            `yaml:"env_debounce" desc:"How long env hash must stay stable before redeploy, e.g. 30s."`
+	EnvDebounceMax         string            `yaml:"env_debounce_max" desc:"Max wait for a stable env hash, e.g. 5m."`
 	PolicyExceptions       []PolicyException `yaml:"policy_exceptions" desc:"Per-service compose policy exceptions."`
 	ReconcileInterval      string            `yaml:"reconcile_interval" desc:"Reconcile interval for this app, e.g. 5m."`
 	RetryRejected          string            `yaml:"retry_rejected" desc:"Retry policy for rejected commits of this app."`

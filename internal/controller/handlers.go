@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -387,6 +389,67 @@ func (h *Handler) ImageGC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(api.APIResponse{Data: images})
+}
+
+// GetAppEnvStatus handles GET /api/v1/apps/{id}/env.
+func (h *Handler) GetAppEnvStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	seen := map[string]struct{}{}
+	var paths []string
+	add := func(p string) {
+		p = filepath.Clean(strings.TrimSpace(p))
+		if p == "" || !filepath.IsAbs(p) {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		paths = append(paths, p)
+	}
+	if lister, ok := h.Applier.(sourceEnvPathLister); ok {
+		if p, err := lister.ExternalEnvPathsForSource(app.ID, app.ComposePath, app.Template, app.AppDir); err == nil {
+			for _, x := range p {
+				add(x)
+			}
+		}
+	} else if lister, ok := h.Applier.(envPathLister); ok {
+		if p, err := lister.ExternalEnvPathsForApp(app.ID, app.ComposePath); err == nil {
+			for _, x := range p {
+				add(x)
+			}
+		}
+	}
+	for _, p := range app.Policy().EnvFiles {
+		add(p)
+	}
+	sort.Strings(paths)
+	status := api.EnvStatus{
+		AppID:        app.ID,
+		AppName:      app.Name,
+		AppliedHash:  app.LastAppliedEnvHash,
+		AppliedPaths: decodeEnvPaths(app.LastAppliedEnvPaths),
+	}
+	for _, p := range paths {
+		entry := api.EnvFileStatus{Path: p}
+		sum, sumErr := fileSHA256(p)
+		if sumErr != nil {
+			entry.Error = sumErr.Error()
+		} else {
+			entry.SHA256 = sum
+		}
+		status.Files = append(status.Files, entry)
+	}
+	if hash, hashErr := compose.HashEnvFilePaths(paths); hashErr == nil {
+		status.CurrentHash = hash
+	}
+	status.Drift = status.CurrentHash != "" && status.AppliedHash != "" && status.CurrentHash != status.AppliedHash
+	json.NewEncoder(w).Encode(api.APIResponse{Data: status})
 }
 
 // GetApp handles GET /api/v1/apps/{id}
@@ -1137,17 +1200,7 @@ func (h *Handler) runAppSync(app *api.App) *syncerr.Error {
 		h.Logger.Warn("Failed to update sync status after force sync", "id", app.ID, "error", err)
 	}
 	_ = h.Registry.UpdateRollback(app.ID, app.LastSeenCommit, "", deploypolicy.EncodeVars(opts.Vars), "")
-	if hasher, ok := h.Applier.(interface {
-		ExternalEnvHashForSource(appID, composePath, template, appDir string) (string, error)
-	}); ok {
-		if hash, hashErr := hasher.ExternalEnvHashForSource(app.ID, app.ComposePath, app.Template, app.AppDir); hashErr == nil && hash != "" {
-			_ = h.Registry.UpdateEnvHash(app.ID, hash)
-		}
-	} else if hasher, ok := h.Applier.(EnvFileHasher); ok {
-		if hash, hashErr := hasher.ExternalEnvHashForApp(app.ID, app.ComposePath); hashErr == nil && hash != "" {
-			_ = h.Registry.UpdateEnvHash(app.ID, hash)
-		}
-	}
+	h.recordAppliedEnvHash(app)
 	if hasher, ok := h.Applier.(interface {
 		TemplateHashForApp(appID, template, appDir string) (string, error)
 	}); ok && app.Template != "" {

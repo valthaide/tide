@@ -195,6 +195,30 @@ var (
 		Help:      "Unix timestamp when the current external env_file hash was last applied.",
 	}, []string{"app_id", "app_name"})
 
+	envHashAdopted = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "env_hash_adopted_total",
+		Help:      "Times an env hash was adopted without redeploy (first observation or path-only addition).",
+	}, []string{"app"})
+
+	envKeyMissing = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "env_key_missing",
+		Help:      "Whether a required env key is missing from env files (1=missing).",
+	}, []string{"app", "key"})
+
+	envFileInsecure = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "env_file_insecure",
+		Help:      "Whether an env file has permissions wider than 0600 (1=insecure).",
+	}, []string{"app", "path"})
+
+	envDebouncePending = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "env_debounce_pending",
+		Help:      "Whether an app is waiting for env hash debounce before redeploy (1=pending).",
+	}, []string{"app"})
+
 	syncErrorInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "app_sync_error_info",
@@ -549,6 +573,10 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		LastSyncTimestamp,
 		envDrift,
 		envHashApplied,
+		envHashAdopted,
+		envKeyMissing,
+		envFileInsecure,
+		envDebouncePending,
 		syncErrorInfo,
 		appImageInfo,
 		policyViolation,
@@ -1168,6 +1196,75 @@ func SetEnvHashApplied(appID, appName string, at time.Time) {
 		return
 	}
 	envHashApplied.WithLabelValues(appID, appName).Set(float64(at.Unix()))
+}
+
+// IncEnvHashAdopted increments the adopt-without-redeploy counter.
+func IncEnvHashAdopted(app string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	envHashAdopted.WithLabelValues(app).Inc()
+}
+
+// SetEnvKeyMissing marks required keys that are absent/empty in env files.
+func SetEnvKeyMissing(app string, required []string, present map[string]string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	envKeyMissing.DeletePartialMatch(prometheus.Labels{"app": app})
+	for _, key := range required {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		v := 0.0
+		val, ok := present[key]
+		if !ok || strings.TrimSpace(val) == "" || strings.TrimSpace(val) == "__INVALID__" {
+			v = 1
+		}
+		envKeyMissing.WithLabelValues(app, key).Set(v)
+	}
+}
+
+// ClearEnvKeyMissing clears env_key_missing series for an app.
+func ClearEnvKeyMissing(app string) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		return
+	}
+	envKeyMissing.DeletePartialMatch(prometheus.Labels{"app": app})
+}
+
+// SetEnvFileInsecure sets whether an env file has insecure permissions.
+func SetEnvFileInsecure(app, path string, insecure bool) {
+	app = strings.TrimSpace(app)
+	path = strings.TrimSpace(path)
+	if app == "" {
+		app = "unknown"
+	}
+	if path == "" {
+		return
+	}
+	v := 0.0
+	if insecure {
+		v = 1
+	}
+	envFileInsecure.WithLabelValues(app, path).Set(v)
+}
+
+// SetEnvDebouncePending sets whether an app is waiting for env debounce.
+func SetEnvDebouncePending(app string, pending bool) {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		app = "unknown"
+	}
+	v := 0.0
+	if pending {
+		v = 1
+	}
+	envDebouncePending.WithLabelValues(app).Set(v)
 }
 
 // SetSyncErrorInfo exposes the latest sync error code/stage for alerts.
