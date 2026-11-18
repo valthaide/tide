@@ -67,7 +67,8 @@ type ProjectRuntimeState struct {
 	// Failure is a specific reason, such as "oneshot_failed: init exit 1" or "restarting: php 4 restarts".
 	Failure string
 	// Oneshot is a short status such as "migrate completed exit 0".
-	Oneshot string
+	Oneshot  string
+	Restarts map[string]int
 }
 
 // Ready reports whether every service container is running and past healthcheck start.

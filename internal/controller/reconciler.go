@@ -475,6 +475,7 @@ func (r *Reconciler) dispatch() {
 	blocked := r.blockedApps(apps)
 	r.noteProjects(apps)
 	r.publishRunningImages(apps)
+	r.publishServiceRestarts(apps, runtimeSnapshot)
 	r.publishPublicVars(apps)
 	r.runPeriodic(apps, runtimeSnapshot)
 	apps = r.orderByQueue(apps)
@@ -1589,6 +1590,35 @@ func (r *Reconciler) publishRunningImages(apps []*App) {
 	}
 	metrics.SetAppImages(samples)
 	r.publishImageDrift(apps, images)
+}
+
+func (r *Reconciler) publishServiceRestarts(apps []*App, snapshot map[string]compose.ProjectRuntimeState) {
+	if snapshot == nil {
+		return
+	}
+	samples := []metrics.RestartSample{}
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		name := app.Name
+		if name == "" {
+			name = app.ID
+		}
+		state, ok := snapshot[app.ComposeProject()]
+		if !ok {
+			continue
+		}
+		services := make([]string, 0, len(state.Restarts))
+		for service := range state.Restarts {
+			services = append(services, service)
+		}
+		sort.Strings(services)
+		for _, service := range services {
+			samples = append(samples, metrics.RestartSample{App: name, Service: service, Restarts: state.Restarts[service]})
+		}
+	}
+	metrics.SetServiceRestarts(samples)
 }
 
 func (r *Reconciler) publishImageDrift(apps []*App, images []compose.RunningImage) {

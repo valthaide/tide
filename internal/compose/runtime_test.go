@@ -53,6 +53,9 @@ func TestFailureReasons(t *testing.T) {
 	if flap.Failure != "restarting: php-consume 8 restarts" {
 		t.Fatalf("restart reason %q", flap.Failure)
 	}
+	if flap.Restarts["php-consume"] != 8 || len(flap.Restarts) != 1 {
+		t.Fatalf("restarts %+v", flap.Restarts)
+	}
 	if !quietCommandOutput("docker", []string{"inspect", "abc"}) || !quietCommandOutput("docker", []string{"image", "inspect", "php:1"}) {
 		t.Fatal("inspect output must be debug")
 	}

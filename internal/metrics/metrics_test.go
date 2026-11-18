@@ -94,7 +94,7 @@ func TestSuspendedAndRollbackGauges(t *testing.T) {
 	expected := `
 # HELP tide_app_rolled_back 1 while a failed revision was rolled back and the last healthy revision is running.
 # TYPE tide_app_rolled_back gauge
-tide_app_rolled_back{app="web",reason="health_timeout"} 1
+tide_app_rolled_back{app="web",failed_revision="b1b2b3b4",reason="health_timeout",running_revision="a1a2a3a4"} 1
 # HELP tide_app_suspended Whether automatic reconciliation is paused for the app (1=yes, 0=no).
 # TYPE tide_app_suspended gauge
 tide_app_suspended{app="web"} 1
@@ -103,6 +103,66 @@ tide_app_suspended{app="web"} 1
 		"tide_app_suspended",
 		"tide_app_rolled_back",
 	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCurrentUnhealthyIsNotRollback(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	const rev = "db4cc9ee2e150724e8ef8bafbba2489e9a171d69"
+	c := newAppsCollector(staticLister{apps: []AppSnapshot{
+		{
+			ID: "1", Name: "backend", Status: "syncing",
+			LastSyncError:     "restarting: php-consume 157 restarts (revision " + rev + ")",
+			LastSeenCommit:    rev,
+			LastSyncedCommit:  rev,
+			LastHealthyCommit: rev,
+			RejectedCommit:    rev,
+		},
+		{
+			ID: "2", Name: "web", Status: "rolled_back",
+			LastSeenCommit:     rev,
+			LastSyncedCommit:   rev,
+			LastHealthyCommit:  rev,
+			RejectedCommit:     rev,
+			RejectedVarsDiffer: true,
+		},
+	}})
+	if err := reg.Register(c); err != nil {
+		t.Fatal(err)
+	}
+	expected := `
+# HELP tide_app_current_unhealthy 1 while the running revision itself fails health and there is no other healthy revision to roll back to.
+# TYPE tide_app_current_unhealthy gauge
+tide_app_current_unhealthy{app="backend",revision="db4cc9ee2e15"} 1
+# HELP tide_app_rolled_back 1 while a failed revision was rolled back and the last healthy revision is running.
+# TYPE tide_app_rolled_back gauge
+tide_app_rolled_back{app="web",failed_revision="db4cc9ee2e15",reason="health_timeout",running_revision="db4cc9ee2e15"} 1
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected),
+		"tide_app_current_unhealthy",
+		"tide_app_rolled_back",
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceRestartingGauge(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(serviceRestarting); err != nil {
+		t.Fatal(err)
+	}
+	SetServiceRestarts([]RestartSample{{App: "prod-tsk-backend", Service: "php-consume", Restarts: 161}, {App: "", Service: "php"}})
+	expected := `
+# HELP tide_app_service_restarting Restart count of a service container that keeps restarting.
+# TYPE tide_app_service_restarting gauge
+tide_app_service_restarting{app="prod-tsk-backend",service="php-consume"} 161
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "tide_app_service_restarting"); err != nil {
+		t.Fatal(err)
+	}
+	SetServiceRestarts(nil)
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(""), "tide_app_service_restarting"); err != nil {
 		t.Fatal(err)
 	}
 }

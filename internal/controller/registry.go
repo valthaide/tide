@@ -238,6 +238,7 @@ func (r *Registry) ListAppSnapshots() []metrics.AppSnapshot {
 			LastSyncedCommit:   app.LastSyncedCommit,
 			LastHealthyCommit:  app.LastHealthyCommit,
 			RejectedCommit:     app.RejectedCommit,
+			RejectedVarsDiffer: strings.TrimSpace(app.RejectedVars) != "" && !deploypolicy.VarsEqual(deploypolicy.DecodeVars(app.LastHealthyVars), deploypolicy.DecodeVars(app.RejectedVars)),
 			Branch:             app.Branch,
 			Revision:           app.Revision,
 		})

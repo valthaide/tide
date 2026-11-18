@@ -32,6 +32,7 @@ type AppSnapshot struct {
 	LastSyncedCommit   string
 	LastHealthyCommit  string
 	RejectedCommit     string
+	RejectedVarsDiffer bool
 	Branch             string
 	Revision           string
 }
@@ -243,6 +244,12 @@ var (
 		Help:      "Running digest differs from the pinned digest (1=drift).",
 	}, []string{"app", "service"})
 
+	serviceRestarting = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "app_service_restarting",
+		Help:      "Restart count of a service container that keeps restarting.",
+	}, []string{"app", "service"})
+
 	fleetRevisionInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "fleet_revision_info",
@@ -443,6 +450,26 @@ func SetPolicyViolation(app, rule string, value float64) {
 	policyViolation.WithLabelValues(app, rule).Set(value)
 }
 
+type RestartSample struct {
+	App      string
+	Service  string
+	Restarts int
+}
+
+func SetServiceRestarts(samples []RestartSample) {
+	imageMu.Lock()
+	defer imageMu.Unlock()
+	serviceRestarting.Reset()
+	for _, sample := range samples {
+		app := strings.TrimSpace(sample.App)
+		service := strings.TrimSpace(sample.Service)
+		if app == "" || service == "" {
+			continue
+		}
+		serviceRestarting.WithLabelValues(app, service).Set(float64(sample.Restarts))
+	}
+}
+
 func SetImageDrift(samples []ImageSample) {
 	imageMu.Lock()
 	defer imageMu.Unlock()
@@ -641,6 +668,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		appImageInfo,
 		policyViolation,
 		imageDrift,
+		serviceRestarting,
 		fleetRevisionInfo,
 		appVarsInfo,
 		SyncQueueLength,
@@ -696,6 +724,7 @@ type appsCollector struct {
 	syncSuccessAgeSecondsDesc       *prometheus.Desc
 	suspendedDesc                   *prometheus.Desc
 	rolledBackDesc                  *prometheus.Desc
+	currentUnhealthyDesc            *prometheus.Desc
 	revisionDesc                    *prometheus.Desc
 	imageNotFoundDesc               *prometheus.Desc
 }
@@ -760,7 +789,13 @@ func newAppsCollector(lister AppLister) *appsCollector {
 		rolledBackDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "app_rolled_back"),
 			"1 while a failed revision was rolled back and the last healthy revision is running.",
-			[]string{"app", "reason"},
+			[]string{"app", "reason", "failed_revision", "running_revision"},
+			nil,
+		),
+		currentUnhealthyDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "app_current_unhealthy"),
+			"1 while the running revision itself fails health and there is no other healthy revision to roll back to.",
+			[]string{"app", "revision"},
 			nil,
 		),
 		revisionDesc: prometheus.NewDesc(
@@ -789,6 +824,7 @@ func (c *appsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.syncSuccessAgeSecondsDesc
 	ch <- c.suspendedDesc
 	ch <- c.rolledBackDesc
+	ch <- c.currentUnhealthyDesc
 	ch <- c.revisionDesc
 	ch <- c.imageNotFoundDesc
 }
@@ -874,7 +910,11 @@ func (c *appsCollector) Collect(ch chan<- prometheus.Metric) {
 		healthy := strings.TrimSpace(app.LastHealthyCommit)
 		seen := strings.TrimSpace(app.LastSeenCommit)
 		if rejected != "" && healthy != "" && seen == rejected && strings.TrimSpace(app.LastSyncedCommit) == healthy {
-			ch <- prometheus.MustNewConstMetric(c.rolledBackDesc, prometheus.GaugeValue, 1, appLabel, rollbackReasonLabel(app.LastSyncError))
+			if rejected != healthy || app.RejectedVarsDiffer {
+				ch <- prometheus.MustNewConstMetric(c.rolledBackDesc, prometheus.GaugeValue, 1, appLabel, rollbackReasonLabel(app.LastSyncError), shortRevision(rejected), shortRevision(healthy))
+			} else {
+				ch <- prometheus.MustNewConstMetric(c.currentUnhealthyDesc, prometheus.GaugeValue, 1, appLabel, shortRevision(healthy))
+			}
 		}
 
 		var drift float64
@@ -1061,6 +1101,14 @@ func ObserveWatchAction(app string) {
 		app = "unknown"
 	}
 	WatchActionsTotal.WithLabelValues(app).Inc()
+}
+
+func shortRevision(rev string) string {
+	rev = strings.TrimSpace(rev)
+	if len(rev) > 12 {
+		return rev[:12]
+	}
+	return rev
 }
 
 func rollbackReasonLabel(msg string) string {

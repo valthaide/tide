@@ -242,6 +242,12 @@ func foldObservations(obs []containerObs, now time.Time) map[string]ProjectRunti
 				service = name
 			}
 			state.Failure = fmt.Sprintf("restarting: %s %d restarts", service, c.RestartCount)
+			if state.Restarts == nil {
+				state.Restarts = map[string]int{}
+			}
+			if n, ok := state.Restarts[service]; !ok || c.RestartCount > n {
+				state.Restarts[service] = c.RestartCount
+			}
 		default:
 			state.ContainerCount++
 			running := c.Running || dockerStatusIsRunning(c.PSStatus)
