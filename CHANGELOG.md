@@ -90,6 +90,12 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.6.1 (2026-11-18)
+- **Crash-loop restart metric**: `tide_app_service_restarting{app,service}` reports the restart count of every service container that keeps restarting, refreshed on each reconcile pass from the Docker Engine runtime state.
+- **Accurate rollback vs unhealthy distinction**: `tide_app_rolled_back` now fires only when a failed revision was actually rolled back to a different healthy state (commit or vars differ); when the running revision itself fails health and there is no other healthy revision to roll back to, the new `tide_app_current_unhealthy{app,revision}` gauge fires instead.
+- **Revision labels on rollback**: `tide_app_rolled_back{app,reason,failed_revision,running_revision}` carries short 12-char revisions so dashboards show what failed and what is running now.
+- **Vars-only rollback detection**: the registry now tracks when rejected vars differ from the last healthy vars, so a vars-only rejection counts as a rollback even when the commit is unchanged.
+
 ### v2.6.0 (2026-11-16)
 - **Direct OpenBao secrets provider** (`secrets_provider: openbao` on host, tenant, or app; `vault` accepted as an alias): cert / approle / jwt / token auth via env vars or `/etc/tide/secrets-provider.hcl`, token kept only in memory, login at startup, renew at 2/3 TTL, re-login on revocation, login backoff capped at 5 minutes. Legacy `TIDE_VAULT_ADDR` / `TIDE_VAULT_TOKEN` are mapped with a deprecation warning.
 - **Fleet fields**: `secret_paths` (KV v2 paths with `{prefix}` / `{tenant}` / `{app}` templates, later paths override earlier ones), `secret_keys` (automatically appended to `required_env`), `secret_from` (explicit `path` + `key` mapping), `secret_file` (default `/var/lib/tide/secrets/<app>.env`, automatically appended to `env_files`). Rendered before `compose up` with atomic `0600` writes; values containing `'`, newline, or NUL are rejected as `secrets_invalid_value` without leaking the value.
