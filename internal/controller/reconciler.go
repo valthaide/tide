@@ -293,6 +293,51 @@ type WatchFileManager interface {
 	ExecService(ctx context.Context, appID, composePath, service, command string) error
 }
 
+type optionsRestarter interface {
+	RestartServiceWith(ctx context.Context, appID, composePath, service string, opts compose.ApplyOptions) (string, error)
+}
+
+func (r *Reconciler) RestartService(ctx context.Context, appID, composePath, service string) (string, error) {
+	app, err := r.Registry.Get(appID)
+	if err != nil {
+		return "", err
+	}
+	return r.restartService(ctx, app, composePath, service)
+}
+
+func (r *Reconciler) restartService(ctx context.Context, app *App, composePath, service string) (string, error) {
+	if rs, ok := r.Executor.(optionsRestarter); ok {
+		opts, err := r.runtimeOptions(app)
+		if err != nil {
+			return "", err
+		}
+		return rs.RestartServiceWith(ctx, app.ID, composePath, service, opts)
+	}
+	if mgr, ok := r.Executor.(WatchFileManager); ok {
+		return mgr.RestartService(ctx, app.ID, composePath, service)
+	}
+	return "", fmt.Errorf("runtime restarter is not configured")
+}
+
+func (r *Reconciler) runtimeOptions(app *App) (compose.ApplyOptions, error) {
+	policy := app.Policy()
+	opts := compose.ApplyOptions{
+		Template: app.Template,
+		AppDir:   app.AppDir,
+		Project:  app.ComposeProject(),
+	}
+	envPaths, err := r.envFilePaths(app)
+	if err != nil {
+		return opts, err
+	}
+	fileVars, missing := readEnvFiles(envPaths)
+	if missing != "" {
+		return opts, syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageValidate, "env_file_missing: "+missing)
+	}
+	opts.Vars = mergeInterpolation(fileVars, policy.Vars, app.Name, app.ComposeProject())
+	return opts, nil
+}
+
 // pipelineGate is the CI check. Tests substitute it; production leaves it nil
 // and queries GitLab.
 type pipelineGate interface {
@@ -2083,7 +2128,7 @@ func (r *Reconciler) applyWatchActions(app *App, mgr WatchFileManager, files []d
 				err := mgr.HTTPReload(ctx, w.ReloadURL)
 				r.logWatchResult(app.Name, "reload", w.Path, w.ReloadURL, "", err)
 			case w.Service != "":
-				_, err := mgr.RestartService(ctx, app.ID, app.ComposePath, w.Service)
+				_, err := r.restartService(ctx, app, app.ComposePath, w.Service)
 				r.logWatchResult(app.Name, "restart", w.Path, "", w.Service, err)
 			}
 		default:
@@ -2091,7 +2136,7 @@ func (r *Reconciler) applyWatchActions(app *App, mgr WatchFileManager, files []d
 			if svc == "" {
 				continue
 			}
-			_, err := mgr.RestartService(ctx, app.ID, app.ComposePath, svc)
+			_, err := r.restartService(ctx, app, app.ComposePath, svc)
 			r.logWatchResult(app.Name, "restart", w.Path, "", svc, err)
 		}
 	}

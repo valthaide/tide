@@ -434,12 +434,15 @@ func (e *ComposeExecutor) ApplyImages(
 
 // RestartService restarts one compose service for an app (config bind-mount refresh).
 func (e *ComposeExecutor) RestartService(ctx context.Context, appID, composePath, service string) (string, error) {
+	return e.RestartServiceWith(ctx, appID, composePath, service, ApplyOptions{})
+}
+
+func (e *ComposeExecutor) RestartServiceWith(ctx context.Context, appID, composePath, service string, opts ApplyOptions) (string, error) {
 	service = strings.TrimSpace(service)
 	if service == "" {
 		return "", fmt.Errorf("service name is required for restart")
 	}
-	projectName := e.projectFor(appID)
-	inv, err := e.invocationForRuntime(appID, composePath)
+	inv, projectName, err := e.runtimeSource(appID, composePath, opts)
 	if err != nil {
 		return "", err
 	}
@@ -448,7 +451,7 @@ func (e *ComposeExecutor) RestartService(ctx context.Context, appID, composePath
 		"docker",
 		inv.Args(projectName, nil, "restart", service),
 		inv.ProjectDir,
-		nil,
+		copyVars(opts.Vars),
 		nil,
 	)
 	return redact.String(out), err

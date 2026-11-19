@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/valthaide/tide/internal/api"
 	"github.com/valthaide/tide/internal/compose"
+	"github.com/valthaide/tide/internal/deploypolicy"
 )
 
 type fakeRestarter struct {
@@ -162,5 +165,54 @@ func TestRestartServiceAppFailureAudited(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Kind != "service_restart" || events[0].Decision != "restart_failed" {
 		t.Fatalf("audit %+v", events)
+	}
+}
+
+type optRestartRuntime struct {
+	fakeRuntime
+	opts []compose.ApplyOptions
+}
+
+func (o *optRestartRuntime) RestartServiceWith(_ context.Context, _, _, _ string, opts compose.ApplyOptions) (string, error) {
+	o.opts = append(o.opts, opts)
+	return "restarted", nil
+}
+
+func TestRestartServiceAppUsesDeployOptions(t *testing.T) {
+	reg := testRegistry(t)
+	envFile := filepath.Join(t.TempDir(), "admin.env")
+	if err := os.WriteFile(envFile, []byte("ADMIN_ENV_FILE=/srv/admin.env\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := &api.App{Name: "test-ru", RepoURL: "https://example/repo.git", Branch: "main", Template: "tenant"}
+	addPublicApp(t, reg, app)
+	_ = reg.UpdateDeployPolicy(app.ID, deploypolicy.Encode(deploypolicy.Policy{
+		EnvFiles: []string{envFile},
+		Project:  "tenko-test-ru",
+		Vars:     map[string]string{"APP_TAG": "1"},
+	}))
+
+	rt := &optRestartRuntime{}
+	h := NewHandler(reg, nil, nil, nil, nil, "test")
+	h.Restarter = testReconciler(t, reg, rt, ReconcilerConfig{})
+	h.Inspector = &fakeInspector{containers: []compose.ServiceContainer{{Service: "php-consume"}}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/apps/"+app.ID+"/restart", strings.NewReader(`{"service":"php-consume"}`))
+	rr := httptest.NewRecorder()
+	restartTestRouter(h).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
+	}
+	if len(rt.opts) != 1 {
+		t.Fatalf("restart calls %+v", rt.opts)
+	}
+	got := rt.opts[0]
+	fresh, _ := reg.Get(app.ID)
+	if got.Template != "tenant" || got.Project != fresh.ComposeProject() {
+		t.Fatalf("opts %+v", got)
+	}
+	if got.Vars["ADMIN_ENV_FILE"] != "/srv/admin.env" || got.Vars["APP_TAG"] != "1" || got.Vars["TIDE_PROJECT"] != fresh.ComposeProject() {
+		t.Fatalf("vars %+v", got.Vars)
 	}
 }

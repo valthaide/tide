@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeSourceFile(t *testing.T, path, content string) {
@@ -240,4 +241,41 @@ func TestTemplateHashChangesWithTemplateAndOverride(t *testing.T) {
 		t.Fatal("expected override to be reported")
 	}
 	_ = appDir
+}
+
+func TestRestartServiceWithTemplateBeforeFirstSync(t *testing.T) {
+	fleetDir, _ := templateFixture(t)
+	workDir := t.TempDir()
+	appFolder := filepath.Join(workDir, "app-1", "repo")
+	writeSourceFile(t, filepath.Join(appFolder, "compose.override.yaml"), "services:\n  web:\n    env_file: ${ADMIN_ENV_FILE}\n")
+
+	binDir := t.TempDir()
+	record := filepath.Join(binDir, "record")
+	bin := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" \"$ADMIN_ENV_FILE\" > \"" + record + "\"\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exec := &ComposeExecutor{WorkDir: workDir, FleetCheckoutDir: fleetDir}
+	exec.dockerResolution = dockerCommandResolution{Path: bin}
+	exec.resolutionAt = time.Now()
+
+	opts := ApplyOptions{Template: "web", Project: "tenko-dev1", Vars: map[string]string{"ADMIN_ENV_FILE": "/srv/admin.env"}}
+	if _, err := exec.RestartServiceWith(context.Background(), "app-1", "", "web", opts); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	templateFile := filepath.Join(fleetDir, "templates", "web", "compose.yaml")
+	wantArgs := "compose --project-directory " + appFolder + " -p tenko-dev1 -f " + templateFile +
+		" -f " + filepath.Join(appFolder, "compose.override.yaml") + " restart web"
+	if len(lines) != 2 || lines[0] != wantArgs {
+		t.Fatalf("args:\n got %q\nwant %q", lines, wantArgs)
+	}
+	if lines[1] != "/srv/admin.env" {
+		t.Fatalf("ADMIN_ENV_FILE = %q", lines[1])
+	}
 }

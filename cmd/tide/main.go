@@ -259,6 +259,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 	appHandler.Restarter = executor
 	appHandler.Secrets = secretsProvider
 	if reconciler != nil {
+		appHandler.Restarter = reconciler
 		appHandler.SyncGate = reconciler
 		appHandler.Tenants = reconciler.Tenants
 	}

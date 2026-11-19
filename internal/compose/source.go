@@ -253,6 +253,30 @@ func (e *ComposeExecutor) invocationForRuntime(appID, composePath string) (Invoc
 	return Invocation{ProjectDir: filepath.Dir(full), Files: []string{full}, Primary: full}, nil
 }
 
+func (e *ComposeExecutor) runtimeSource(appID, composePath string, opts ApplyOptions) (Invocation, string, error) {
+	project := strings.TrimSpace(opts.Project)
+	if project == "" {
+		project = e.projectFor(appID)
+	}
+	if inv, ok := e.rememberedSource(appID); ok {
+		return inv, project, nil
+	}
+	if strings.TrimSpace(opts.Template) == "" && strings.TrimSpace(composePath) == "" {
+		inv, err := e.invocationForRuntime(appID, composePath)
+		return inv, project, err
+	}
+	appDirAbs, err := filepath.Abs(filepath.Join(e.WorkDir, appID))
+	if err != nil {
+		return Invocation{}, "", err
+	}
+	inv, err := e.ResolveInvocation(filepath.Join(appDirAbs, "repo"), composePath, opts)
+	if err != nil {
+		return Invocation{}, "", err
+	}
+	e.rememberSource(appID, inv)
+	return inv, project, nil
+}
+
 // HasOverrideForApp reports whether the app checkout currently contains
 // compose.override.yaml in its app folder (repo root or app_dir). It never
 // errors: a missing checkout means no override.
