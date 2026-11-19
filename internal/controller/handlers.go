@@ -942,8 +942,15 @@ func (h *Handler) runAppAction(w http.ResponseWriter, r *http.Request, action st
 		}
 	}
 	_, actionErr := h.Actions.AppAction(ctx, app.ID, action)
-	if actionErr == nil && action == "start" && wasSuspended {
-		actionErr = h.Registry.SetOperatorSuspended(app.ID, false)
+	if actionErr == nil && action == "stop" {
+		actionErr = h.Registry.UpdateStatus(app.ID, "stopped", nil)
+	}
+	if actionErr == nil && action == "start" {
+		if wasSuspended {
+			actionErr = h.Registry.SetOperatorSuspended(app.ID, false)
+		} else if app.Status == "stopped" {
+			actionErr = h.Registry.UpdateStatus(app.ID, "pending", nil)
+		}
 	}
 	if actionErr != nil && action == "stop" && !wasSuspended {
 		_ = h.Registry.SetOperatorSuspended(app.ID, false)

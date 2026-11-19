@@ -321,6 +321,21 @@ func (r *Reconciler) AppAction(ctx context.Context, appID, action string, servic
 	return ca.ComposeAction(ctx, app.ID, app.ComposePath, action, opts, services...)
 }
 
+type optionsExecer interface {
+	ExecServiceWith(ctx context.Context, appID, composePath, service, command string, opts compose.ApplyOptions) error
+}
+
+func (r *Reconciler) execService(ctx context.Context, app *App, mgr WatchFileManager, service, command string) error {
+	if ex, ok := r.Executor.(optionsExecer); ok {
+		opts, err := r.runtimeOptions(app)
+		if err != nil {
+			return err
+		}
+		return ex.ExecServiceWith(ctx, app.ID, app.ComposePath, service, command, opts)
+	}
+	return mgr.ExecService(ctx, app.ID, app.ComposePath, service, command)
+}
+
 func (r *Reconciler) restartService(ctx context.Context, app *App, composePath, service string) (string, error) {
 	if ca, ok := r.Executor.(composeActioner); ok {
 		opts, err := r.runtimeOptions(app)
@@ -2138,7 +2153,7 @@ func (r *Reconciler) applyWatchActions(app *App, mgr WatchFileManager, files []d
 					r.logWatchResult(app.Name, "reload", w.Path, "", "", fmt.Errorf("reload_command requires service"))
 					continue
 				}
-				err := mgr.ExecService(ctx, app.ID, app.ComposePath, w.Service, w.ReloadCommand)
+				err := r.execService(ctx, app, mgr, w.Service, w.ReloadCommand)
 				r.logWatchResult(app.Name, "reload", w.Path, "", w.Service, err)
 			case w.ReloadURL != "":
 				err := mgr.HTTPReload(ctx, w.ReloadURL)

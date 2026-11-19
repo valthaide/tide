@@ -500,18 +500,21 @@ func longRunningServices(obs []containerObs, project string) []string {
 
 // ExecService runs a command in one service container (for example kill -HUP 1).
 func (e *ComposeExecutor) ExecService(ctx context.Context, appID, composePath, service, command string) error {
+	return e.ExecServiceWith(ctx, appID, composePath, service, command, ApplyOptions{})
+}
+
+func (e *ComposeExecutor) ExecServiceWith(ctx context.Context, appID, composePath, service, command string, opts ApplyOptions) error {
 	service = strings.TrimSpace(service)
 	command = strings.TrimSpace(command)
 	if service == "" || command == "" {
 		return fmt.Errorf("reload command requires service and command")
 	}
-	projectName := e.projectFor(appID)
-	inv, err := e.invocationForRuntime(appID, composePath)
+	inv, projectName, err := e.runtimeSource(appID, composePath, opts)
 	if err != nil {
 		return err
 	}
 	args := inv.Args(projectName, nil, "exec", "-T", service, "sh", "-c", command)
-	_, err = e.runCommand(ctx, "docker", args, inv.ProjectDir, nil, nil)
+	_, err = e.runCommand(ctx, "docker", args, inv.ProjectDir, copyVars(opts.Vars), nil)
 	return err
 }
 

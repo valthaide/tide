@@ -293,3 +293,37 @@ func TestLongRunningServicesSkipOneshots(t *testing.T) {
 		t.Fatalf("services = %q", got)
 	}
 }
+
+func TestExecServiceWithUsesDeployVars(t *testing.T) {
+	fleetDir, _ := templateFixture(t)
+	workDir := t.TempDir()
+	appFolder := filepath.Join(workDir, "app-1", "repo")
+	writeSourceFile(t, filepath.Join(appFolder, "compose.override.yaml"), "services:\n  web:\n    env_file: ${ADMIN_ENV_FILE}\n")
+
+	binDir := t.TempDir()
+	record := filepath.Join(binDir, "record")
+	bin := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" \"$ADMIN_ENV_FILE\" > \"" + record + "\"\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exec := &ComposeExecutor{WorkDir: workDir, FleetCheckoutDir: fleetDir}
+	exec.dockerResolution = dockerCommandResolution{Path: bin}
+	exec.resolutionAt = time.Now()
+
+	opts := ApplyOptions{Template: "web", Project: "tenko-dev1", Vars: map[string]string{"ADMIN_ENV_FILE": "/srv/admin.env"}}
+	if err := exec.ExecServiceWith(context.Background(), "app-1", "", "web", "kill -HUP 1", opts); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 || !strings.HasSuffix(lines[0], "-p tenko-dev1 -f "+filepath.Join(fleetDir, "templates", "web", "compose.yaml")+" -f "+filepath.Join(appFolder, "compose.override.yaml")+" exec -T web sh -c kill -HUP 1") {
+		t.Fatalf("args %q", lines)
+	}
+	if lines[1] != "/srv/admin.env" {
+		t.Fatalf("ADMIN_ENV_FILE = %q", lines[1])
+	}
+}

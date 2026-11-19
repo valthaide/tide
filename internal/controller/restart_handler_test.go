@@ -253,6 +253,9 @@ func TestRestartWholeAppAndStopStart(t *testing.T) {
 		if fresh.Suspended != step.suspended {
 			t.Fatalf("%s suspended %v want %v", step.url, fresh.Suspended, step.suspended)
 		}
+		if (fresh.Status == "stopped") != step.suspended {
+			t.Fatalf("%s status %q", step.url, fresh.Status)
+		}
 	}
 	if strings.Join(rt.actions, ",") != "restart,stop,start" {
 		t.Fatalf("actions %v", rt.actions)
