@@ -442,19 +442,60 @@ func (e *ComposeExecutor) RestartServiceWith(ctx context.Context, appID, compose
 	if service == "" {
 		return "", fmt.Errorf("service name is required for restart")
 	}
+	return e.ComposeAction(ctx, appID, composePath, "restart", opts, service)
+}
+
+func (e *ComposeExecutor) ComposeAction(ctx context.Context, appID, composePath, action string, opts ApplyOptions, services ...string) (string, error) {
+	switch action {
+	case "restart", "stop", "start":
+	default:
+		return "", fmt.Errorf("unsupported compose action %q", action)
+	}
 	inv, projectName, err := e.runtimeSource(appID, composePath, opts)
 	if err != nil {
 		return "", err
 	}
+	if len(services) == 0 {
+		obs, obsErr := e.observeContainers(ctx)
+		if obsErr != nil {
+			return "", obsErr
+		}
+		services = longRunningServices(obs, projectName)
+		if len(services) == 0 {
+			return "", fmt.Errorf("app has no services to %s", action)
+		}
+	}
 	out, err := e.runCommand(
 		ctx,
 		"docker",
-		inv.Args(projectName, nil, "restart", service),
+		inv.Args(projectName, nil, append([]string{action}, services...)...),
 		inv.ProjectDir,
 		copyVars(opts.Vars),
 		nil,
 	)
 	return redact.String(out), err
+}
+
+func longRunningServices(obs []containerObs, project string) []string {
+	obs = filterProject(obs, project)
+	oneshot := oneshotServices(obs)
+	seen := map[string]struct{}{}
+	var out []string
+	for _, c := range obs {
+		if c.OneOff || strings.TrimSpace(c.Service) == "" {
+			continue
+		}
+		if _, ok := oneshot[c.Service]; ok {
+			continue
+		}
+		if _, ok := seen[c.Service]; ok {
+			continue
+		}
+		seen[c.Service] = struct{}{}
+		out = append(out, c.Service)
+	}
+	sortStrings(out)
+	return out
 }
 
 // ExecService runs a command in one service container (for example kill -HUP 1).

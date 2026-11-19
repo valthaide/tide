@@ -279,3 +279,17 @@ func TestRestartServiceWithTemplateBeforeFirstSync(t *testing.T) {
 		t.Fatalf("ADMIN_ENV_FILE = %q", lines[1])
 	}
 }
+
+func TestLongRunningServicesSkipOneshots(t *testing.T) {
+	obs := []containerObs{
+		{Project: "tenko-dev1", Service: "migrate"},
+		{Project: "tenko-dev1", Service: "web", DependsOn: "migrate:service_completed_successfully:false"},
+		{Project: "tenko-dev1", Service: "php-consume", DependsOn: "migrate:service_completed_successfully:false"},
+		{Project: "tenko-dev1", Service: "web", OneOff: true},
+		{Project: "other", Service: "db"},
+	}
+	got := strings.Join(longRunningServices(obs, "tenko-dev1"), ",")
+	if got != "php-consume,web" {
+		t.Fatalf("services = %q", got)
+	}
+}

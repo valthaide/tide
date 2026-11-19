@@ -293,8 +293,8 @@ type WatchFileManager interface {
 	ExecService(ctx context.Context, appID, composePath, service, command string) error
 }
 
-type optionsRestarter interface {
-	RestartServiceWith(ctx context.Context, appID, composePath, service string, opts compose.ApplyOptions) (string, error)
+type composeActioner interface {
+	ComposeAction(ctx context.Context, appID, composePath, action string, opts compose.ApplyOptions, services ...string) (string, error)
 }
 
 func (r *Reconciler) RestartService(ctx context.Context, appID, composePath, service string) (string, error) {
@@ -305,13 +305,29 @@ func (r *Reconciler) RestartService(ctx context.Context, appID, composePath, ser
 	return r.restartService(ctx, app, composePath, service)
 }
 
+func (r *Reconciler) AppAction(ctx context.Context, appID, action string, services ...string) (string, error) {
+	app, err := r.Registry.Get(appID)
+	if err != nil {
+		return "", err
+	}
+	ca, ok := r.Executor.(composeActioner)
+	if !ok {
+		return "", fmt.Errorf("runtime does not support %s", action)
+	}
+	opts, err := r.runtimeOptions(app)
+	if err != nil {
+		return "", err
+	}
+	return ca.ComposeAction(ctx, app.ID, app.ComposePath, action, opts, services...)
+}
+
 func (r *Reconciler) restartService(ctx context.Context, app *App, composePath, service string) (string, error) {
-	if rs, ok := r.Executor.(optionsRestarter); ok {
+	if ca, ok := r.Executor.(composeActioner); ok {
 		opts, err := r.runtimeOptions(app)
 		if err != nil {
 			return "", err
 		}
-		return rs.RestartServiceWith(ctx, app.ID, composePath, service, opts)
+		return ca.ComposeAction(ctx, app.ID, composePath, "restart", opts, service)
 	}
 	if mgr, ok := r.Executor.(WatchFileManager); ok {
 		return mgr.RestartService(ctx, app.ID, composePath, service)

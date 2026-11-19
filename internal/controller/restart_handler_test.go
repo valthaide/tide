@@ -106,7 +106,7 @@ func TestRestartServiceAppValidation(t *testing.T) {
 		status int
 	}{
 		{"unknown app", "/api/v1/apps/nope/restart", `{"service":"web"}`, http.StatusNotFound},
-		{"missing service", "/api/v1/apps/" + app.ID + "/restart", `{}`, http.StatusBadRequest},
+		{"whole app without actions", "/api/v1/apps/" + app.ID + "/restart", `{}`, http.StatusServiceUnavailable},
 		{"invalid service", "/api/v1/apps/" + app.ID + "/restart", `{"service":"web; rm -rf /"}`, http.StatusBadRequest},
 		{"unknown service", "/api/v1/apps/" + app.ID + "/restart", `{"service":"redis"}`, http.StatusNotFound},
 	}
@@ -170,12 +170,14 @@ func TestRestartServiceAppFailureAudited(t *testing.T) {
 
 type optRestartRuntime struct {
 	fakeRuntime
-	opts []compose.ApplyOptions
+	opts    []compose.ApplyOptions
+	actions []string
 }
 
-func (o *optRestartRuntime) RestartServiceWith(_ context.Context, _, _, _ string, opts compose.ApplyOptions) (string, error) {
+func (o *optRestartRuntime) ComposeAction(_ context.Context, _, _, action string, opts compose.ApplyOptions, services ...string) (string, error) {
 	o.opts = append(o.opts, opts)
-	return "restarted", nil
+	o.actions = append(o.actions, strings.TrimSpace(action+" "+strings.Join(services, " ")))
+	return "ok", nil
 }
 
 func TestRestartServiceAppUsesDeployOptions(t *testing.T) {
@@ -214,5 +216,61 @@ func TestRestartServiceAppUsesDeployOptions(t *testing.T) {
 	}
 	if got.Vars["ADMIN_ENV_FILE"] != "/srv/admin.env" || got.Vars["APP_TAG"] != "1" || got.Vars["TIDE_PROJECT"] != fresh.ComposeProject() {
 		t.Fatalf("vars %+v", got.Vars)
+	}
+}
+
+func TestRestartWholeAppAndStopStart(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{Name: "test-en", RepoURL: "https://example/repo.git", Branch: "main", Template: "tenant"}
+	addPublicApp(t, reg, app)
+
+	rt := &optRestartRuntime{}
+	rec := testReconciler(t, reg, rt, ReconcilerConfig{})
+	h := NewHandler(reg, nil, nil, nil, nil, "test")
+	h.Restarter = rec
+	h.Actions = rec
+	h.Inspector = &fakeInspector{containers: []compose.ServiceContainer{{Service: "web"}, {Service: "php-consume"}}}
+	router := restartTestRouter(h)
+	router.Post("/api/v1/apps/{id}/stop", h.StopApp)
+	router.Post("/api/v1/apps/{id}/start", h.StartApp)
+
+	for _, step := range []struct {
+		url       string
+		body      string
+		suspended bool
+	}{
+		{"/api/v1/apps/" + app.ID + "/restart", `{}`, false},
+		{"/api/v1/apps/" + app.ID + "/stop", "", true},
+		{"/api/v1/apps/" + app.ID + "/start", "", false},
+	} {
+		req := httptest.NewRequest(http.MethodPost, step.url, strings.NewReader(step.body))
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status %d body %s", step.url, rr.Code, rr.Body.String())
+		}
+		fresh, _ := reg.Get(app.ID)
+		if fresh.Suspended != step.suspended {
+			t.Fatalf("%s suspended %v want %v", step.url, fresh.Suspended, step.suspended)
+		}
+	}
+	if strings.Join(rt.actions, ",") != "restart,stop,start" {
+		t.Fatalf("actions %v", rt.actions)
+	}
+	for _, opts := range rt.opts {
+		if opts.Template != "tenant" || opts.Vars["TIDE_APP_NAME"] != "test-en" {
+			t.Fatalf("opts %+v", opts)
+		}
+	}
+	events, err := reg.ListAudit(app.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]string{}
+	for _, e := range events {
+		kinds[e.Kind] = e.Decision
+	}
+	if kinds["service_restart"] != "restarted" || kinds["app_stop"] != "stopped" || kinds["app_start"] != "started" {
+		t.Fatalf("audit %+v", events)
 	}
 }

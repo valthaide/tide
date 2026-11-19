@@ -89,6 +89,10 @@ type ServiceRestarter interface {
 	RestartService(ctx context.Context, appID, composePath, service string) (string, error)
 }
 
+type AppActioner interface {
+	AppAction(ctx context.Context, appID, action string, services ...string) (string, error)
+}
+
 // Handler handles HTTP requests for the controller.
 type Handler struct {
 	Registry    *Registry
@@ -96,6 +100,7 @@ type Handler struct {
 	Applier     RuntimeApplier
 	Inspector   RuntimeInspector
 	Restarter   ServiceRestarter
+	Actions     AppActioner
 	SyncGate    SyncGate
 	Ops         *OperationStore
 	Logger      *slog.Logger
@@ -823,11 +828,11 @@ func (h *Handler) RestartServiceApp(w http.ResponseWriter, r *http.Request) {
 	if service == "" {
 		service = strings.TrimSpace(r.URL.Query().Get("service"))
 	}
-	if !restartServiceNamePattern.MatchString(service) {
-		http.Error(w, "service is required and must match [a-zA-Z0-9][a-zA-Z0-9_.-]*", http.StatusBadRequest)
+	if service != "" && !restartServiceNamePattern.MatchString(service) {
+		http.Error(w, "service must match [a-zA-Z0-9][a-zA-Z0-9_.-]*", http.StatusBadRequest)
 		return
 	}
-	if h.Restarter == nil {
+	if service == "" && h.Actions == nil || service != "" && h.Restarter == nil {
 		http.Error(w, "runtime restarter is not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -843,7 +848,7 @@ func (h *Handler) RestartServiceApp(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "app has no containers to restart", http.StatusConflict)
 			return
 		}
-		found := false
+		found := service == ""
 		for _, c := range containers {
 			if c.Service == service {
 				found = true
@@ -862,7 +867,13 @@ func (h *Handler) RestartServiceApp(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	actor := apiauth.ActorFromRequest(r)
-	_, restartErr := h.Restarter.RestartService(ctx, app.ID, app.ComposePath, service)
+	var restartErr error
+	if service == "" {
+		_, restartErr = h.Actions.AppAction(ctx, app.ID, "restart")
+		service = "all"
+	} else {
+		_, restartErr = h.Restarter.RestartService(ctx, app.ID, app.ComposePath, service)
+	}
 	if restartErr != nil {
 		metrics.ObserveServiceRestart(app.Name, service, "error")
 		_ = h.Registry.RecordAudit(api.AuditEvent{
@@ -891,6 +902,76 @@ func (h *Handler) RestartServiceApp(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(api.APIResponse{
 		Message: fmt.Sprintf("service %s restarted", service),
 		Data:    map[string]string{"app": app.Name, "service": service},
+	})
+}
+
+func (h *Handler) StopApp(w http.ResponseWriter, r *http.Request) {
+	h.runAppAction(w, r, "stop")
+}
+
+func (h *Handler) StartApp(w http.ResponseWriter, r *http.Request) {
+	h.runAppAction(w, r, "start")
+}
+
+func (h *Handler) runAppAction(w http.ResponseWriter, r *http.Request, action string) {
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if h.Actions == nil {
+		http.Error(w, "runtime actions are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if app.Status == "syncing" {
+		http.Error(w, "sync already in progress", http.StatusConflict)
+		return
+	}
+	timeout := h.SyncTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	wasSuspended := app.Suspended
+	if action == "stop" && !wasSuspended {
+		if err := h.Registry.SetOperatorSuspended(app.ID, true); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	_, actionErr := h.Actions.AppAction(ctx, app.ID, action)
+	if actionErr == nil && action == "start" && wasSuspended {
+		actionErr = h.Registry.SetOperatorSuspended(app.ID, false)
+	}
+	if actionErr != nil && action == "stop" && !wasSuspended {
+		_ = h.Registry.SetOperatorSuspended(app.ID, false)
+	}
+	decision := map[string]string{"stop": "stopped", "start": "started"}[action]
+	if actionErr != nil {
+		decision = action + "_failed"
+	}
+	_ = h.Registry.RecordAudit(api.AuditEvent{
+		Kind:     "app_" + action,
+		Actor:    apiauth.ActorFromRequest(r),
+		AppID:    app.ID,
+		AppName:  app.Name,
+		RepoURL:  app.RepoURL,
+		Decision: decision,
+	})
+	if actionErr != nil {
+		http.Error(w, fmt.Sprintf("%s failed: %v", action, actionErr), http.StatusInternalServerError)
+		return
+	}
+	updated, err := h.Registry.Get(app.ID)
+	if err != nil {
+		updated = app
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.APIResponse{
+		Message: fmt.Sprintf("app %s %s", app.Name, decision),
+		Data:    updated,
 	})
 }
 

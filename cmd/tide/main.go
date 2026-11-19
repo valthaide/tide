@@ -260,6 +260,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 	appHandler.Secrets = secretsProvider
 	if reconciler != nil {
 		appHandler.Restarter = reconciler
+		appHandler.Actions = reconciler
 		appHandler.SyncGate = reconciler
 		appHandler.Tenants = reconciler.Tenants
 	}
@@ -307,6 +308,8 @@ func runController(args []string, stdout, stderr io.Writer) int {
 					r.Post("/{id}/reconcile", appHandler.ReconcileApp)
 					r.Post("/{id}/retry", appHandler.RetryApp)
 				r.Post("/{id}/restart", appHandler.RestartServiceApp)
+					r.Post("/{id}/stop", appHandler.StopApp)
+					r.Post("/{id}/start", appHandler.StartApp)
 					r.Post("/{id}/suspend", appHandler.SuspendApp)
 					r.Post("/{id}/resume", appHandler.ResumeApp)
 					r.Delete("/{id}", appHandler.DeleteApp)
