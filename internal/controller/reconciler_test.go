@@ -1066,3 +1066,42 @@ func TestOperatorSuspendSurvivesFleetAndRestart(t *testing.T) {
 		t.Fatalf("resume: suspended=%v status=%s", got.Suspended, got.Status)
 	}
 }
+
+func TestWatchActionAppliesOnceForStaleApp(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "tide-control", RepoURL: "https://example.com/mon.git", Branch: "main",
+		ComposePath: "docker-compose.yml", PollInterval: "30s",
+		LastSeenCommit: "df8f922", Status: "synced",
+	}
+	addPublicApp(t, reg, app)
+	policy := deploypolicy.Encode(deploypolicy.Policy{WatchFiles: []deploypolicy.WatchFile{
+		{Path: "tide-control/app.py", Action: "restart", Service: "tide-control"},
+	}})
+	if err := reg.UpdateDeployPolicy(app.ID, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.UpdateWatchHash(app.ID, encodeWatchHashes(map[string]string{"tide-control/app.py": "old"})); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := reg.Get(app.ID)
+	stale, _ := reg.Get(app.ID)
+	rt := &reloadRuntime{hashes: map[string]string{"tide-control/app.py": "new"}}
+	rec := testReconciler(t, reg, rt, ReconcilerConfig{})
+	rec.recordAppliedWatchHash(first)
+	rec.handleWatchFileDrift(stale)
+	if len(rt.restarts) != 1 || rt.restarts[0] != "tide-control" {
+		t.Fatalf("restarts %v", rt.restarts)
+	}
+	rt.hashes = map[string]string{"tide-control/app.py": "newer"}
+	rec.claimWatch(app.ID)
+	rec.handleWatchFileDrift(stale)
+	if len(rt.restarts) != 1 {
+		t.Fatalf("restart while busy %v", rt.restarts)
+	}
+	rec.releaseWatch(app.ID)
+	rec.handleWatchFileDrift(stale)
+	if len(rt.restarts) != 2 {
+		t.Fatalf("restarts %v", rt.restarts)
+	}
+}

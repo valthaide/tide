@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/valthaide/tide/internal/api"
@@ -275,5 +276,46 @@ func TestRestartWholeAppAndStopStart(t *testing.T) {
 	}
 	if kinds["service_restart"] != "restarted" || kinds["app_stop"] != "stopped" || kinds["app_start"] != "started" {
 		t.Fatalf("audit %+v", events)
+	}
+}
+
+func TestRestartWholeAppHoldsRuntimeDrift(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{
+		Name: "test-en", RepoURL: "https://example/repo.git", Branch: "main",
+		ComposePath: "compose.yaml", PollInterval: "30s",
+		LastSeenCommit: "aaaaaaaa", Status: "synced",
+	}
+	addPublicApp(t, reg, app)
+	if err := reg.UpdateSyncResult(app.ID, "synced", time.Now(), "aaaaaaaa", "ok", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ := reg.Get(app.ID)
+	rt := &optRestartRuntime{}
+	rt.snapshot = map[string]compose.ProjectRuntimeState{
+		fresh.ComposeProject(): {ContainerCount: 2, RunningCount: 1, FlappingCount: 1},
+	}
+	rec := testReconciler(t, reg, rt, ReconcilerConfig{})
+	if _, err := rec.AppAction(context.Background(), app.ID, "restart"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		rec.reconcileOnce()
+	}
+	if len(rt.applyCalls) != 0 || rec.queued(app.ID) {
+		t.Fatalf("sync after restart applies=%v", rt.applyCalls)
+	}
+	if reason, _ := rec.cheapDrift(fresh, rt.snapshot); reason != "" {
+		t.Fatalf("drift after restart %q", reason)
+	}
+	got, _ := reg.Get(app.ID)
+	if got.Status != "synced" {
+		t.Fatalf("status %q", got.Status)
+	}
+	if _, err := rec.AppAction(context.Background(), app.ID, "stop"); err != nil {
+		t.Fatal(err)
+	}
+	if reason, _ := rec.cheapDrift(fresh, rt.snapshot); reason != "runtime_restarting" {
+		t.Fatalf("drift after stop %q", reason)
 	}
 }

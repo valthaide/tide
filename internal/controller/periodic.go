@@ -234,7 +234,7 @@ func (r *Reconciler) cheapDrift(app *App, snap map[string]compose.ProjectRuntime
 	if reason := r.templateDriftReason(app); reason != "" {
 		return reason, "fleet"
 	}
-	if snap != nil {
+	if snap != nil && !r.runtimeHeld(app.ID) {
 		if reason := r.runtimeDriftReason(app.ComposeProject(), snap); reason != "" {
 			return reason, "drift"
 		}

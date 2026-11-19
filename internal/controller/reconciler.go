@@ -318,7 +318,42 @@ func (r *Reconciler) AppAction(ctx context.Context, appID, action string, servic
 	if err != nil {
 		return "", err
 	}
+	if action == "stop" {
+		r.releaseRuntime(app.ID)
+	} else {
+		r.holdRuntime(app)
+	}
 	return ca.ComposeAction(ctx, app.ID, app.ComposePath, action, opts, services...)
+}
+
+func (r *Reconciler) holdRuntime(app *App) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.runtimeHolds == nil {
+		r.runtimeHolds = map[string]time.Time{}
+	}
+	r.runtimeHolds[app.ID] = time.Now().Add(app.HealthTimeoutDuration())
+	delete(r.driftStreak, app.ID)
+}
+
+func (r *Reconciler) releaseRuntime(id string) {
+	r.mu.Lock()
+	delete(r.runtimeHolds, id)
+	r.mu.Unlock()
+}
+
+func (r *Reconciler) runtimeHeld(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	until, ok := r.runtimeHolds[id]
+	if !ok {
+		return false
+	}
+	if time.Now().Before(until) {
+		return true
+	}
+	delete(r.runtimeHolds, id)
+	return false
 }
 
 type optionsExecer interface {
@@ -337,6 +372,7 @@ func (r *Reconciler) execService(ctx context.Context, app *App, mgr WatchFileMan
 }
 
 func (r *Reconciler) restartService(ctx context.Context, app *App, composePath, service string) (string, error) {
+	r.holdRuntime(app)
 	if ca, ok := r.Executor.(composeActioner); ok {
 		opts, err := r.runtimeOptions(app)
 		if err != nil {
@@ -422,6 +458,8 @@ type Reconciler struct {
 	bypasses         map[string]ciBypassGrant
 	prevTenantHolds  map[string]tenant.HoldState
 	envPending       map[string]*envDebounceState
+	runtimeHolds     map[string]time.Time
+	watchBusy        map[string]struct{}
 }
 
 // NewReconciler creates a new reconciler.
@@ -587,7 +625,7 @@ func (r *Reconciler) dispatch() {
 		if r.maybeRecover(app, runtimeSnapshot) {
 			continue
 		}
-		if app.Status == "synced" && runtimeSnapshot != nil {
+		if app.Status == "synced" && runtimeSnapshot != nil && !r.runtimeHeld(app.ID) {
 			if reason := r.runtimeDriftReason(app.ComposeProject(), runtimeSnapshot); reason != "" {
 				if r.noteDrift(app.ID) >= 2 {
 					r.clearDrift(app.ID)
@@ -2074,6 +2112,13 @@ func (r *Reconciler) reconcileWatchFiles(app *App) {
 	if len(policy.WatchFiles) == 0 {
 		return
 	}
+	if !r.claimWatch(app.ID) {
+		return
+	}
+	defer r.releaseWatch(app.ID)
+	if cur, err := r.Registry.Get(app.ID); err == nil {
+		app.LastAppliedWatchHash = cur.LastAppliedWatchHash
+	}
 	hashes, err := mgr.WatchEntryHashesForApp(app.ID, policy.WatchFiles)
 	if err != nil {
 		metrics.SetWatchHashError(app.Name, true)
@@ -2136,6 +2181,25 @@ func (r *Reconciler) reconcileWatchFiles(app *App) {
 	r.applyWatchActions(app, mgr, changed)
 	_ = r.Registry.UpdateWatchHash(app.ID, encoded)
 	app.LastAppliedWatchHash = encoded
+}
+
+func (r *Reconciler) claimWatch(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.watchBusy[id]; ok {
+		return false
+	}
+	if r.watchBusy == nil {
+		r.watchBusy = map[string]struct{}{}
+	}
+	r.watchBusy[id] = struct{}{}
+	return true
+}
+
+func (r *Reconciler) releaseWatch(id string) {
+	r.mu.Lock()
+	delete(r.watchBusy, id)
+	r.mu.Unlock()
 }
 
 func (r *Reconciler) applyWatchActions(app *App, mgr WatchFileManager, files []deploypolicy.WatchFile) {
