@@ -319,3 +319,49 @@ func TestRestartWholeAppHoldsRuntimeDrift(t *testing.T) {
 		t.Fatalf("drift after stop %q", reason)
 	}
 }
+
+type fakeRuntimeViewer struct {
+	fakeInspector
+	projects []string
+}
+
+func (f *fakeRuntimeViewer) RuntimeView(_ context.Context, project string) ([]compose.RunningImage, map[string]compose.ProjectRuntimeState, error) {
+	f.projects = append(f.projects, project)
+	images := []compose.RunningImage{{Project: project, Service: "php", Image: "registry.example/php:v1.2.3", Digest: "sha256:beef"}}
+	return images, map[string]compose.ProjectRuntimeState{project: {Oneshot: "migrate completed exit 0"}}, nil
+}
+
+func TestGetAppByNameScansOneProject(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{Name: "dev-test-ru-backend", RepoURL: "https://example/repo.git", Branch: "main", ComposePath: "compose.yaml"}
+	addPublicApp(t, reg, app)
+
+	viewer := &fakeRuntimeViewer{}
+	h := NewHandler(reg, nil, nil, nil, nil, "test")
+	h.Inspector = viewer
+	router := chi.NewRouter()
+	router.Get("/api/v1/apps/{id}", h.GetApp)
+
+	for _, ref := range []string{app.ID, app.Name} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/apps/"+ref, nil)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status %d body %s", ref, rr.Code, rr.Body.String())
+		}
+		body := rr.Body.String()
+		if !strings.Contains(body, app.ID) || !strings.Contains(body, `"tag":"v1.2.3"`) || !strings.Contains(body, "migrate completed") {
+			t.Fatalf("%s body %s", ref, body)
+		}
+	}
+	if len(viewer.projects) != 2 || viewer.projects[0] != app.ComposeProject() || viewer.projects[1] != app.ComposeProject() {
+		t.Fatalf("projects %+v", viewer.projects)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/apps/missing", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing status %d", rr.Code)
+	}
+}

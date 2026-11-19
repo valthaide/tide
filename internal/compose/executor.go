@@ -50,6 +50,8 @@ type ComposeExecutor struct {
 	digestMu   sync.Mutex
 	expected   map[string]map[string]string
 	refs       map[string]map[string]string
+	imageMu    sync.Mutex
+	imageCache map[string]cachedImage
 	PullGate   SlotGate
 }
 
@@ -803,6 +805,14 @@ func (e *ComposeExecutor) ProjectHealth(ctx context.Context, project string) (Pr
 		return ProjectRuntimeState{}, err
 	}
 	return snap[strings.TrimSpace(project)], nil
+}
+
+func (e *ComposeExecutor) RuntimeView(ctx context.Context, project string) ([]RunningImage, map[string]ProjectRuntimeState, error) {
+	obs, err := e.observeProject(ctx, project)
+	if err != nil {
+		return nil, nil, err
+	}
+	return runningImages(obs), foldObservations(obs, time.Now()), nil
 }
 
 // SnapshotProjects captures compose runtime status from Docker for all projects.

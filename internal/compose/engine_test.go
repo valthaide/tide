@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -65,5 +66,50 @@ func TestReadEngineObservations(t *testing.T) {
 	}
 	if !strings.Contains(got.RepoDigest, "sha256:deadbeef") {
 		t.Fatalf("digest: %q image %q", got.RepoDigest, imageID)
+	}
+}
+
+func TestReadProjectObservationsCachesImages(t *testing.T) {
+	var imageHits, listHits int
+	var mu sync.Mutex
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1.44/containers/json", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Query().Get("filters"), "com.docker.compose.project=crm") {
+			t.Errorf("filters: %s", r.URL.RawQuery)
+		}
+		mu.Lock()
+		listHits++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`[
+			{"Id":"c1","Names":["/crm-php-1"],"Image":"registry.example/php:1","ImageID":"sha256:img1","Labels":{"com.docker.compose.project":"crm","com.docker.compose.service":"php"},"State":"running","Status":"Up 2 minutes"},
+			{"Id":"c2","Names":["/crm-cron-1"],"Image":"registry.example/php:1","ImageID":"sha256:img1","Labels":{"com.docker.compose.project":"crm","com.docker.compose.service":"cron"},"State":"running","Status":"Up 2 minutes"}
+		]`))
+	})
+	mux.HandleFunc("/v1.44/containers/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1.44/containers/"), "/json")
+		_, _ = w.Write([]byte(`{"Id":"` + id + `","Image":"sha256:img1","State":{"Status":"running","Running":true}}`))
+	})
+	mux.HandleFunc("/v1.44/images/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		imageHits++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"Id":"sha256:img1","RepoTags":["registry.example/php:1"],"RepoDigests":["registry.example/php@sha256:beef"]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	client := &engineClient{base: srv.URL, http: srv.Client()}
+
+	e := &ComposeExecutor{}
+	for i := 0; i < 3; i++ {
+		obs, err := e.readProjectObservations(t.Context(), client, "crm")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(obs) != 2 || obs[0].RepoDigest == "" || obs[1].RepoDigest == "" || !obs[1].HasInspect {
+			t.Fatalf("obs: %+v", obs)
+		}
+	}
+	if imageHits != 1 || listHits != 3 {
+		t.Fatalf("image hits %d list hits %d", imageHits, listHits)
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
 const engineAPIVersion = "v1.44"
@@ -131,15 +133,29 @@ func (c *engineClient) listProjectContainers(ctx context.Context, project string
 }
 
 func (e *ComposeExecutor) observeContainers(ctx context.Context) ([]containerObs, error) {
+	return e.observeProject(ctx, "")
+}
+
+func (e *ComposeExecutor) observeProject(ctx context.Context, project string) ([]containerObs, error) {
 	client, err := newEngineClient()
 	if err != nil {
 		return nil, err
 	}
-	return e.readEngineObservations(ctx, client)
+	return e.readProjectObservations(ctx, client, project)
 }
 
 func (e *ComposeExecutor) readEngineObservations(ctx context.Context, client *engineClient) ([]containerObs, error) {
-	listed, err := client.listComposeContainers(ctx)
+	return e.readProjectObservations(ctx, client, "")
+}
+
+func (e *ComposeExecutor) readProjectObservations(ctx context.Context, client *engineClient, project string) ([]containerObs, error) {
+	var listed []engineContainer
+	var err error
+	if project = strings.TrimSpace(project); project != "" {
+		listed, err = client.listProjectContainers(ctx, project)
+	} else {
+		listed, err = client.listComposeContainers(ctx)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("docker engine container list failed: %w", err)
 	}
@@ -172,19 +188,22 @@ func (e *ComposeExecutor) readEngineObservations(ctx context.Context, client *en
 		return obs, nil
 	}
 
-	var inspected []json.RawMessage
+	ids := make([]string, len(obs))
 	for i := range obs {
-		if obs[i].ID == "" {
-			continue
+		ids[i] = obs[i].ID
+	}
+	bodies := fetchParallel(ctx, ids, func(ctx context.Context, id string) ([]byte, error) {
+		body, err := client.inspectContainer(ctx, id)
+		if err != nil && e != nil && e.Logger != nil {
+			e.Logger.Warn("docker engine inspect failed; restart and oneshot details unavailable", "id", id, "error", err)
 		}
-		body, err := client.inspectContainer(ctx, obs[i].ID)
-		if err != nil {
-			if e != nil && e.Logger != nil {
-				e.Logger.Warn("docker engine inspect failed; restart and oneshot details unavailable", "id", obs[i].ID, "error", err)
-			}
-			continue
+		return body, err
+	})
+	var inspected []json.RawMessage
+	for _, body := range bodies {
+		if body != nil {
+			inspected = append(inspected, json.RawMessage(body))
 		}
-		inspected = append(inspected, json.RawMessage(body))
 	}
 	if len(inspected) > 0 {
 		raw, err := json.Marshal(inspected)
@@ -197,16 +216,18 @@ func (e *ComposeExecutor) readEngineObservations(ctx context.Context, client *en
 	}
 
 	refs := imageRefs(obs)
-	var images []json.RawMessage
-	for _, ref := range refs {
-		body, err := client.inspectImage(ctx, ref)
-		if err != nil {
-			if e != nil && e.Logger != nil {
-				e.Logger.Warn("docker engine image inspect failed; digests unavailable", "image", ref, "error", err)
-			}
-			continue
+	imageBodies := fetchParallel(ctx, refs, func(ctx context.Context, ref string) ([]byte, error) {
+		body, err := e.cachedImageInspect(ctx, client, ref)
+		if err != nil && e != nil && e.Logger != nil {
+			e.Logger.Warn("docker engine image inspect failed; digests unavailable", "image", ref, "error", err)
 		}
-		images = append(images, json.RawMessage(body))
+		return body, err
+	})
+	var images []json.RawMessage
+	for _, body := range imageBodies {
+		if body != nil {
+			images = append(images, json.RawMessage(body))
+		}
 	}
 	if len(images) > 0 {
 		raw, err := json.Marshal(images)
@@ -218,4 +239,64 @@ func (e *ComposeExecutor) readEngineObservations(ctx context.Context, client *en
 		}
 	}
 	return obs, nil
+}
+
+const engineParallel = 8
+
+const imageInspectTTL = 10 * time.Minute
+
+type cachedImage struct {
+	body []byte
+	at   time.Time
+}
+
+func fetchParallel(ctx context.Context, keys []string, fetch func(context.Context, string) ([]byte, error)) [][]byte {
+	out := make([][]byte, len(keys))
+	sem := make(chan struct{}, engineParallel)
+	var wg sync.WaitGroup
+	for i, key := range keys {
+		if key == "" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, key string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if body, err := fetch(ctx, key); err == nil {
+				out[i] = body
+			}
+		}(i, key)
+	}
+	wg.Wait()
+	return out
+}
+
+func (e *ComposeExecutor) cachedImageInspect(ctx context.Context, client *engineClient, ref string) ([]byte, error) {
+	cacheable := e != nil && strings.HasPrefix(ref, "sha256:")
+	now := time.Now()
+	if cacheable {
+		e.imageMu.Lock()
+		hit, ok := e.imageCache[ref]
+		e.imageMu.Unlock()
+		if ok && now.Sub(hit.at) < imageInspectTTL {
+			return hit.body, nil
+		}
+	}
+	body, err := client.inspectImage(ctx, ref)
+	if err != nil || !cacheable {
+		return body, err
+	}
+	e.imageMu.Lock()
+	if e.imageCache == nil {
+		e.imageCache = map[string]cachedImage{}
+	}
+	for key, item := range e.imageCache {
+		if now.Sub(item.at) >= imageInspectTTL {
+			delete(e.imageCache, key)
+		}
+	}
+	e.imageCache[ref] = cachedImage{body: body, at: now}
+	e.imageMu.Unlock()
+	return body, nil
 }

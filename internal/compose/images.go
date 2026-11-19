@@ -583,6 +583,10 @@ func (e *ComposeExecutor) RunningImages(ctx context.Context) ([]RunningImage, er
 	if err != nil {
 		return nil, err
 	}
+	return runningImages(obs), nil
+}
+
+func runningImages(obs []containerObs) []RunningImage {
 	var images []RunningImage
 	for _, c := range obs {
 		if c.Project == "" || c.Service == "" || c.OneOff || !c.Running {
@@ -595,7 +599,7 @@ func (e *ComposeExecutor) RunningImages(ctx context.Context) ([]RunningImage, er
 			Digest:  digestLabel(c.RepoDigest, c.ImageID),
 		})
 	}
-	return images, nil
+	return images
 }
 
 func digestLabel(repoDigest, imageID string) string {

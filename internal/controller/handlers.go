@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -144,8 +145,7 @@ func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 
 // ListAppContainers handles GET /api/v1/apps/{id}/containers.
 func (h *Handler) ListAppContainers(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	app, err := h.Registry.Get(id)
+	app, err := h.findApp(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -270,8 +270,14 @@ func (h *Handler) attachRunningImages(ctx context.Context, apps []*api.App) {
 }
 
 func (h *Handler) decorate(ctx context.Context, apps []*api.App) {
-	h.attachRunningImages(ctx, apps)
-	h.attachOneshot(ctx, apps)
+	h.decorateProject(ctx, apps, "")
+}
+
+func (h *Handler) decorateProject(ctx context.Context, apps []*api.App, project string) {
+	if !h.attachRuntimeView(ctx, apps, project) {
+		h.attachRunningImages(ctx, apps)
+		h.attachOneshot(ctx, apps)
+	}
 	// Status shows whether the app checkout provides compose.override.yaml.
 	if inspector, ok := h.Inspector.(interface {
 		HasOverrideForApp(appID, appDir string) bool
@@ -346,6 +352,40 @@ func imageTag(ref string) string {
 	return ""
 }
 
+func (h *Handler) attachRuntimeView(ctx context.Context, apps []*api.App, project string) bool {
+	viewer, ok := h.Inspector.(interface {
+		RuntimeView(ctx context.Context, project string) ([]compose.RunningImage, map[string]compose.ProjectRuntimeState, error)
+	})
+	if !ok || viewer == nil {
+		return false
+	}
+	vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	images, states, err := viewer.RuntimeView(vctx, project)
+	if err != nil {
+		return true
+	}
+	byProject := map[string][]api.ImageRef{}
+	for _, img := range images {
+		byProject[img.Project] = append(byProject[img.Project], api.ImageRef{
+			Service: img.Service,
+			Image:   img.Image,
+			Digest:  img.Digest,
+			Tag:     imageTag(img.Image),
+		})
+	}
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		app.Images = byProject[app.ComposeProject()]
+		app.Oneshot = states[app.ComposeProject()].Oneshot
+		app.FleetRevision = metrics.FleetSHA()
+		app.Schema = 1
+	}
+	return true
+}
+
 func (h *Handler) attachOneshot(ctx context.Context, apps []*api.App) {
 	type snapper interface {
 		SnapshotProjects(ctx context.Context) (map[string]compose.ProjectRuntimeState, error)
@@ -371,8 +411,7 @@ func (h *Handler) attachOneshot(ctx context.Context, apps []*api.App) {
 }
 
 func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	app, err := h.Registry.Get(id)
+	app, err := h.findApp(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -383,7 +422,7 @@ func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	revs, err := h.Registry.ListDeploys(id, limit)
+	revs, err := h.Registry.ListDeploys(app.ID, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -468,29 +507,49 @@ func (h *Handler) GetAppEnvStatus(w http.ResponseWriter, r *http.Request) {
 
 // GetApp handles GET /api/v1/apps/{id}
 func (h *Handler) GetApp(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	app, err := h.Registry.Get(id)
+	app, err := h.findApp(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	h.decorate(r.Context(), []*api.App{app})
+	var wg sync.WaitGroup
+	var vols []compose.VolumeInfo
+	var volErr error = errNoVolumes
 	if lister, ok := h.Inspector.(interface {
 		ProjectVolumes(ctx context.Context, project string) ([]compose.VolumeInfo, error)
 	}); ok && lister != nil {
-		vctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		vols, volErr := lister.ProjectVolumes(vctx, app.ComposeProject())
-		cancel()
-		if volErr == nil {
-			for _, vol := range vols {
-				app.Volumes = append(app.Volumes, api.VolumeRef{Name: vol.Name, Containers: vol.Containers})
-			}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			vctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+			vols, volErr = lister.ProjectVolumes(vctx, app.ComposeProject())
+		}()
+	}
+	h.decorateProject(r.Context(), []*api.App{app}, app.ComposeProject())
+	wg.Wait()
+	if volErr == nil {
+		for _, vol := range vols {
+			app.Volumes = append(app.Volumes, api.VolumeRef{Name: vol.Name, Containers: vol.Containers})
 		}
 	}
 
 	json.NewEncoder(w).Encode(api.APIResponse{
 		Data: app,
 	})
+}
+
+var errNoVolumes = errors.New("volumes unavailable")
+
+func (h *Handler) findApp(ref string) (*api.App, error) {
+	app, err := h.Registry.Get(ref)
+	if err == nil {
+		return app, nil
+	}
+	if byName := h.Registry.FindByName(ref); byName != nil {
+		return byName, nil
+	}
+	return nil, err
 }
 
 // DeleteApp handles DELETE /api/v1/apps/{id}
