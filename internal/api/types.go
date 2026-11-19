@@ -164,7 +164,7 @@ type DeployEvent struct {
 type AuditEvent struct {
 	ID             int64     `json:"id"`
 	CreatedAt      time.Time `json:"created_at"`
-	Kind           string    `json:"kind"` // ci_force_bypass | repo_migration
+	Kind           string    `json:"kind"` // ci_force_bypass | repo_migration | service_restart
 	Actor          string    `json:"actor"`
 	AppID          string    `json:"app_id"`
 	AppName        string    `json:"app_name"`

@@ -256,6 +256,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 
 	appHandler := controller.NewHandler(registry, executor, executor, executor, logger, Version)
 	appHandler.SyncTimeout = reconcilerCfg.SyncTimeout
+	appHandler.Restarter = executor
 	appHandler.Secrets = secretsProvider
 	if reconciler != nil {
 		appHandler.SyncGate = reconciler
@@ -304,6 +305,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 					r.Post("/{id}/sync", appHandler.ForceSyncApp)
 					r.Post("/{id}/reconcile", appHandler.ReconcileApp)
 					r.Post("/{id}/retry", appHandler.RetryApp)
+				r.Post("/{id}/restart", appHandler.RestartServiceApp)
 					r.Post("/{id}/suspend", appHandler.SuspendApp)
 					r.Post("/{id}/resume", appHandler.ResumeApp)
 					r.Delete("/{id}", appHandler.DeleteApp)

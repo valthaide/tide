@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,12 +84,18 @@ type SyncGate interface {
 	ReleaseSync()
 }
 
+// ServiceRestarter restarts one compose service of an app without a full sync.
+type ServiceRestarter interface {
+	RestartService(ctx context.Context, appID, composePath, service string) (string, error)
+}
+
 // Handler handles HTTP requests for the controller.
 type Handler struct {
 	Registry    *Registry
 	Cleaner     RuntimeCleaner
 	Applier     RuntimeApplier
 	Inspector   RuntimeInspector
+	Restarter   ServiceRestarter
 	SyncGate    SyncGate
 	Ops         *OperationStore
 	Logger      *slog.Logger
@@ -793,6 +800,98 @@ func (h *Handler) RetryApp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(api.APIResponse{Message: "retry queued", Data: app})
+}
+
+var restartServiceNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// RestartServiceApp handles POST /api/v1/apps/{id}/restart.
+// It restarts one compose service of the app without a full sync, a new commit, or SSH access.
+func (h *Handler) RestartServiceApp(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var reqBody struct {
+		Service string `json:"service"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+	}
+	service := strings.TrimSpace(reqBody.Service)
+	if service == "" {
+		service = strings.TrimSpace(r.URL.Query().Get("service"))
+	}
+	if !restartServiceNamePattern.MatchString(service) {
+		http.Error(w, "service is required and must match [a-zA-Z0-9][a-zA-Z0-9_.-]*", http.StatusBadRequest)
+		return
+	}
+	if h.Restarter == nil {
+		http.Error(w, "runtime restarter is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if h.Inspector != nil {
+		inspectCtx, cancelInspect := context.WithTimeout(r.Context(), 15*time.Second)
+		containers, inspectErr := h.Inspector.InspectProjectContainers(inspectCtx, app.ComposeProject())
+		cancelInspect()
+		if inspectErr != nil {
+			http.Error(w, inspectErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(containers) == 0 {
+			http.Error(w, "app has no containers to restart", http.StatusConflict)
+			return
+		}
+		found := false
+		for _, c := range containers {
+			if c.Service == service {
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, fmt.Sprintf("service %q not found in app %s", service, app.Name), http.StatusNotFound)
+			return
+		}
+	}
+	timeout := h.SyncTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	actor := apiauth.ActorFromRequest(r)
+	_, restartErr := h.Restarter.RestartService(ctx, app.ID, app.ComposePath, service)
+	if restartErr != nil {
+		metrics.ObserveServiceRestart(app.Name, service, "error")
+		_ = h.Registry.RecordAudit(api.AuditEvent{
+			Kind:     "service_restart",
+			Actor:    actor,
+			AppID:    app.ID,
+			AppName:  app.Name,
+			RepoURL:  app.RepoURL,
+			Reason:   service,
+			Decision: "restart_failed",
+		})
+		http.Error(w, fmt.Sprintf("restart failed: %v", restartErr), http.StatusInternalServerError)
+		return
+	}
+	metrics.ObserveServiceRestart(app.Name, service, "ok")
+	_ = h.Registry.RecordAudit(api.AuditEvent{
+		Kind:     "service_restart",
+		Actor:    actor,
+		AppID:    app.ID,
+		AppName:  app.Name,
+		RepoURL:  app.RepoURL,
+		Reason:   service,
+		Decision: "restarted",
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.APIResponse{
+		Message: fmt.Sprintf("service %s restarted", service),
+		Data:    map[string]string{"app": app.Name, "service": service},
+	})
 }
 
 type reconcileAppRequest struct {

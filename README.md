@@ -60,6 +60,7 @@ tidectl --version
 tidectl get apps
 tidectl get app <name>
 tidectl retry <name>
+tidectl restart <name> <service>
 tidectl reconcile app <name> --force --sha <40-char-sha> --reason "incident-123"
 tidectl migrate-repo <name> --repo-url https://git.example/tenant/app.git --dry-run
 tidectl migrate-repo <name> --template web --app-dir backend --dry-run

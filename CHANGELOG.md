@@ -90,6 +90,9 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.7.0 (2026-11-19)
+- **Operator service restart**: `tidectl restart <app> <service>` (POST `/api/v1/apps/{id}/restart`) restarts one compose service without SSH and without a new commit. The service name is validated against the running project containers; every attempt is written to the audit log (`service_restart`, decisions `restarted` / `restart_failed`) and counted in `tide_service_restarts_total{app,service,result}`.
+
 ### v2.6.1 (2026-11-18)
 - **Crash-loop restart metric**: `tide_app_service_restarting{app,service}` reports the restart count of every service container that keeps restarting, refreshed on each reconcile pass from the Docker Engine runtime state.
 - **Accurate rollback vs unhealthy distinction**: `tide_app_rolled_back` now fires only when a failed revision was actually rolled back to a different healthy state (commit or vars differ); when the running revision itself fails health and there is no other healthy revision to roll back to, the new `tide_app_current_unhealthy{app,revision}` gauge fires instead.

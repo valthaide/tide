@@ -368,6 +368,12 @@ var (
 		Help:      "Current pause between sync retries for an app repeating the same error.",
 	}, []string{"app"})
 
+	serviceRestartsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "service_restarts_total",
+		Help:      "Operator-triggered single service restarts via the API by result.",
+	}, []string{"app", "service", "result"})
+
 	secretsProviderUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "secrets_provider_up",
@@ -688,6 +694,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		appReconcileOverdue,
 		appReconcileAttempt,
 		syncBackoff,
+		serviceRestartsTotal,
 		secretsProviderUp,
 		secretsLoginTotal,
 		secretsTokenTTL,
@@ -1210,6 +1217,7 @@ func ForgetApp(name, id, repo string, repoStillUsed bool) {
 			envHashApplied.DeletePartialMatch(labels)
 			RepoMigrationsTotal.DeletePartialMatch(labels)
 			syncBackoff.DeletePartialMatch(labels)
+			serviceRestartsTotal.DeletePartialMatch(labels)
 			secretsFetchTotal.DeletePartialMatch(labels)
 			secretsLastSuccess.DeletePartialMatch(labels)
 			secretsStale.DeletePartialMatch(labels)
@@ -1289,6 +1297,19 @@ func SetSyncBackoff(app string, seconds float64) {
 		seconds = 0
 	}
 	syncBackoff.WithLabelValues(app).Set(seconds)
+}
+
+// ObserveServiceRestart counts one operator-triggered service restart via the API.
+func ObserveServiceRestart(app, service, result string) {
+	app = strings.TrimSpace(app)
+	service = strings.TrimSpace(service)
+	if app == "" || service == "" {
+		return
+	}
+	if result != "ok" {
+		result = "error"
+	}
+	serviceRestartsTotal.WithLabelValues(app, service, result).Inc()
 }
 
 // SetSecretsProviderUp sets tide_secrets_provider_up{provider}.
