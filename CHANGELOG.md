@@ -90,6 +90,27 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.9.0 (2026-11-21)
+- **Deploy plan (`tidectl plan`, GET `/api/v1/apps/{id}/plan`)**: reports what an apply would change before anything happens — per-service actions (`create` / `recreate` / `restart` / `remove` / `noop`) with reasons, watch_files actions (reload vs restart), volumes to create, and one-shot reruns. Reasons never contain env or secret values. `--fleet-ref <ref>` renders the fleet template at a not-yet-applied revision, so a template change can be reviewed before it rolls out.
+- **Template rollout policies** (`rollout` in the host file): `strategy: all` (default, unchanged behavior), `canary` (apps in `canary_apps` apply the template first and must stay healthy, then the rest roll out one at a time), and `manual` (template changes park the app in `held` until `tidectl apply APP` or POST `/api/v1/apps/{id}/apply` grants one apply; audited as `template_apply`). Only template drift is gated — commit, env, and watch syncs are never held. Held apps release themselves once the gate opens, and fixing a broken template heals failed apps without manual steps. `tidectl apply` can also jump one app ahead of the canary order.
+- **Scoped env_file recreate**: env hashes are stored per file, so an `env_file` change force-recreates only the services that actually mount the changed file (mapped through the rendered compose config) instead of the whole project. A changed file mounted by no service still falls back to a full project recreate, logged explicitly.
+- **watch_files on fleet templates**: `watch_files` entries under `templates/` are hashed inside the fleet checkout, so a template config change triggers its `reload_url` / `reload_command` / targeted restart without recreating containers. The fleet checkout now syncs in place (fetch + truncate/write instead of pull-with-replace), preserving bind-mounted file inodes so running containers observe the new content after a reload.
+
+### v2.8.3 (2026-11-20)
+- **Faster runtime inspection**: Docker Engine inspect calls are fetched in parallel (up to 8 concurrent requests) and `image inspect` results for content-addressed `sha256:` references are cached for 10 minutes, noticeably speeding up status, drift detection, and apply on hosts with many apps.
+
+### v2.8.2 (2026-11-19)
+- **Restart race fixes**: a whole-app restart no longer collides with the reconcile loop — runtime drift during an in-flight restart is reported as `runtime_restarting` instead of triggering a redundant apply, and duplicate restarts while one is busy are collapsed.
+
+### v2.8.1 (2026-11-19)
+- **Correct `stopped` status**: `tidectl stop` now persists the app status as `stopped` (matching the suspended flag), and `start` returns it to `pending`, so `tidectl status` no longer shows a stopped app as failed or syncing.
+
+### v2.8.0 (2026-11-19)
+- **App stop/start actions**: `tidectl stop APP` stops all long-running services of an app and pauses its reconciliation; `tidectl start APP` starts the stack again and resumes reconciliation (POST `/api/v1/apps/{id}/stop|start`). `tidectl restart APP` without a service name restarts the whole app through the same action path.
+
+### v2.7.1 (2026-11-19)
+- **Service restart honors runtime options**: `tidectl restart <app> <service>` now runs with the app's full runtime options (template, `app_dir`, project name, env files and deploy vars), fixing restarts of template-based apps that previously resolved the wrong compose source or missed variables.
+
 ### v2.7.0 (2026-11-19)
 - **Operator service restart**: `tidectl restart <app> <service>` (POST `/api/v1/apps/{id}/restart`) restarts one compose service without SSH and without a new commit. The service name is validated against the running project containers; every attempt is written to the audit log (`service_restart`, decisions `restarted` / `restart_failed`) and counted in `tide_service_restarts_total{app,service,result}`.
 
