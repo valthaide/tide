@@ -275,6 +275,23 @@
       },
       "type": "object"
     },
+    "RolloutSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "canary_apps": {
+          "description": "Apps that apply template changes first under the canary strategy. Every name must appear in the apps list.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strategy": {
+          "description": "Template rollout strategy: all (default), canary (canary_apps apply first, then the rest one at a time while healthy), or manual (template changes wait for tidectl apply).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "SecretFromSpec": {
       "additionalProperties": false,
       "properties": {
@@ -506,6 +523,14 @@
     "retry_rejected": {
       "description": "Retry policy for rejected commits: never, on_new_commit, or interval like 30m.",
       "type": "string"
+    },
+    "rollout": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RolloutSpec"
+        }
+      ],
+      "description": "Fleet template rollout policy. Omitted means every app applies template changes at once."
     },
     "schema": {
       "description": "Fleet format version. Supported version: 1. Omit to use the default. Unknown or newer versions are rejected.",

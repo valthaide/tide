@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -73,6 +74,10 @@ type ApplyOptions struct {
 	// ForceRecreateServices limits --force-recreate to these services.
 	// Empty with ForceRecreate recreates the whole project.
 	ForceRecreateServices []string
+	// EnvChangedPaths lists env_file paths whose content changed since the last
+	// apply. When set, --force-recreate is scoped to the services that mount
+	// those files; unmapped paths fall back to a whole-project recreate.
+	EnvChangedPaths []string
 }
 
 // SlotGate limits how many image pulls run at once.
@@ -143,6 +148,76 @@ func ServicesWithBuild(configJSON []byte) ([]string, error) {
 	}
 	sortStrings(names)
 	return names, nil
+}
+
+// ServicesForEnvPaths maps absolute env_file paths to the services that mount
+// them, using rendered compose config. It returns the sorted services that
+// reference at least one of the paths, plus the paths no service references.
+func ServicesForEnvPaths(configJSON []byte, paths []string) (services []string, unmapped []string) {
+	var doc struct {
+		Services map[string]struct {
+			EnvFile json.RawMessage `json:"env_file"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(configJSON, &doc); err != nil {
+		return nil, paths
+	}
+	wanted := map[string]struct{}{}
+	for _, p := range paths {
+		p = filepath.Clean(strings.TrimSpace(p))
+		if p != "" {
+			wanted[p] = struct{}{}
+		}
+	}
+	matched := map[string]struct{}{}
+	seen := map[string]struct{}{}
+	for name, svc := range doc.Services {
+		if len(bytes.TrimSpace(svc.EnvFile)) == 0 {
+			continue
+		}
+		for _, p := range envFilePathsFromConfig(svc.EnvFile) {
+			if _, ok := wanted[p]; !ok {
+				continue
+			}
+			matched[name] = struct{}{}
+			seen[p] = struct{}{}
+		}
+	}
+	for p := range wanted {
+		if _, ok := seen[p]; !ok {
+			unmapped = append(unmapped, p)
+		}
+	}
+	for name := range matched {
+		services = append(services, name)
+	}
+	sortStrings(services)
+	sortStrings(unmapped)
+	return services, unmapped
+}
+
+func envFilePathsFromConfig(raw json.RawMessage) []string {
+	var out []string
+	var objects []struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(raw, &objects); err == nil && objects != nil {
+		for _, o := range objects {
+			if p := filepath.Clean(strings.TrimSpace(o.Path)); p != "" && p != "." {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	var plain []string
+	if err := json.Unmarshal(raw, &plain); err == nil {
+		for _, p := range plain {
+			if p = filepath.Clean(strings.TrimSpace(p)); p != "" && p != "." {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 // OneshotServiceNames returns services other services wait for with

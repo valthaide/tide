@@ -68,8 +68,9 @@ func parseEnv(text string) map[string]string {
 
 // envHashResult is the unified env_files content fingerprint for an app.
 type envHashResult struct {
-	Hash  string
-	Paths []string
+	Hash    string
+	Paths   []string
+	PerPath map[string]string
 }
 
 type sourceEnvPathLister interface {
@@ -109,11 +110,12 @@ func (r *Reconciler) envHash(app *App) (envHashResult, error) {
 	if len(paths) == 0 {
 		return out, nil
 	}
-	hash, err := compose.HashEnvFilePaths(paths)
+	hash, perPath, err := compose.HashEnvFilePathsDetailed(paths)
 	if err != nil {
 		return out, err
 	}
 	out.Hash = hash
+	out.PerPath = perPath
 	return out, nil
 }
 
@@ -177,13 +179,24 @@ func encodeEnvPaths(paths []string) string {
 
 func decodeEnvPaths(raw string) []string {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "[]" {
+	if raw == "" || raw == "[]" || raw == "{}" {
 		return nil
 	}
 	var paths []string
-	if err := json.Unmarshal([]byte(raw), &paths); err != nil {
+	if err := json.Unmarshal([]byte(raw), &paths); err == nil {
+		return cleanEnvPaths(paths)
+	}
+	var withHashes map[string]string
+	if err := json.Unmarshal([]byte(raw), &withHashes); err != nil {
 		return nil
 	}
+	for p := range withHashes {
+		paths = append(paths, p)
+	}
+	return cleanEnvPaths(paths)
+}
+
+func cleanEnvPaths(paths []string) []string {
 	out := make([]string, 0, len(paths))
 	seen := map[string]struct{}{}
 	for _, p := range paths {
@@ -199,6 +212,66 @@ func decodeEnvPaths(raw string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// encodeEnvPathHashes stores per-path content hashes as a JSON object.
+func encodeEnvPathHashes(perPath map[string]string) string {
+	if len(perPath) == 0 {
+		return "{}"
+	}
+	data, err := json.Marshal(perPath)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+// decodeEnvPathHashes reads per-path content hashes. Legacy rows that store a
+// plain path list return nil (per-path hashes unknown).
+func decodeEnvPathHashes(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	var withHashes map[string]string
+	if err := json.Unmarshal([]byte(raw), &withHashes); err != nil || len(withHashes) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(withHashes))
+	for p, h := range withHashes {
+		p = filepath.Clean(strings.TrimSpace(p))
+		h = strings.TrimSpace(h)
+		if p == "" || h == "" {
+			continue
+		}
+		out[p] = h
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// changedEnvPaths returns sorted paths whose content hash differs between the
+// last applied and the current state, including added and removed paths.
+// It returns nil when the previous per-path hashes are unknown (legacy rows).
+func changedEnvPaths(prev, cur map[string]string) []string {
+	if len(prev) == 0 || len(cur) == 0 {
+		return nil
+	}
+	var changed []string
+	for p, h := range cur {
+		if prev[p] != h {
+			changed = append(changed, p)
+		}
+	}
+	for p := range prev {
+		if _, ok := cur[p]; !ok {
+			changed = append(changed, p)
+		}
+	}
+	sort.Strings(changed)
+	return changed
 }
 
 // envHashNeedsApply reports content drift that still requires a redeploy
@@ -358,11 +431,11 @@ func (h *Handler) recordAppliedEnvHash(app *App) {
 		add(p)
 	}
 	sort.Strings(paths)
-	hash, err := compose.HashEnvFilePaths(paths)
+	hash, perPath, err := compose.HashEnvFilePathsDetailed(paths)
 	if err != nil || hash == "" {
 		return
 	}
-	_ = h.Registry.UpdateEnvHash(app.ID, hash, encodeEnvPaths(paths))
+	_ = h.Registry.UpdateEnvHash(app.ID, hash, encodeEnvPathHashes(perPath))
 	metrics.SetEnvDrift(app.Name, false)
 	metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())
 }

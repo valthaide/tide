@@ -136,6 +136,10 @@ func expandWatchPath(repoAbs, pattern string) ([]string, error) {
 	}
 	absPattern = filepath.Clean(absPattern)
 
+	if repoRelative && !isUnder(repoAbs, absPattern) {
+		return nil, fmt.Errorf("watch path escapes checkout: %s", pattern)
+	}
+
 	if strings.ContainsAny(filepath.Base(absPattern), "*?[") || strings.ContainsAny(absPattern, "*?[") {
 		matches, err := filepath.Glob(absPattern)
 		if err != nil {
@@ -223,10 +227,39 @@ func (e *ComposeExecutor) WatchEntryHashesForApp(appID string, files []deploypol
 }
 
 // WatchFilesHashForApp hashes watch files for an app under the runtime workdir.
+// Entries under templates/ hash inside the fleet checkout instead.
 func (e *ComposeExecutor) WatchFilesHashForApp(appID string, files []deploypolicy.WatchFile) (string, error) {
 	if e == nil {
 		return "", fmt.Errorf("compose executor is nil")
 	}
 	repoDir := filepath.Join(e.WorkDir, appID, "repo")
-	return WatchFilesHashForAppName(appID, repoDir, files)
+	var repoFiles, templateFiles []deploypolicy.WatchFile
+	for _, f := range files {
+		if deploypolicy.IsTemplateWatchPath(f.Path) {
+			templateFiles = append(templateFiles, f)
+		} else {
+			repoFiles = append(repoFiles, f)
+		}
+	}
+	if len(templateFiles) == 0 {
+		return WatchFilesHashForAppName(appID, repoDir, files)
+	}
+	fleetDir := e.fleetCheckoutDir(ApplyOptions{})
+	if strings.TrimSpace(fleetDir) == "" {
+		return "", &WatchHashError{App: appID, Path: templateFiles[0].Path, Err: fmt.Errorf("fleet checkout dir is not configured")}
+	}
+	h := sha256.New()
+	if len(repoFiles) > 0 {
+		sum, err := WatchFilesHashForAppName(appID, repoDir, repoFiles)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "repo=%s\n", sum)
+	}
+	sum, err := WatchFilesHashForAppName(appID, fleetDir, templateFiles)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(h, "templates=%s\n", sum)
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

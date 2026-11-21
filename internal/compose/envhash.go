@@ -158,6 +158,14 @@ func ExternalEnvHash(repoDir, composePath string) (string, error) {
 // HashEnvFilePaths hashes absolute env file paths as path=sha256(content)\n.
 // Empty files return CodeEnvFileEmpty; missing files return CodeEnvFileMissing.
 func HashEnvFilePaths(paths []string) (string, error) {
+	hash, _, err := HashEnvFilePathsDetailed(paths)
+	return hash, err
+}
+
+// HashEnvFilePathsDetailed is HashEnvFilePaths plus the per-path content hashes
+// keyed by cleaned absolute path, so callers can diff which file changed.
+func HashEnvFilePathsDetailed(paths []string) (string, map[string]string, error) {
+	perPath := map[string]string{}
 	cleaned := make([]string, 0, len(paths))
 	seen := map[string]struct{}{}
 	for _, p := range paths {
@@ -177,24 +185,26 @@ func HashEnvFilePaths(paths []string) (string, error) {
 	}
 	sort.Strings(cleaned)
 	if len(cleaned) == 0 {
-		return "", nil
+		return "", perPath, nil
 	}
 	h := sha256.New()
 	for _, p := range cleaned {
 		content, readErr := os.ReadFile(p)
 		if readErr != nil {
 			if os.IsNotExist(readErr) {
-				return "", syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageCompose, fmt.Sprintf("env_file missing: %s", p))
+				return "", nil, syncerr.New(syncerr.CodeEnvFileMissing, syncerr.StageCompose, fmt.Sprintf("env_file missing: %s", p))
 			}
-			return "", readErr
+			return "", nil, readErr
 		}
 		if len(content) == 0 {
-			return "", syncerr.New(syncerr.CodeEnvFileEmpty, syncerr.StageValidate, fmt.Sprintf("env_file_empty: %s", p))
+			return "", nil, syncerr.New(syncerr.CodeEnvFileEmpty, syncerr.StageValidate, fmt.Sprintf("env_file_empty: %s", p))
 		}
 		sum := sha256.Sum256(content)
-		fmt.Fprintf(h, "%s=%s\n", p, hex.EncodeToString(sum[:]))
+		sumHex := hex.EncodeToString(sum[:])
+		perPath[p] = sumHex
+		fmt.Fprintf(h, "%s=%s\n", p, sumHex)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), perPath, nil
 }
 
 // ListExternalEnvFilePaths returns sorted unique absolute env_file paths from

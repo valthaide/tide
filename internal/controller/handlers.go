@@ -94,6 +94,11 @@ type AppActioner interface {
 	AppAction(ctx context.Context, appID, action string, services ...string) (string, error)
 }
 
+// AppPlanner builds the apply plan for an app without changing anything.
+type AppPlanner interface {
+	PlanApp(ctx context.Context, app *api.App, fleetRef string) (*compose.AppPlan, error)
+}
+
 // Handler handles HTTP requests for the controller.
 type Handler struct {
 	Registry    *Registry
@@ -102,6 +107,7 @@ type Handler struct {
 	Inspector   RuntimeInspector
 	Restarter   ServiceRestarter
 	Actions     AppActioner
+	Planner     AppPlanner
 	SyncGate    SyncGate
 	Ops         *OperationStore
 	Logger      *slog.Logger
@@ -866,6 +872,43 @@ func (h *Handler) RetryApp(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(api.APIResponse{Message: "retry queued", Data: app})
 }
 
+// ApplyTemplateApp handles POST /api/v1/apps/{id}/apply.
+// It grants one manual template apply for an app held by the rollout policy
+// (or forces one ahead of the queue) and lets the reconcile loop run it.
+func (h *Handler) ApplyTemplateApp(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	applier, ok := h.SyncGate.(interface{ ApplyTemplate(*api.App) error })
+	if !ok || applier == nil {
+		http.Error(w, "template apply is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := applier.ApplyTemplate(app); err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "in progress") ||
+			strings.Contains(strings.ToLower(err.Error()), "suspended") {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	_ = h.Registry.RecordAudit(api.AuditEvent{
+		Kind:     "template_apply",
+		Actor:    apiauth.ActorFromRequest(r),
+		AppID:    app.ID,
+		AppName:  app.Name,
+		RepoURL:  app.RepoURL,
+		Decision: "apply_granted",
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(api.APIResponse{Message: "apply queued", Data: app})
+}
+
 var restartServiceNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 // RestartServiceApp handles POST /api/v1/apps/{id}/restart.
@@ -962,6 +1005,36 @@ func (h *Handler) RestartServiceApp(w http.ResponseWriter, r *http.Request) {
 		Message: fmt.Sprintf("service %s restarted", service),
 		Data:    map[string]string{"app": app.Name, "service": service},
 	})
+}
+
+// PlanApp handles GET /api/v1/apps/{id}/plan.
+// It reports what an apply would change — per-service actions with reasons,
+// volumes to create, and watch_files actions — without changing anything.
+// ?fleet_ref=<ref> renders the fleet template at that not-yet-applied revision.
+func (h *Handler) PlanApp(w http.ResponseWriter, r *http.Request) {
+	if h.Planner == nil {
+		http.Error(w, "runtime planner is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	app, err := h.Registry.Get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	timeout := h.SyncTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	plan, err := h.Planner.PlanApp(ctx, app, strings.TrimSpace(r.URL.Query().Get("fleet_ref")))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("plan failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.APIResponse{Message: "plan ready", Data: plan})
 }
 
 func (h *Handler) StopApp(w http.ResponseWriter, r *http.Request) {

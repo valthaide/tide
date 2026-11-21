@@ -462,3 +462,26 @@ func TestApplyDesiredIsolatesRegistrationFailures(t *testing.T) {
 		t.Fatalf("bad app status=%s", bad.Status)
 	}
 }
+
+func TestPolicyJSONFromSpecRollout(t *testing.T) {
+	doc := &HostDocument{
+		Rollout: &RolloutSpec{Strategy: "canary", CanaryApps: []string{"a"}},
+		Apps: []AppSpec{
+			{Name: "a", RepoURL: "https://example.test/a.git"},
+			{Name: "b", RepoURL: "https://example.test/b.git"},
+		},
+	}
+	canary := deploypolicy.Decode(policyJSONFromSpec(doc.Apps[0], doc))
+	if canary.Rollout != deploypolicy.RolloutCanary || !canary.RolloutCanary {
+		t.Fatalf("canary app policy: %+v", canary)
+	}
+	rest := deploypolicy.Decode(policyJSONFromSpec(doc.Apps[1], doc))
+	if rest.Rollout != deploypolicy.RolloutCanary || rest.RolloutCanary {
+		t.Fatalf("non-canary app policy: %+v", rest)
+	}
+	noRollout := &HostDocument{Apps: doc.Apps}
+	plain := deploypolicy.Decode(policyJSONFromSpec(noRollout.Apps[0], noRollout))
+	if plain.Rollout != "" || plain.RolloutCanary {
+		t.Fatalf("policy without rollout section: %+v", plain)
+	}
+}

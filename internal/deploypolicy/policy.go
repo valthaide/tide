@@ -2,6 +2,7 @@ package deploypolicy
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -20,6 +21,26 @@ type WatchFile struct {
 	Service       string `json:"service,omitempty" yaml:"service"`
 	ReloadURL     string `json:"reload_url,omitempty" yaml:"reload_url"`
 	ReloadCommand string `json:"reload_command,omitempty" yaml:"reload_command"`
+}
+
+// TemplateWatchPrefix marks watch_files entries resolved inside the fleet
+// checkout (templates/<name>/...) instead of the app repo checkout.
+const TemplateWatchPrefix = "templates/"
+
+// IsTemplateWatchPath reports whether a watch_files path targets the fleet
+// template tree. Parent escapes and absolute paths never qualify.
+func IsTemplateWatchPath(p string) bool {
+	p = filepath.ToSlash(strings.TrimSpace(p))
+	p = strings.TrimPrefix(p, "./")
+	if !strings.HasPrefix(p, TemplateWatchPrefix) {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // TrustedWebPolicy controls optional acceptance of manual (`web`) GitLab pipelines.
@@ -107,6 +128,13 @@ type Policy struct {
 	FailurePolicy string `json:"failure_policy,omitempty" yaml:"failure_policy"`
 	// DependsOn lists other registration names that must be synced before this app applies.
 	DependsOn []string `json:"depends_on,omitempty" yaml:"depends_on"`
+	// Rollout is the fleet template rollout strategy inherited from the host:
+	// canary (canary apps first, then the rest one at a time) or manual
+	// (template changes wait for an explicit apply). Empty means all at once.
+	Rollout string `json:"rollout,omitempty" yaml:"rollout"`
+	// RolloutCanary marks this app as a canary under the canary strategy;
+	// it is computed from the host canary_apps list, not set per app.
+	RolloutCanary bool `json:"rollout_canary,omitempty" yaml:"rollout_canary"`
 	// CPULimit is the declared CPU budget for this app (e.g. "0.5").
 	CPULimit string `json:"cpu_limit,omitempty" yaml:"cpu_limit"`
 	// MemoryLimit is the declared memory budget for this app (e.g. "512m").
@@ -138,6 +166,28 @@ const (
 	SecretsProviderAgent   = "agent"
 	SecretsProviderOpenBao = "openbao"
 )
+
+// Rollout strategies for fleet template changes.
+const (
+	RolloutAll    = "all"
+	RolloutCanary = "canary"
+	RolloutManual = "manual"
+)
+
+// NormalizeRollout canonicalizes a rollout strategy value. Empty and "all"
+// both mean the default: template changes apply to every app at once.
+func NormalizeRollout(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", RolloutAll:
+		return ""
+	case RolloutCanary:
+		return RolloutCanary
+	case RolloutManual:
+		return RolloutManual
+	default:
+		return strings.ToLower(strings.TrimSpace(v))
+	}
+}
 
 // NormalizeSecretsProvider canonicalizes a secrets_provider value; vault is
 // kept as a deprecated alias of openbao.

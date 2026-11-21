@@ -398,6 +398,16 @@ func (e *ComposeExecutor) ApplyImages(
 		e.Logger.Info("Applying configuration", "app_id", appID)
 	}
 
+	if opts.ForceRecreate && len(opts.ForceRecreateServices) == 0 && len(opts.EnvChangedPaths) > 0 {
+		matched, unmapped := ServicesForEnvPaths(prep.configJSON, opts.EnvChangedPaths)
+		if len(unmapped) == 0 && len(matched) > 0 {
+			opts.ForceRecreateServices = matched
+			appendLogLine(&syncLog, "env_file changed ("+strings.Join(opts.EnvChangedPaths, ", ")+"); recreating only services: "+strings.Join(matched, ", "))
+		} else if len(unmapped) > 0 {
+			appendLogLine(&syncLog, "env_file changed outside service env_file mounts ("+strings.Join(unmapped, ", ")+"); recreating the whole project")
+		}
+	}
+
 	upArgs := inv.Args(projectName, overrideArgs, "up", "-d", "--remove-orphans")
 	if !prep.noBuild {
 		upArgs = append(upArgs, "--build")

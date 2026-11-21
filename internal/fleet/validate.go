@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/valthaide/tide/internal/compose"
@@ -130,6 +131,9 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 				issues = append(issues, *issue)
 			}
 		}
+	}
+	if doc.Rollout != nil {
+		issues = append(issues, validateRollout(doc)...)
 	}
 	seenNames := map[string]int{}
 	for i, app := range doc.Apps {
@@ -263,6 +267,42 @@ func ValidateDocument(data []byte, opts ValidateOptions) (Report, *HostDocument,
 	}
 	issues = dedupeIssues(issues)
 	return Report{OK: len(issues) == 0, Issues: issues, Unknown: unknown}, doc, nil
+}
+
+func validateRollout(doc *HostDocument) []fleetcheck.Issue {
+	var issues []fleetcheck.Issue
+	strategy := strings.ToLower(strings.TrimSpace(doc.Rollout.Strategy))
+	switch strategy {
+	case "", "all":
+		if len(doc.Rollout.CanaryApps) > 0 {
+			issues = append(issues, fleetcheck.Issue{Path: "rollout.canary_apps", Rule: "rollout_canary_without_strategy", Message: "rollout_canary_without_strategy: canary_apps require rollout strategy canary"})
+		}
+	case "canary", "manual":
+	default:
+		issues = append(issues, fleetcheck.Issue{Path: "rollout.strategy", Rule: "invalid_rollout_strategy", Message: "invalid_rollout_strategy: must be all, canary, or manual"})
+	}
+	if strategy == "canary" && len(doc.Rollout.CanaryApps) == 0 {
+		issues = append(issues, fleetcheck.Issue{Path: "rollout.canary_apps", Rule: "rollout_canary_apps_required", Message: "rollout_canary_apps_required: the canary strategy needs at least one canary app"})
+	}
+	if strategy == "manual" && len(doc.Rollout.CanaryApps) > 0 {
+		issues = append(issues, fleetcheck.Issue{Path: "rollout.canary_apps", Rule: "rollout_canary_without_strategy", Message: "rollout_canary_without_strategy: canary_apps have no effect under the manual strategy"})
+	}
+	if len(doc.Rollout.CanaryApps) > 0 {
+		known := map[string]struct{}{}
+		for _, app := range doc.Apps {
+			known[app.Name] = struct{}{}
+		}
+		for i, name := range doc.Rollout.CanaryApps {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if _, ok := known[name]; !ok {
+				issues = append(issues, fleetcheck.Issue{App: name, Path: "rollout.canary_apps[" + strconv.Itoa(i) + "]", Rule: "rollout_unknown_canary", Message: "rollout_unknown_canary: canary app " + name + " is not in the apps list"})
+			}
+		}
+	}
+	return issues
 }
 
 // appIndexFromPath extracts N from a path like apps[N].field.

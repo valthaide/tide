@@ -263,6 +263,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 		appHandler.Actions = reconciler
 		appHandler.SyncGate = reconciler
 		appHandler.Tenants = reconciler.Tenants
+		appHandler.Planner = reconciler
 	}
 
 	webhookHandler := controller.NewWebhookHandlerFromEnv(registry, logger)
@@ -302,12 +303,14 @@ func runController(args []string, stdout, stderr io.Writer) int {
 					r.Get("/{id}/audit", appHandler.ListAppAudit)
 					r.Get("/{id}/containers", appHandler.ListAppContainers)
 					r.Get("/{id}/env", appHandler.GetAppEnvStatus)
+					r.Get("/{id}/plan", appHandler.PlanApp)
 					r.Patch("/{id}", appHandler.UpdateApp)
 					r.Post("/{id}/migrate-repo", appHandler.MigrateAppRepo)
 					r.Post("/{id}/sync", appHandler.ForceSyncApp)
 					r.Post("/{id}/reconcile", appHandler.ReconcileApp)
 					r.Post("/{id}/retry", appHandler.RetryApp)
-				r.Post("/{id}/restart", appHandler.RestartServiceApp)
+					r.Post("/{id}/apply", appHandler.ApplyTemplateApp)
+					r.Post("/{id}/restart", appHandler.RestartServiceApp)
 					r.Post("/{id}/stop", appHandler.StopApp)
 					r.Post("/{id}/start", appHandler.StartApp)
 					r.Post("/{id}/suspend", appHandler.SuspendApp)

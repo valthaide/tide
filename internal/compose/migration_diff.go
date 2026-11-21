@@ -46,6 +46,20 @@ type CanonicalServiceSpec struct {
 	NetworkMode string            `json:"network_mode,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Oneshot     bool              `json:"oneshot,omitempty"`
+	// Healthcheck is populated on both sides but deliberately excluded from
+	// the migration equivalence diff; the apply plan compares it.
+	Healthcheck *CanonicalHealthcheck `json:"healthcheck,omitempty"`
+}
+
+// CanonicalHealthcheck is the normalized healthcheck of a service, with
+// durations in nanoseconds. A missing healthcheck and a disabled one
+// (test: ["NONE"]) normalize to the same value: nil.
+type CanonicalHealthcheck struct {
+	Test        []string `json:"test,omitempty"`
+	Interval    int64    `json:"interval_ns,omitempty"`
+	Timeout     int64    `json:"timeout_ns,omitempty"`
+	StartPeriod int64    `json:"start_period_ns,omitempty"`
+	Retries     int      `json:"retries,omitempty"`
 }
 
 // CanonicalPort represents one published container port binding.
@@ -101,6 +115,7 @@ type renderedServiceConfig struct {
 	NetworkMode string           `json:"network_mode"`
 	Labels      any              `json:"labels"`
 	DependsOn   json.RawMessage  `json:"depends_on"`
+	Healthcheck json.RawMessage  `json:"healthcheck"`
 }
 
 type renderedPort struct {
@@ -130,11 +145,12 @@ type fullContainerInspect struct {
 		} `json:"Health"`
 	} `json:"State"`
 	Config struct {
-		Image      string            `json:"Image"`
-		Cmd        []string          `json:"Cmd"`
-		Entrypoint []string          `json:"Entrypoint"`
-		Env        []string          `json:"Env"`
-		Labels     map[string]string `json:"Labels"`
+		Image       string             `json:"Image"`
+		Cmd         []string           `json:"Cmd"`
+		Entrypoint  []string           `json:"Entrypoint"`
+		Env         []string           `json:"Env"`
+		Labels      map[string]string  `json:"Labels"`
+		Healthcheck *dockerHealthcheck `json:"Healthcheck"`
 	} `json:"Config"`
 	HostConfig struct {
 		NetworkMode  string                         `json:"NetworkMode"`
@@ -153,6 +169,16 @@ type fullContainerInspect struct {
 type dockerPortBinding struct {
 	HostIP   string `json:"HostIp"`
 	HostPort string `json:"HostPort"`
+}
+
+// dockerHealthcheck is the Docker Engine inspect form of a healthcheck
+// (container Config and image Config share it); durations are nanoseconds.
+type dockerHealthcheck struct {
+	Test        []string `json:"Test"`
+	Interval    int64    `json:"Interval"`
+	Timeout     int64    `json:"Timeout"`
+	StartPeriod int64    `json:"StartPeriod"`
+	Retries     int      `json:"Retries"`
 }
 
 type dockerHostMount struct {
@@ -175,10 +201,11 @@ type fullImageInspect struct {
 	RepoDigests []string `json:"RepoDigests"`
 	RepoTags    []string `json:"RepoTags"`
 	Config      struct {
-		Cmd        []string          `json:"Cmd"`
-		Entrypoint []string          `json:"Entrypoint"`
-		Env        []string          `json:"Env"`
-		Labels     map[string]string `json:"Labels"`
+		Cmd         []string           `json:"Cmd"`
+		Entrypoint  []string           `json:"Entrypoint"`
+		Env         []string           `json:"Env"`
+		Labels      map[string]string  `json:"Labels"`
+		Healthcheck *dockerHealthcheck `json:"Healthcheck"`
 	} `json:"Config"`
 }
 
@@ -271,6 +298,7 @@ func ParseRenderedComposeSpec(
 			NetworkMode: normalizeNetworkMode(svc.NetworkMode),
 			Labels:      filterUserLabels(parseKeyValueMap(svc.Labels)),
 			Oneshot:     oneshots[svcName],
+			Healthcheck: parseRenderedHealthcheck(svc.Healthcheck),
 		}
 		out.Services[svcName] = spec
 	}
@@ -321,6 +349,15 @@ func BuildRunningProjectSpec(
 	allHealthy := true
 	serviceCount := map[string]int{}
 	appRepoAbs, _ := filepath.Abs(appRepoDir)
+	idToService := map[string]string{}
+	for _, c := range containers {
+		if c.Config.Labels == nil {
+			continue
+		}
+		if svc := strings.TrimSpace(c.Config.Labels["com.docker.compose.service"]); svc != "" && c.ID != "" {
+			idToService[c.ID] = svc
+		}
+	}
 
 	for _, c := range containers {
 		labels := c.Config.Labels
@@ -378,8 +415,20 @@ func BuildRunningProjectSpec(
 			NetworkMode: normalizeContainerNetworkMode(c.HostConfig.NetworkMode, projectName, networkProjectNames),
 			Labels:      filterUserLabels(labels),
 			Oneshot:     isOneshot,
+			Healthcheck: canonicalHealthcheck(c.Config.Healthcheck),
 		}
 		out.Services[svcName] = spec
+	}
+
+	// Docker reports network_mode: service:<name> as container:<id>; map it
+	// back to the service form so it compares equal to the rendered config.
+	for name, spec := range out.Services {
+		if id, ok := strings.CutPrefix(spec.NetworkMode, "container:"); ok {
+			if svc, known := idToService[id]; known {
+				spec.NetworkMode = "service:" + svc
+				out.Services[name] = spec
+			}
+		}
 	}
 
 	if len(out.Services) == 0 {
@@ -532,6 +581,10 @@ func mergeServiceWithImageDefaults(des CanonicalServiceSpec, images map[string]f
 		mergedLabels[k] = v
 	}
 	out.Labels = mergedLabels
+
+	if out.Healthcheck == nil {
+		out.Healthcheck = canonicalHealthcheck(img.Config.Healthcheck)
+	}
 
 	return out
 }

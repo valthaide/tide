@@ -367,7 +367,7 @@ func (e *ComposeExecutor) CheckTemplate(ctx context.Context, fleetCheckoutDir, t
 	if strings.TrimSpace(project) == "" {
 		project = composeProjectName(filepath.Base(inv.ProjectDir))
 	}
-	configJSON, err := renderComposeConfigDirect(ctx, inv, project, vars)
+	configJSON, err := renderComposeConfigDirect(ctx, inv, project, vars, nil)
 	if err != nil {
 		return inv, nil, err
 	}
@@ -378,12 +378,14 @@ func (e *ComposeExecutor) CheckTemplate(ctx context.Context, fleetCheckoutDir, t
 // controller's Docker toolchain resolution (which probes the daemon). CI has
 // the compose CLI but often no daemon, and `config` needs neither a daemon
 // nor a controller — only the exact invocation a deploy would use.
-func renderComposeConfigDirect(ctx context.Context, inv Invocation, project string, vars map[string]string) ([]byte, error) {
+// tideArgs are Tide's own generated -f files (service env overrides), passed
+// exactly as an apply would pass them.
+func renderComposeConfigDirect(ctx context.Context, inv Invocation, project string, vars map[string]string, tideArgs []string) ([]byte, error) {
 	dockerPath := strings.TrimSpace(envcompat.Getenv("TIDE_DOCKER_CLI_PATH"))
 	if dockerPath == "" {
 		dockerPath = "docker"
 	}
-	args := inv.Args(project, nil, "config", "--format", "json")
+	args := inv.Args(project, tideArgs, "config", "--format", "json")
 	cmd := exec.CommandContext(ctx, dockerPath, args...)
 	cmd.Dir = inv.ProjectDir
 	if len(vars) > 0 {

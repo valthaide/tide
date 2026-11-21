@@ -42,6 +42,47 @@ func TestValidateProjectConflictOnce(t *testing.T) {
 	}
 }
 
+func TestValidateRollout(t *testing.T) {
+	cases := []struct {
+		name      string
+		rollout   string
+		wantRules []string
+	}{
+		{"no rollout section", "", nil},
+		{"all strategy", "rollout:\n  strategy: all\n", nil},
+		{"canary ok", "rollout:\n  strategy: canary\n  canary_apps: [a]\n", nil},
+		{"manual ok", "rollout:\n  strategy: manual\n", nil},
+		{"bad strategy", "rollout:\n  strategy: waves\n", []string{"invalid_rollout_strategy"}},
+		{"canary without apps", "rollout:\n  strategy: canary\n", []string{"rollout_canary_apps_required"}},
+		{"apps without canary", "rollout:\n  canary_apps: [a]\n", []string{"rollout_canary_without_strategy"}},
+		{"apps under manual", "rollout:\n  strategy: manual\n  canary_apps: [a]\n", []string{"rollout_canary_without_strategy"}},
+		{"unknown canary app", "rollout:\n  strategy: canary\n  canary_apps: [ghost]\n", []string{"rollout_unknown_canary"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte("host: h\n" + tc.rollout + "apps:\n  - name: a\n    repo_url: https://example.test/a.git\n")
+			report, err := Validate(raw, ValidateOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, issue := range report.Issues {
+				if strings.HasPrefix(issue.Path, "rollout") {
+					got = append(got, issue.Rule)
+				}
+			}
+			if len(got) != len(tc.wantRules) {
+				t.Fatalf("rules=%v, want %v (all issues: %+v)", got, tc.wantRules, report.Issues)
+			}
+			for i, rule := range tc.wantRules {
+				if got[i] != rule {
+					t.Fatalf("rules=%v, want %v", got, tc.wantRules)
+				}
+			}
+		})
+	}
+}
+
 func TestConfigIssuesBuildAndSuspendedPorts(t *testing.T) {
 	sum := fleetcheck.Summary{
 		Images:    map[string]string{"web": "app:${APP_TAG}", "job": "local:1@sha256:def"},

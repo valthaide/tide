@@ -618,6 +618,11 @@ func (r *Reconciler) dispatch() {
 			}
 		}
 
+		if app.Status == "held" {
+			r.maybeReleaseRolloutHold(app)
+			continue
+		}
+
 		if app.LastSeenCommit == "" {
 			continue
 		}
@@ -640,7 +645,10 @@ func (r *Reconciler) dispatch() {
 				r.requeuePending(app, reason)
 			}
 		}
-		if app.Status == "synced" {
+		// A fixed template must heal failed/error apps by itself: the drift
+		// requeue covers them too, with the repeat backoff throttling retries
+		// while the template stays broken.
+		if app.Status == "synced" || app.Status == "failed" || app.Status == "error" {
 			if reason := r.templateDriftReason(app); reason != "" {
 				r.requeuePending(app, reason)
 			}
@@ -820,9 +828,9 @@ func (r *Reconciler) envFileDriftReason(app *App) string {
 		return ""
 	}
 	if shouldAdoptEnvHash(app, cur) {
-		_ = r.Registry.UpdateEnvHash(app.ID, cur.Hash, encodeEnvPaths(cur.Paths))
+		_ = r.Registry.UpdateEnvHash(app.ID, cur.Hash, encodeEnvPathHashes(cur.PerPath))
 		app.LastAppliedEnvHash = cur.Hash
-		app.LastAppliedEnvPaths = encodeEnvPaths(cur.Paths)
+		app.LastAppliedEnvPaths = encodeEnvPathHashes(cur.PerPath)
 		r.clearEnvDebounce(app.ID, app.Name)
 		metrics.SetEnvDrift(app.Name, false)
 		metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())
@@ -914,6 +922,10 @@ func (r *Reconciler) syncApp(app *App) error {
 		se := syncerr.New(syncerr.CodeValidation, syncerr.StageValidate, msg)
 		r.declareOnce(app, se)
 		metrics.ObserveSync(app.ID, app.Name, 0, se)
+		return nil
+	}
+	if reason := r.rolloutGate(app, true); reason != "" {
+		r.holdRollout(app, reason)
 		return nil
 	}
 	gen, _ := r.Registry.DesiredGeneration(app.ID)
@@ -1068,6 +1080,7 @@ func (r *Reconciler) syncApp(app *App) error {
 	opts.Vars = mergeInterpolation(fileVars, fleetVars, app.Name, app.ComposeProject())
 	if cur, err := r.envHash(app); err == nil && cur.Hash != "" && app.LastAppliedEnvHash != "" && cur.Hash != app.LastAppliedEnvHash {
 		opts.ForceRecreate = true
+		opts.EnvChangedPaths = changedEnvPaths(decodeEnvPathHashes(app.LastAppliedEnvPaths), cur.PerPath)
 	}
 
 	progress := newSyncProgressReporter(r.Registry, r.Logger, app.ID, syncProgressFlushInterval)
@@ -2262,9 +2275,9 @@ func (r *Reconciler) recordAppliedEnvHash(app *App) {
 	if err != nil || cur.Hash == "" {
 		return
 	}
-	_ = r.Registry.UpdateEnvHash(app.ID, cur.Hash, encodeEnvPaths(cur.Paths))
+	_ = r.Registry.UpdateEnvHash(app.ID, cur.Hash, encodeEnvPathHashes(cur.PerPath))
 	app.LastAppliedEnvHash = cur.Hash
-	app.LastAppliedEnvPaths = encodeEnvPaths(cur.Paths)
+	app.LastAppliedEnvPaths = encodeEnvPathHashes(cur.PerPath)
 	r.clearEnvDebounce(app.ID, app.Name)
 	metrics.SetEnvDrift(app.Name, false)
 	metrics.SetEnvHashApplied(app.ID, app.Name, time.Now())

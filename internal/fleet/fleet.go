@@ -42,7 +42,14 @@ type HostDocument struct {
 	EnvDebounce            string                `yaml:"env_debounce" desc:"Host default: how long env hash must stay stable before redeploy, e.g. 30s."`
 	EnvDebounceMax         string                `yaml:"env_debounce_max" desc:"Host default: max wait for a stable env hash, e.g. 5m."`
 	SecretsProvider        string                `yaml:"secrets_provider" desc:"Secrets source for apps: none (default), agent, or openbao. Inherited by tenants and apps."`
+	Rollout                *RolloutSpec          `yaml:"rollout" desc:"Fleet template rollout policy. Omitted means every app applies template changes at once."`
 	Apps                   []AppSpec             `yaml:"apps" desc:"Applications that should run on this host."`
+}
+
+// RolloutSpec controls how fleet template changes roll out across the host apps.
+type RolloutSpec struct {
+	Strategy   string   `yaml:"strategy" desc:"Template rollout strategy: all (default), canary (canary_apps apply first, then the rest one at a time while healthy), or manual (template changes wait for tidectl apply)."`
+	CanaryApps []string `yaml:"canary_apps" desc:"Apps that apply template changes first under the canary strategy. Every name must appear in the apps list."`
 }
 
 // TenantSpec groups CI gate rules and failure/resource policy for one tenant.
@@ -53,14 +60,14 @@ type TenantSpec struct {
 	// FailurePolicy is isolate (default), hold, or stop. See Tide v2.4 tenant docs.
 	FailurePolicy string `yaml:"failure_policy" desc:"When an app fails reconcile: isolate (default), hold (freeze tenant updates), or stop (stop siblings after critical grace)."`
 	// CriticalGrace is how long a critical app may be unhealthy before stop policy acts. Default 5m.
-	CriticalGrace string `yaml:"critical_grace" desc:"Grace period before stop policy halts sibling apps, e.g. 5m."`
-	CPULimit      string `yaml:"cpu_limit" desc:"Declared CPU budget for the tenant (e.g. 2.0). Used to refuse new applies that would exceed the sum of app limits."`
-	MemoryLimit   string `yaml:"memory_limit" desc:"Declared memory budget for the tenant (e.g. 4g). Used to refuse new applies that would exceed the sum of app limits."`
-	EnvFiles      []string `yaml:"env_files" desc:"Tenant-level external env files merged into apps."`
-	RequiredEnv   []string `yaml:"required_env" desc:"Tenant-level required env keys merged into apps."`
-	EnvDebounce   string   `yaml:"env_debounce" desc:"Tenant default env debounce window."`
-	EnvDebounceMax string  `yaml:"env_debounce_max" desc:"Tenant default max env debounce wait."`
-	SecretsProvider string `yaml:"secrets_provider" desc:"Secrets source for this tenant's apps: none, agent, or openbao."`
+	CriticalGrace   string   `yaml:"critical_grace" desc:"Grace period before stop policy halts sibling apps, e.g. 5m."`
+	CPULimit        string   `yaml:"cpu_limit" desc:"Declared CPU budget for the tenant (e.g. 2.0). Used to refuse new applies that would exceed the sum of app limits."`
+	MemoryLimit     string   `yaml:"memory_limit" desc:"Declared memory budget for the tenant (e.g. 4g). Used to refuse new applies that would exceed the sum of app limits."`
+	EnvFiles        []string `yaml:"env_files" desc:"Tenant-level external env files merged into apps."`
+	RequiredEnv     []string `yaml:"required_env" desc:"Tenant-level required env keys merged into apps."`
+	EnvDebounce     string   `yaml:"env_debounce" desc:"Tenant default env debounce window."`
+	EnvDebounceMax  string   `yaml:"env_debounce_max" desc:"Tenant default max env debounce wait."`
+	SecretsProvider string   `yaml:"secrets_provider" desc:"Secrets source for this tenant's apps: none, agent, or openbao."`
 }
 
 // TrustedWebSpec configures optional acceptance of manual (`web`) GitLab pipelines.
@@ -120,14 +127,14 @@ type AppSpec struct {
 	// FailurePolicy optionally overrides the tenant failure_policy for this app (isolate|hold|stop).
 	FailurePolicy string `yaml:"failure_policy" desc:"Optional override of the tenant failure_policy for this app."`
 	// DependsOn lists other registration names on this host that must be synced before this app applies.
-	DependsOn []string `yaml:"depends_on" desc:"Other app names on this host that must reach synced before this registration applies."`
-	CPULimit  string   `yaml:"cpu_limit" desc:"Declared CPU limit for this app (e.g. 0.5). Counted against the tenant cpu_limit when set."`
-	MemoryLimit string `yaml:"memory_limit" desc:"Declared memory limit for this app (e.g. 512m). Counted against the tenant memory_limit when set."`
-	SecretsProvider string `yaml:"secrets_provider" desc:"Secrets source for this app: none, agent, or openbao. Overrides tenant and host."`
-	SecretPaths []string `yaml:"secret_paths" desc:"KV v2 paths read by the openbao provider, in merge order (last wins). Supports {prefix}, {tenant}, {app} placeholders."`
-	SecretKeys []string `yaml:"secret_keys" desc:"Keys that land in the rendered secret file. Empty means all keys from secret_paths. Automatically added to required_env."`
-	SecretFrom map[string]SecretFromSpec `yaml:"secret_from" desc:"Derived values: output key mapped to an explicit {path, key} source."`
-	SecretFile string `yaml:"secret_file" desc:"Rendered secret env file path. Default: /var/lib/tide/secrets/<app>.env. Automatically added to env_files."`
+	DependsOn       []string                  `yaml:"depends_on" desc:"Other app names on this host that must reach synced before this registration applies."`
+	CPULimit        string                    `yaml:"cpu_limit" desc:"Declared CPU limit for this app (e.g. 0.5). Counted against the tenant cpu_limit when set."`
+	MemoryLimit     string                    `yaml:"memory_limit" desc:"Declared memory limit for this app (e.g. 512m). Counted against the tenant memory_limit when set."`
+	SecretsProvider string                    `yaml:"secrets_provider" desc:"Secrets source for this app: none, agent, or openbao. Overrides tenant and host."`
+	SecretPaths     []string                  `yaml:"secret_paths" desc:"KV v2 paths read by the openbao provider, in merge order (last wins). Supports {prefix}, {tenant}, {app} placeholders."`
+	SecretKeys      []string                  `yaml:"secret_keys" desc:"Keys that land in the rendered secret file. Empty means all keys from secret_paths. Automatically added to required_env."`
+	SecretFrom      map[string]SecretFromSpec `yaml:"secret_from" desc:"Derived values: output key mapped to an explicit {path, key} source."`
+	SecretFile      string                    `yaml:"secret_file" desc:"Rendered secret env file path. Default: /var/lib/tide/secrets/<app>.env. Automatically added to env_files."`
 }
 
 // SecretFromSpec maps one output env key to an explicit KV path and key.

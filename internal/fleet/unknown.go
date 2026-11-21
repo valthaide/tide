@@ -67,7 +67,7 @@ func UnknownFields(data []byte) ([]string, error) {
 		case "$schema", "host", "build", "require_digest", "allowed_registries", "reconcile_interval",
 			"reconcile_concurrency", "retry_rejected", "priority", "require_pipeline_sources",
 			"strict_pipeline_gate", "shared_required_jobs", "trusted_web_pipelines", "tenants",
-			"create_volumes", "volume_name_pattern",
+			"create_volumes", "volume_name_pattern", "rollout",
 			"env_files", "required_env", "env_debounce", "env_debounce_max", "secrets_provider":
 		case "apps":
 			unknown = append(unknown, unknownAppFields(val)...)
@@ -91,7 +91,7 @@ func unknownAppFields(seq *yaml.Node) []string {
 		"sync_timeout": {}, "pull_timeout": {}, "oneshot_timeout": {},
 		"require_digest": {}, "public_vars": {}, "allowed_registries": {},
 		"env_files": {}, "required_env": {}, "env_debounce": {}, "env_debounce_max": {},
-		"policy_exceptions": {},
+		"policy_exceptions":  {},
 		"reconcile_interval": {}, "retry_rejected": {}, "priority": {},
 		"critical": {}, "failure_policy": {}, "depends_on": {}, "cpu_limit": {}, "memory_limit": {},
 		"secrets_provider": {}, "secret_paths": {}, "secret_keys": {}, "secret_from": {}, "secret_file": {},

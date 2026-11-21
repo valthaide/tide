@@ -1,8 +1,11 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +14,8 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/valthaide/tide/internal/api"
@@ -262,16 +267,10 @@ func (r *Reconciler) checkoutFleet(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	wt, err := repo.Worktree()
-	if err != nil {
-		return "", err
-	}
-	err = wt.Pull(&git.PullOptions{
-		RemoteName:    "origin",
-		ReferenceName: plumbing.NewBranchReferenceName(r.Config.Branch),
-		SingleBranch:  true,
-		Auth:          auth,
-		Force:         true,
+	err = repo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		Auth:       auth,
+		Force:      true,
 	})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		// Recover by re-clone
@@ -285,8 +284,125 @@ func (r *Reconciler) checkoutFleet(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("re-clone fleet repo: %w", err)
 		}
+		return repoDir, nil
+	}
+	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", r.Config.Branch), true)
+	if err != nil {
+		return "", fmt.Errorf("fleet remote ref: %w", err)
+	}
+	commit, err := repo.CommitObject(remoteRef.Hash())
+	if err != nil {
+		return "", fmt.Errorf("fleet commit: %w", err)
+	}
+	// Sync the worktree in place: bind-mounted template files keep their inode
+	// so containers observe new content after a reload instead of a recreate.
+	if err := syncFleetWorktreeInPlace(repoDir, commit); err != nil {
+		return "", fmt.Errorf("fleet checkout sync: %w", err)
+	}
+	headRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(r.Config.Branch), commit.Hash)
+	if err := repo.Storer.SetReference(headRef); err != nil {
+		return "", fmt.Errorf("fleet head: %w", err)
 	}
 	return repoDir, nil
+}
+
+// syncFleetWorktreeInPlace makes repoDir match the commit tree, rewriting
+// changed files in place (open + truncate keeps the inode) and removing files
+// that disappeared upstream. .git is never touched.
+func syncFleetWorktreeInPlace(repoDir string, commit *object.Commit) error {
+	tree, err := commit.Tree()
+	if err != nil {
+		return err
+	}
+	want := map[string]struct{}{}
+	files := tree.Files()
+	defer files.Close()
+	err = files.ForEach(func(f *object.File) error {
+		rel := filepath.FromSlash(f.Name)
+		if rel == "" || strings.HasPrefix(rel, "..") {
+			return nil
+		}
+		want[rel] = struct{}{}
+		dest := filepath.Join(repoDir, rel)
+		reader, err := f.Blob.Reader()
+		if err != nil {
+			return err
+		}
+		content, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return err
+		}
+		if f.Mode == filemode.Symlink {
+			if target, readErr := os.Readlink(dest); readErr == nil && target == string(content) {
+				return nil
+			}
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				return err
+			}
+			_ = os.Remove(dest)
+			return os.Symlink(string(content), dest)
+		}
+		if existing, readErr := os.ReadFile(dest); readErr == nil && bytes.Equal(existing, content) {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		perm := os.FileMode(0o644)
+		if f.Mode == filemode.Executable {
+			perm = 0o755
+		}
+		return writeFileInPlace(dest, content, perm)
+	})
+	if err != nil {
+		return err
+	}
+	var staleDirs []string
+	walkErr := filepath.WalkDir(repoDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == repoDir {
+			return nil
+		}
+		rel, relErr := filepath.Rel(repoDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		if rel == ".git" {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			staleDirs = append(staleDirs, path)
+			return nil
+		}
+		if _, ok := want[rel]; !ok {
+			return os.Remove(path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return walkErr
+	}
+	for i := len(staleDirs) - 1; i >= 0; i-- {
+		_ = os.Remove(staleDirs[i])
+	}
+	return nil
+}
+
+// writeFileInPlace truncates and rewrites an existing file, keeping its inode
+// so single-file bind mounts observe the new content.
+func writeFileInPlace(path string, content []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func localGitHEAD(repoDir string) (string, error) {
@@ -854,6 +970,15 @@ func policyJSONFromSpec(spec AppSpec, doc *HostDocument) string {
 	if p.EffectiveSecretsProvider() == deploypolicy.SecretsProviderOpenBao {
 		p.RequiredEnv = mergeStringLists(p.RequiredEnv, p.SecretKeys)
 		p.EnvFiles = mergeStringLists(p.EnvFiles, []string{p.EffectiveSecretFile(spec.Name)})
+	}
+	if doc != nil && doc.Rollout != nil {
+		p.Rollout = deploypolicy.NormalizeRollout(doc.Rollout.Strategy)
+		for _, name := range doc.Rollout.CanaryApps {
+			if strings.TrimSpace(name) == spec.Name {
+				p.RolloutCanary = true
+				break
+			}
+		}
 	}
 	for _, ex := range spec.PolicyExceptions {
 		p.PolicyExceptions = append(p.PolicyExceptions, deploypolicy.PolicyException{
