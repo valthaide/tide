@@ -97,21 +97,28 @@ func BuildAppPlan(configJSON []byte, desired, running CanonicalProjectSpec, desi
 	sort.Strings(sorted)
 
 	byName := map[string]*ServicePlan{}
+	zeroScale := scaledToZeroServices(configJSON)
 	for _, name := range sorted {
 		sp := &ServicePlan{Service: name, Action: PlanActionNoop}
 		byName[name] = sp
 		des, inDesired := desired.Services[name]
 		run, inRunning := running.Services[name]
 		switch {
+		case inDesired && !inRunning && zeroScale[name]:
+			// replicas: 0 — compose up starts nothing, the service stays absent.
 		case inDesired && !inRunning:
 			sp.Action = PlanActionCreate
 			sp.Reasons = []string{"service added"}
 		case !inDesired && inRunning:
 			sp.Action = PlanActionRemove
 			sp.Reasons = []string{"service removed from configuration"}
+		case zeroScale[name]:
+			// Containers exist but the service is scaled to 0: up removes them.
+			sp.Action = PlanActionRemove
+			sp.Reasons = []string{"service scaled to 0 replicas"}
 		default:
 			effective := mergeServiceWithImageDefaults(des, desiredImages)
-			_, details := diffSingleService(name, effective, run)
+			_, details := diffSingleService(name, stripMountContentHashes(effective), stripMountContentHashes(run))
 			for _, d := range details {
 				sp.Reasons = append(sp.Reasons, strings.TrimPrefix(d, "service "+name+": "))
 			}
@@ -226,6 +233,52 @@ func BuildAppPlan(configJSON []byte, desired, running CanonicalProjectSpec, desi
 	return plan
 }
 
+// stripMountContentHashes drops bind content hashes before the plan diff.
+// Apply (compose up) never recreates on bind content alone — the container
+// reads the new bytes through the mount — and content changes of watched
+// files already surface as WatchActions, so a content hash mismatch must not
+// report a recreate. The volumes slice is copied; the input is not mutated.
+func stripMountContentHashes(spec CanonicalServiceSpec) CanonicalServiceSpec {
+	if len(spec.Volumes) == 0 {
+		return spec
+	}
+	vols := make([]CanonicalMount, len(spec.Volumes))
+	for i, m := range spec.Volumes {
+		m.ContentHash = ""
+		vols[i] = m
+	}
+	spec.Volumes = vols
+	return spec
+}
+
+// scaledToZeroServices reports services whose rendered config sets
+// deploy.replicas (or legacy scale) to 0: apply neither creates nor keeps
+// containers for them.
+func scaledToZeroServices(configJSON []byte) map[string]bool {
+	var doc struct {
+		Services map[string]struct {
+			Deploy struct {
+				Replicas *int64 `json:"replicas"`
+			} `json:"deploy"`
+			Scale *int64 `json:"scale"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(unescapeComposeDollars(configJSON), &doc); err != nil {
+		return nil
+	}
+	var out map[string]bool
+	for name, svc := range doc.Services {
+		if svc.Deploy.Replicas != nil && *svc.Deploy.Replicas == 0 ||
+			svc.Scale != nil && *svc.Scale == 0 {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[name] = true
+		}
+	}
+	return out
+}
+
 // envPathsPerService maps each service to the env_file paths its rendered
 // config declares (both object and string forms).
 func envPathsPerService(configJSON []byte) map[string][]string {
@@ -278,7 +331,13 @@ func planVolumesToCreate(configJSON []byte, project string, desired CanonicalPro
 		return nil
 	}
 	referenced := map[string]bool{}
-	for _, svc := range desired.Services {
+	zeroScale := scaledToZeroServices(configJSON)
+	for svcName, svc := range desired.Services {
+		if zeroScale[svcName] {
+			// A scaled-to-0 service gets no containers, so compose creates no
+			// volumes for it either.
+			continue
+		}
 		for _, m := range svc.Volumes {
 			if m.Type == "volume" && m.Source != "" {
 				referenced[m.Source] = true

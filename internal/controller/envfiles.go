@@ -252,6 +252,29 @@ func decodeEnvPathHashes(raw string) map[string]string {
 	return out
 }
 
+// migrateLegacyEnvPathHashes rewrites pre-v2.9.0 rows that store a plain
+// path list (or nothing) in last_applied_env_paths into the new path→hash
+// format. It runs only while the combined hash still matches, so no redeploy
+// happens: afterwards the first real env_file change recreates just the
+// services mounting that file instead of the whole project.
+func (r *Reconciler) migrateLegacyEnvPathHashes(app *App, cur envHashResult) {
+	raw := strings.TrimSpace(app.LastAppliedEnvPaths)
+	if raw == "{}" || decodeEnvPathHashes(raw) != nil {
+		return
+	}
+	encoded := encodeEnvPathHashes(cur.PerPath)
+	if raw == encoded {
+		return
+	}
+	if err := r.Registry.UpdateEnvHash(app.ID, cur.Hash, encoded); err != nil {
+		return
+	}
+	app.LastAppliedEnvPaths = encoded
+	if r.Logger != nil {
+		r.Logger.Info("env_file path hashes migrated to the per-path format", "app_id", app.ID, "paths", len(cur.PerPath))
+	}
+}
+
 // changedEnvPaths returns sorted paths whose content hash differs between the
 // last applied and the current state, including added and removed paths.
 // It returns nil when the previous per-path hashes are unknown (legacy rows).

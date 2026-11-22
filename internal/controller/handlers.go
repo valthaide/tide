@@ -1017,7 +1017,7 @@ func (h *Handler) PlanApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	app, err := h.Registry.Get(id)
+	app, err := h.findApp(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return

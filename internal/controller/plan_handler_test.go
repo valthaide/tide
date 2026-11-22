@@ -115,3 +115,24 @@ func TestPlanAppErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanAppByName(t *testing.T) {
+	reg := testRegistry(t)
+	app := &api.App{Name: "backend", RepoURL: "https://example/repo.git", Branch: "main", ComposePath: "compose.yaml"}
+	addPublicApp(t, reg, app)
+
+	planner := &fakePlanner{plan: &compose.AppPlan{Project: "tide-backend"}}
+	h := NewHandler(reg, nil, nil, nil, nil, "test")
+	h.Planner = planner
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/apps/"+app.Name+"/plan", nil)
+	rr := httptest.NewRecorder()
+	planTestRouter(h).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200 for plan by app name", rr.Code, rr.Body.String())
+	}
+	if planner.gotApp == nil || planner.gotApp.ID != app.ID {
+		t.Fatalf("planner got app %+v", planner.gotApp)
+	}
+}

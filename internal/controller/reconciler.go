@@ -841,6 +841,7 @@ func (r *Reconciler) envFileDriftReason(app *App) string {
 		return ""
 	}
 	if cur.Hash == app.LastAppliedEnvHash {
+		r.migrateLegacyEnvPathHashes(app, cur)
 		r.clearEnvDebounce(app.ID, app.Name)
 		metrics.SetEnvDrift(app.Name, false)
 		return ""

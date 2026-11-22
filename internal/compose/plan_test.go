@@ -359,3 +359,107 @@ func TestBuildRunningProjectSpecMapsNetworkModeToService(t *testing.T) {
 		t.Fatalf("NetworkMode=%q, want service:db", got)
 	}
 }
+
+func TestBuildAppPlanIgnoresBindContentHash(t *testing.T) {
+	configJSON := []byte(`{"name":"proj","services":{"web":{"image":"nginx:1","volumes":[{"type":"bind","source":"/repo/nginx.conf","target":"/etc/nginx/nginx.conf"}]}}}`)
+	mounts := func(hash string) []CanonicalMount {
+		return []CanonicalMount{{Type: "bind", Source: "/repo/nginx.conf", Target: "/etc/nginx/nginx.conf", ContentHash: hash}}
+	}
+	desired := CanonicalProjectSpec{Project: "proj", Services: map[string]CanonicalServiceSpec{
+		"web": {Image: "library/nginx:1", Digest: "aaa", Volumes: mounts("newhash")},
+	}}
+	running := CanonicalProjectSpec{Project: "proj", Services: map[string]CanonicalServiceSpec{
+		"web": {Image: "library/nginx:1", Digest: "aaa", Volumes: mounts("oldhash")},
+	}}
+
+	plan := BuildAppPlan(configJSON, desired, running, nil, PlanInput{})
+
+	// Apply never recreates on bind content alone, so the plan must not either.
+	sp := planService(plan, "web")
+	if sp == nil || sp.Action != PlanActionNoop || len(sp.Reasons) != 0 {
+		t.Fatalf("web=%+v, want no_change without reasons", sp)
+	}
+	// The shared canonical specs must not be mutated by the plan.
+	if desired.Services["web"].Volumes[0].ContentHash != "newhash" || running.Services["web"].Volumes[0].ContentHash != "oldhash" {
+		t.Fatal("BuildAppPlan mutated its input specs")
+	}
+}
+
+func TestBuildAppPlanBindMountConfigChangeStillRecreates(t *testing.T) {
+	configJSON := []byte(`{"name":"proj","services":{"web":{"image":"nginx:1"}}}`)
+	desired := CanonicalProjectSpec{Project: "proj", Services: map[string]CanonicalServiceSpec{
+		"web": {Image: "library/nginx:1", Digest: "aaa", Volumes: []CanonicalMount{{Type: "bind", Source: "/repo/a.conf", Target: "/etc/a.conf", ContentHash: "x"}}},
+	}}
+	running := CanonicalProjectSpec{Project: "proj", Services: map[string]CanonicalServiceSpec{
+		"web": {Image: "library/nginx:1", Digest: "aaa", Volumes: []CanonicalMount{{Type: "bind", Source: "/repo/b.conf", Target: "/etc/b.conf", ContentHash: "x"}}},
+	}}
+
+	plan := BuildAppPlan(configJSON, desired, running, nil, PlanInput{})
+
+	// A changed mount declaration (path/target) is a real recreate.
+	sp := planService(plan, "web")
+	if sp == nil || sp.Action != PlanActionRecreate {
+		t.Fatalf("web=%+v, want recreate", sp)
+	}
+}
+
+func TestBuildAppPlanScaledToZero(t *testing.T) {
+	configJSON := []byte(`{"name":"proj","services":{
+		"web":{"image":"nginx:1"},
+		"job":{"image":"app:1","deploy":{"replicas":0}}
+	}}`)
+	desired := CanonicalProjectSpec{Project: "proj", Services: map[string]CanonicalServiceSpec{
+		"web": {Image: "library/nginx:1", Digest: "aaa"},
+		"job": {Image: "app:1", Digest: "bbb"},
+	}}
+	running := CanonicalProjectSpec{Project: "proj", Services: map[string]CanonicalServiceSpec{
+		"web": {Image: "library/nginx:1", Digest: "aaa"},
+	}}
+
+	plan := BuildAppPlan(configJSON, desired, running, nil, PlanInput{})
+
+	// A scaled-to-0 service without containers is not a create.
+	sp := planService(plan, "job")
+	if sp == nil || sp.Action != PlanActionNoop {
+		t.Fatalf("job=%+v, want no_change", sp)
+	}
+
+	// With containers still running, up scales it down: the plan shows remove.
+	running.Services["job"] = CanonicalServiceSpec{Image: "app:1", Digest: "bbb"}
+	plan = BuildAppPlan(configJSON, desired, running, nil, PlanInput{})
+	sp = planService(plan, "job")
+	if sp == nil || sp.Action != PlanActionRemove {
+		t.Fatalf("job=%+v, want remove", sp)
+	}
+	if !strings.Contains(strings.Join(sp.Reasons, ";"), "scaled to 0") {
+		t.Fatalf("job reasons=%v, want scaled to 0", sp.Reasons)
+	}
+}
+
+func TestBuildAppPlanScaledToZeroSkipsVolumes(t *testing.T) {
+	configJSON := []byte(`{"name":"proj","services":{
+		"job":{"image":"app:1","deploy":{"replicas":0},"volumes":[{"type":"volume","source":"data","target":"/data"}]}
+	},"volumes":{"data":{"name":"proj_data"}}}`)
+	desired := CanonicalProjectSpec{Project: "proj", Services: map[string]CanonicalServiceSpec{
+		"job": {Image: "app:1", Digest: "bbb", Volumes: []CanonicalMount{{Type: "volume", Source: "proj_data", Target: "/data"}}},
+	}}
+	running := CanonicalProjectSpec{Project: "proj", Services: map[string]CanonicalServiceSpec{}}
+
+	plan := BuildAppPlan(configJSON, desired, running, nil, PlanInput{ExistingVolumes: map[string]bool{}})
+
+	if len(plan.VolumesToCreate) != 0 {
+		t.Fatalf("volumes=%+v, want none for a scaled-to-0 service", plan.VolumesToCreate)
+	}
+}
+
+func TestScaledToZeroServicesLegacyScaleKey(t *testing.T) {
+	configJSON := []byte(`{"name":"proj","services":{
+		"a":{"image":"app:1","scale":0},
+		"b":{"image":"app:1","scale":2},
+		"c":{"image":"app:1"}
+	}}`)
+	got := scaledToZeroServices(configJSON)
+	if !got["a"] || got["b"] || got["c"] {
+		t.Fatalf("scaledToZeroServices=%v, want only a", got)
+	}
+}
