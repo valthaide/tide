@@ -400,8 +400,8 @@ func (e *ComposeExecutor) ApplyImages(
 
 	if opts.ForceRecreate && len(opts.ForceRecreateServices) == 0 && len(opts.EnvChangedPaths) > 0 {
 		// The resolved config drops the env_file key (its content is merged
-		// into environment), so the mapping needs the --no-env-resolution
-		// render where env_file entries survive.
+		// into environment), so the mapping needs the --no-interpolate render
+		// where the key survives (paths already expanded and normalized).
 		mapJSON := prep.configJSON
 		if len(prep.envMapJSON) > 0 {
 			mapJSON = prep.envMapJSON

@@ -384,13 +384,15 @@ func renderComposeConfigDirect(ctx context.Context, inv Invocation, project stri
 	return renderComposeConfigDirectFlags(ctx, inv, project, vars, tideArgs)
 }
 
-// renderComposeConfigNoEnvResolve renders the same invocation with
-// --no-env-resolution: service env_file entries survive in the output instead
-// of being merged into environment and dropped. Tide maps changed env files
-// to their services from this render. Older compose versions without the
-// flag fail the render; callers must treat that as "mapping unavailable".
-func renderComposeConfigNoEnvResolve(ctx context.Context, inv Invocation, project string, vars map[string]string, tideArgs []string) ([]byte, error) {
-	return renderComposeConfigDirectFlags(ctx, inv, project, vars, tideArgs, "--no-env-resolution")
+// renderComposeConfigNoInterpolate renders the same invocation with
+// --no-interpolate: the env_file key survives in every checked compose
+// version (unlike --no-env-resolution, which v2.33.0 lacks and which still
+// drops the key in v2.35+), but ${VAR} references stay unexpanded. Tide maps
+// changed env files to their services from this render after expanding the
+// variables and normalizing the paths itself. Older compose versions without
+// the flag fail the render; callers must treat that as "mapping unavailable".
+func renderComposeConfigNoInterpolate(ctx context.Context, inv Invocation, project string, vars map[string]string, tideArgs []string) ([]byte, error) {
+	return renderComposeConfigDirectFlags(ctx, inv, project, vars, tideArgs, "--no-interpolate")
 }
 
 func renderComposeConfigDirectFlags(ctx context.Context, inv Invocation, project string, vars map[string]string, tideArgs []string, configFlags ...string) ([]byte, error) {

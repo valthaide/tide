@@ -11,9 +11,13 @@ import (
 )
 
 // TestEnvFileMappingWithRealCompose builds the config with the real
-// `docker compose` CLI: the resolved render drops env_file (the regression
-// that forced whole-project recreates), while the --no-env-resolution render
-// keeps it and maps the changed file to exactly the services mounting it.
+// `docker compose` CLI the way the backend template does: env_file comes
+// from an anchor (<<: *app-env) and references ${APP_ENV_FILE:?}. The
+// resolved render drops the env_file key (the regression that forced
+// whole-project recreates); the --no-interpolate render keeps it in every
+// checked compose version starting with v2.33.0, and after Tide expands the
+// variables and normalizes the paths the changed file maps to exactly the
+// services mounting it.
 func TestEnvFileMappingWithRealCompose(t *testing.T) {
 	dockerPath := strings.TrimSpace(os.Getenv("TIDE_DOCKER_CLI_PATH"))
 	if dockerPath == "" {
@@ -34,19 +38,25 @@ func TestEnvFileMappingWithRealCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 	composeFile := filepath.Join(dir, "compose.yaml")
-	content := "services:\n" +
+	content := "x-app-env: &app-env\n" +
+		"  env_file:\n" +
+		"    - ${APP_ENV_FILE:?}\n" +
+		"services:\n" +
 		"  app:\n" +
+		"    <<: *app-env\n" +
 		"    image: alpine:3.20\n" +
-		"    env_file:\n" +
-		"      - ./secrets.env\n" +
+		"  worker:\n" +
+		"    <<: *app-env\n" +
+		"    image: alpine:3.20\n" +
 		"  nginx:\n" +
 		"    image: nginx:1.27\n"
 	if err := os.WriteFile(composeFile, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	inv := Invocation{ProjectDir: dir, Files: []string{composeFile}, Primary: composeFile}
+	vars := map[string]string{"APP_ENV_FILE": envPath}
 
-	resolved, err := renderComposeConfigDirect(ctx, inv, "tideenvmap", nil, nil)
+	resolved, err := renderComposeConfigDirect(ctx, inv, "tideenvmap", vars, nil)
 	if err != nil {
 		t.Fatalf("resolved render: %v", err)
 	}
@@ -55,15 +65,16 @@ func TestEnvFileMappingWithRealCompose(t *testing.T) {
 		t.Fatalf("resolved config must drop env_file keys, got matched=%v unmapped=%v", matched, unmapped)
 	}
 
-	mapping, err := renderComposeConfigNoEnvResolve(ctx, inv, "tideenvmap", nil, nil)
+	raw, err := renderComposeConfigNoInterpolate(ctx, inv, "tideenvmap", vars, nil)
 	if err != nil {
-		t.Skipf("compose without --no-env-resolution, scoped mapping unavailable: %v", err)
+		t.Fatalf("--no-interpolate render must work on compose v2.33.0+: %v", err)
 	}
+	mapping := normalizeEnvFileMapPaths(raw, inv.ProjectDir, vars)
 	matched, unmapped = ServicesForEnvPaths(mapping, []string{envPath})
 	if len(unmapped) != 0 {
-		t.Fatalf("env file unmapped in no-env-resolution render: %v", unmapped)
+		t.Fatalf("env file unmapped in --no-interpolate render after normalization: %v", unmapped)
 	}
-	if len(matched) != 1 || matched[0] != "app" {
-		t.Fatalf("matched=%v, want exactly [app]", matched)
+	if len(matched) != 2 || matched[0] != "app" || matched[1] != "worker" {
+		t.Fatalf("matched=%v, want exactly [app worker]", matched)
 	}
 }

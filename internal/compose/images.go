@@ -102,9 +102,10 @@ type imagePrep struct {
 	rerun      []string
 	oneshots   []string
 	configJSON []byte
-	// envMapJSON is the same config rendered with --no-env-resolution, where
-	// service env_file entries survive. Nil when the compose CLI lacks the
-	// flag; callers then fall back to configJSON for env_file mapping.
+	// envMapJSON is the same config rendered with --no-interpolate, where
+	// service env_file entries survive, with variables expanded and paths
+	// normalized to absolute. Nil when the render fails; callers then fall
+	// back to configJSON for env_file mapping.
 	envMapJSON []byte
 }
 
@@ -579,15 +580,16 @@ func (e *ComposeExecutor) prepareImageSync(
 	}
 	appendLogLine(syncLog, "ok")
 
-	// Same render with --no-env-resolution: service env_file entries survive
-	// there (the default render merges them into environment and drops the
+	// Same render with --no-interpolate: the env_file key survives there (the
+	// resolved render merges env_file contents into environment and drops the
 	// key), so a changed env_file can be mapped to the services using it.
-	// Best-effort: older compose versions reject the flag and the mapping
-	// falls back to the resolved config.
+	// Variables stay unexpanded in this render; Tide expands them and makes
+	// the paths absolute itself. Best-effort: on failure the mapping falls
+	// back to the resolved config (whole-project recreate).
 	var envMapJSON []byte
-	envMapArgs := inv.Args(projectName, overrideArgs, "config", "--format", "json", "--no-env-resolution")
+	envMapArgs := inv.Args(projectName, overrideArgs, "config", "--format", "json", "--no-interpolate")
 	if envMapOut, envMapErr := e.runCommand(ctx, "docker", envMapArgs, composeDir, copyVars(opts.Vars), nil); envMapErr == nil {
-		envMapJSON = extractJSON(envMapOut)
+		envMapJSON = normalizeEnvFileMapPaths(extractJSON(envMapOut), inv.ProjectDir, opts.Vars)
 	} else if e.Logger != nil {
 		e.Logger.Warn("env_file mapping render failed; scoped recreate may fall back to the whole project", "error", envMapErr)
 	}

@@ -87,7 +87,7 @@ func TestBuildAppPlanEnvFileScopedRecreate(t *testing.T) {
 
 func TestBuildAppPlanEnvFileMapJSONScopesResolvedConfig(t *testing.T) {
 	// The resolved config drops env_file (content merged into environment), so
-	// mapping falls back to the --no-env-resolution render when provided.
+	// mapping falls back to the --no-interpolate render when provided.
 	configJSON := []byte(`{"name":"proj","services":{
 		"app":{"image":"app:1","environment":{"API_KEY":"x"}},
 		"side":{"image":"side:1"}
@@ -105,7 +105,7 @@ func TestBuildAppPlanEnvFileMapJSONScopesResolvedConfig(t *testing.T) {
 	plan := BuildAppPlan(configJSON, spec, spec, nil, in)
 
 	if plan.ForceRecreateAll {
-		t.Fatal("ForceRecreateAll must stay false when the no-env-resolution render maps the file")
+		t.Fatal("ForceRecreateAll must stay false when the mapping render maps the file")
 	}
 	app := planService(plan, "app")
 	if app == nil || app.Action != PlanActionRecreate {
@@ -116,8 +116,8 @@ func TestBuildAppPlanEnvFileMapJSONScopesResolvedConfig(t *testing.T) {
 	}
 
 	// Without the mapping render the same resolved config cannot scope the
-	// change, so the whole project is force-recreated (pre-fix behavior kept
-	// as fallback for compose versions without --no-env-resolution).
+	// change, so the whole project is force-recreated (fallback for the case
+	// when the --no-interpolate render is unavailable).
 	plan = BuildAppPlan(configJSON, spec, spec, nil, PlanInput{EnvChangedPaths: []string{"/etc/app/secrets.env"}})
 	if !plan.ForceRecreateAll {
 		t.Fatal("ForceRecreateAll must be true when no mapping render is available")

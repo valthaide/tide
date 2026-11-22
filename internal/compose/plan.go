@@ -64,9 +64,10 @@ type PlanInput struct {
 	// EnvChangedPaths are env_file paths whose content hash changed since the
 	// last apply; they scope a forced recreate to the services mounting them.
 	EnvChangedPaths []string
-	// EnvFileMapJSON is the compose config rendered with --no-env-resolution,
-	// where service env_file entries survive. The resolved config drops them,
-	// so env_file→service mapping uses this render when present.
+	// EnvFileMapJSON is the compose config rendered with --no-interpolate,
+	// where the env_file key survives, with variables expanded and env_file
+	// paths normalized to absolute. The resolved config drops the key, so
+	// env_file→service mapping uses this render when present.
 	EnvFileMapJSON []byte
 	// WatchChanged lists watch_files entries whose hash drifted.
 	WatchChanged []WatchPlanEntry
@@ -404,10 +405,10 @@ func (e *ComposeExecutor) PlanApp(ctx context.Context, appID, composePath string
 	if err != nil {
 		return nil, err
 	}
-	// The env_file→service mapping needs the render where env_file entries
-	// survive; best-effort, older compose CLIs lack the flag.
-	if mapJSON, mapErr := renderComposeConfigNoEnvResolve(ctx, inv, projectName, opts.Vars, overrideArgs); mapErr == nil {
-		in.EnvFileMapJSON = mapJSON
+	// The env_file→service mapping needs the render where the env_file key
+	// survives; best-effort, very old compose CLIs lack the flag.
+	if mapJSON, mapErr := renderComposeConfigNoInterpolate(ctx, inv, projectName, opts.Vars, overrideArgs); mapErr == nil {
+		in.EnvFileMapJSON = normalizeEnvFileMapPaths(mapJSON, inv.ProjectDir, opts.Vars)
 	}
 
 	desiredImages := e.inspectDesiredImages(ctx, imagesFromConfig(configJSON), nil)
