@@ -399,7 +399,14 @@ func (e *ComposeExecutor) ApplyImages(
 	}
 
 	if opts.ForceRecreate && len(opts.ForceRecreateServices) == 0 && len(opts.EnvChangedPaths) > 0 {
-		matched, unmapped := ServicesForEnvPaths(prep.configJSON, opts.EnvChangedPaths)
+		// The resolved config drops the env_file key (its content is merged
+		// into environment), so the mapping needs the --no-env-resolution
+		// render where env_file entries survive.
+		mapJSON := prep.configJSON
+		if len(prep.envMapJSON) > 0 {
+			mapJSON = prep.envMapJSON
+		}
+		matched, unmapped := ServicesForEnvPaths(mapJSON, opts.EnvChangedPaths)
 		if len(unmapped) == 0 && len(matched) > 0 {
 			opts.ForceRecreateServices = matched
 			appendLogLine(&syncLog, "env_file changed ("+strings.Join(opts.EnvChangedPaths, ", ")+"); recreating only services: "+strings.Join(matched, ", "))

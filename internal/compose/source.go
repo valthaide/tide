@@ -381,11 +381,25 @@ func (e *ComposeExecutor) CheckTemplate(ctx context.Context, fleetCheckoutDir, t
 // tideArgs are Tide's own generated -f files (service env overrides), passed
 // exactly as an apply would pass them.
 func renderComposeConfigDirect(ctx context.Context, inv Invocation, project string, vars map[string]string, tideArgs []string) ([]byte, error) {
+	return renderComposeConfigDirectFlags(ctx, inv, project, vars, tideArgs)
+}
+
+// renderComposeConfigNoEnvResolve renders the same invocation with
+// --no-env-resolution: service env_file entries survive in the output instead
+// of being merged into environment and dropped. Tide maps changed env files
+// to their services from this render. Older compose versions without the
+// flag fail the render; callers must treat that as "mapping unavailable".
+func renderComposeConfigNoEnvResolve(ctx context.Context, inv Invocation, project string, vars map[string]string, tideArgs []string) ([]byte, error) {
+	return renderComposeConfigDirectFlags(ctx, inv, project, vars, tideArgs, "--no-env-resolution")
+}
+
+func renderComposeConfigDirectFlags(ctx context.Context, inv Invocation, project string, vars map[string]string, tideArgs []string, configFlags ...string) ([]byte, error) {
 	dockerPath := strings.TrimSpace(envcompat.Getenv("TIDE_DOCKER_CLI_PATH"))
 	if dockerPath == "" {
 		dockerPath = "docker"
 	}
 	args := inv.Args(project, tideArgs, "config", "--format", "json")
+	args = append(args, configFlags...)
 	cmd := exec.CommandContext(ctx, dockerPath, args...)
 	cmd.Dir = inv.ProjectDir
 	if len(vars) > 0 {

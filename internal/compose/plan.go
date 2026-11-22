@@ -64,6 +64,10 @@ type PlanInput struct {
 	// EnvChangedPaths are env_file paths whose content hash changed since the
 	// last apply; they scope a forced recreate to the services mounting them.
 	EnvChangedPaths []string
+	// EnvFileMapJSON is the compose config rendered with --no-env-resolution,
+	// where service env_file entries survive. The resolved config drops them,
+	// so env_file→service mapping uses this render when present.
+	EnvFileMapJSON []byte
 	// WatchChanged lists watch_files entries whose hash drifted.
 	WatchChanged []WatchPlanEntry
 	// ExistingVolumes names Docker volumes already present; nil means unknown
@@ -132,7 +136,11 @@ func BuildAppPlan(configJSON []byte, desired, running CanonicalProjectSpec, desi
 	}
 
 	if len(in.EnvChangedPaths) > 0 {
-		matched, unmapped := ServicesForEnvPaths(configJSON, in.EnvChangedPaths)
+		mapJSON := in.EnvFileMapJSON
+		if len(mapJSON) == 0 {
+			mapJSON = configJSON
+		}
+		matched, unmapped := ServicesForEnvPaths(mapJSON, in.EnvChangedPaths)
 		if len(unmapped) > 0 {
 			// Same fallback as ApplyImages: a changed env_file that no service
 			// mounts force-recreates the whole project.
@@ -151,7 +159,7 @@ func BuildAppPlan(configJSON []byte, desired, running CanonicalProjectSpec, desi
 				}
 			}
 		} else {
-			perService := envPathsPerService(configJSON)
+			perService := envPathsPerService(mapJSON)
 			for _, svc := range matched {
 				sp, ok := byName[svc]
 				if !ok {
@@ -395,6 +403,11 @@ func (e *ComposeExecutor) PlanApp(ctx context.Context, appID, composePath string
 	configJSON, err := renderComposeConfigDirect(ctx, inv, projectName, opts.Vars, overrideArgs)
 	if err != nil {
 		return nil, err
+	}
+	// The env_file→service mapping needs the render where env_file entries
+	// survive; best-effort, older compose CLIs lack the flag.
+	if mapJSON, mapErr := renderComposeConfigNoEnvResolve(ctx, inv, projectName, opts.Vars, overrideArgs); mapErr == nil {
+		in.EnvFileMapJSON = mapJSON
 	}
 
 	desiredImages := e.inspectDesiredImages(ctx, imagesFromConfig(configJSON), nil)

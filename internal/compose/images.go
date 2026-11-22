@@ -102,6 +102,10 @@ type imagePrep struct {
 	rerun      []string
 	oneshots   []string
 	configJSON []byte
+	// envMapJSON is the same config rendered with --no-env-resolution, where
+	// service env_file entries survive. Nil when the compose CLI lacks the
+	// flag; callers then fall back to configJSON for env_file mapping.
+	envMapJSON []byte
 }
 
 func (p imagePrep) clean() {
@@ -575,7 +579,20 @@ func (e *ComposeExecutor) prepareImageSync(
 	}
 	appendLogLine(syncLog, "ok")
 
-	prep := imagePrep{env: copyVars(opts.Vars), noBuild: noBuild, images: images, rerun: sum.Rerun, oneshots: OneshotServiceNames(configJSON), configJSON: configJSON, cleanup: func() {}}
+	// Same render with --no-env-resolution: service env_file entries survive
+	// there (the default render merges them into environment and drops the
+	// key), so a changed env_file can be mapped to the services using it.
+	// Best-effort: older compose versions reject the flag and the mapping
+	// falls back to the resolved config.
+	var envMapJSON []byte
+	envMapArgs := inv.Args(projectName, overrideArgs, "config", "--format", "json", "--no-env-resolution")
+	if envMapOut, envMapErr := e.runCommand(ctx, "docker", envMapArgs, composeDir, copyVars(opts.Vars), nil); envMapErr == nil {
+		envMapJSON = extractJSON(envMapOut)
+	} else if e.Logger != nil {
+		e.Logger.Warn("env_file mapping render failed; scoped recreate may fall back to the whole project", "error", envMapErr)
+	}
+
+	prep := imagePrep{env: copyVars(opts.Vars), noBuild: noBuild, images: images, rerun: sum.Rerun, oneshots: OneshotServiceNames(configJSON), configJSON: configJSON, envMapJSON: envMapJSON, cleanup: func() {}}
 	creds, configured, credErr := RegistryCredsFromEnv()
 	if credErr != nil || (configured && (creds.Host == "" || creds.Username == "" || creds.Password == "")) {
 		appendLogSection(syncLog, "Registry login")
