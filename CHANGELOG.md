@@ -90,6 +90,9 @@ Tide is a production-grade GitOps controller for Docker Compose hosts paired wit
 
 ## Release History
 
+### v2.9.2 (2026-11-22)
+- **Scoped env_file recreate actually scopes**: the resolved `docker compose config` output merges env_file contents into `environment` and drops the `env_file` key, so the change mapping found no service and fell back to recreating the whole project. Tide now renders a second, best-effort config with `--no-env-resolution` (where `env_file` entries survive) and maps changed files to their services through it — a single key change in one env file recreates only the services mounting that file, leaving untouched services (e.g. nginx) with their container IDs and start times intact. On compose versions without the flag, behavior falls back to the previous whole-project recreate. Services whose rendered config changes through variable interpolation are still recreated by `compose up` itself via the config hash. Deploy plan uses the same mapping render, so it no longer reports a false whole-project recreate either.
+
 ### v2.9.1 (2026-11-22)
 - **Plan no longer reports false recreates for bind-mounted files**: the apply plan compares mounts without the bind content hash. `docker compose up -d` never recreates on bind content alone (the container reads the new bytes through the mount), and content changes of watched files surface as `watch_actions` — so a hash mismatch must not show `recreate`. A changed mount declaration (source, target, type) still shows `recreate`, matching what apply does.
 - **Plan understands `replicas: 0`** (`deploy.replicas` or legacy `scale`): a scaled-to-0 service without containers is `no_change` instead of `create`; with containers still running it is `remove`, and its volumes are no longer listed under `volumes_to_create`.
