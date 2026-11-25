@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/valthaide/tide/internal/giterr"
 	"github.com/valthaide/tide/internal/gitrev"
@@ -640,6 +641,12 @@ type VarSample struct {
 
 // Register registers process counters/histograms and an apps collector.
 func Register(registry prometheus.Registerer, lister AppLister) error {
+	// Runtime introspection for leak and capacity dashboards:
+	// go_goroutines, process_open_fds, process_resident_memory_bytes, ...
+	runtimeCollectors := []prometheus.Collector{
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	}
 	collectors := []prometheus.Collector{
 		ReconcileLoopsTotal,
 		SyncTotal,
@@ -704,7 +711,7 @@ func Register(registry prometheus.Registerer, lister AppLister) error {
 		secretsVersion,
 		newAppsCollector(lister),
 	}
-	for _, c := range collectors {
+	for _, c := range append(collectors, runtimeCollectors...) {
 		if err := registry.Register(c); err != nil {
 			return err
 		}

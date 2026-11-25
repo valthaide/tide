@@ -22,6 +22,47 @@ type engineClient struct {
 	http *http.Client
 }
 
+var sharedEngineState struct {
+	sync.Mutex
+	host   string
+	client *engineClient
+}
+
+// sharedEngine returns the one process-wide engine client. Every caller
+// shares its http.Transport, so idle connections to docker.sock are reused
+// instead of accumulating per call. The client is rebuilt only when
+// DOCKER_HOST changes; the previous client's idle connections are closed.
+func sharedEngine() (*engineClient, error) {
+	raw := strings.TrimSpace(os.Getenv("DOCKER_HOST"))
+	if raw == "" {
+		raw = "unix:///var/run/docker.sock"
+	}
+	sharedEngineState.Lock()
+	defer sharedEngineState.Unlock()
+	if sharedEngineState.client != nil && sharedEngineState.host == raw {
+		return sharedEngineState.client, nil
+	}
+	if sharedEngineState.client != nil {
+		sharedEngineState.client.closeIdle()
+	}
+	client, err := newEngineClient()
+	if err != nil {
+		return nil, err
+	}
+	sharedEngineState.host = raw
+	sharedEngineState.client = client
+	return client, nil
+}
+
+// closeIdle releases idle keep-alive connections held by the client's
+// transport. Callers that build a temporary client (tests) must call it
+// when done.
+func (c *engineClient) closeIdle() {
+	if c != nil && c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+}
+
 type engineContainer struct {
 	ID      string            `json:"Id"`
 	Names   []string          `json:"Names"`
@@ -52,6 +93,9 @@ func newEngineClient() (*engineClient, error) {
 				var d net.Dialer
 				return d.DialContext(ctx, "unix", path)
 			},
+			MaxIdleConns:        32,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     90 * time.Second,
 		}
 		return &engineClient{base: "http://docker", http: &http.Client{Transport: transport}}, nil
 	case "tcp":
@@ -137,7 +181,7 @@ func (e *ComposeExecutor) observeContainers(ctx context.Context) ([]containerObs
 }
 
 func (e *ComposeExecutor) observeProject(ctx context.Context, project string) ([]containerObs, error) {
-	client, err := newEngineClient()
+	client, err := sharedEngine()
 	if err != nil {
 		return nil, err
 	}

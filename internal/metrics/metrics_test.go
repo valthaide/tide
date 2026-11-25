@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -286,3 +287,27 @@ func TestGitFetchErrorsStartAtZero(t *testing.T) {
 type assertErr struct{}
 
 func (assertErr) Error() string { return "boom" }
+
+func TestRegisterExposesRuntimeCollectors(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	if err := Register(reg, staticLister{}); err != nil {
+		t.Fatal(err)
+	}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, fam := range families {
+		found[fam.GetName()] = true
+	}
+	if !found["go_goroutines"] {
+		t.Fatal("go_goroutines missing from registered collectors")
+	}
+	if !found["process_resident_memory_bytes"] {
+		t.Fatal("process_resident_memory_bytes missing from registered collectors")
+	}
+	if runtime.GOOS == "linux" && !found["process_open_fds"] {
+		t.Fatal("process_open_fds missing on linux")
+	}
+}

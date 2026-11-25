@@ -730,7 +730,7 @@ func (e *ComposeExecutor) fetchLiveProjectObjects(
 	projectName string,
 ) ([]fullContainerInspect, map[string]fullImageInspect, map[string]string, error) {
 	var rawContainers []byte
-	client, engineErr := newEngineClient()
+	client, engineErr := sharedEngine()
 	if engineErr == nil {
 		if listed, listErr := client.listProjectContainers(ctx, projectName); listErr == nil {
 			if len(listed) == 0 {
@@ -801,7 +801,7 @@ func (e *ComposeExecutor) fetchLiveProjectObjects(
 
 func (e *ComposeExecutor) inspectDesiredImages(ctx context.Context, refs []string, env map[string]string) map[string]fullImageInspect {
 	out := map[string]fullImageInspect{}
-	client, _ := newEngineClient()
+	client, _ := sharedEngine()
 	for _, ref := range refs {
 		ref = strings.TrimSpace(ref)
 		if ref == "" {
