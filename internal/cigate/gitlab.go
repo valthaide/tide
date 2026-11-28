@@ -51,6 +51,9 @@ type Result struct {
 	Source      string
 	Ref         string
 	TriggeredBy string
+	// InheritedFrom is the ancestor commit SHA whose green pipeline verified
+	// this commit because no deploy file changed ("no deploy files changed").
+	InheritedFrom string
 	// Ignored lists pipelines of other sources when no primary pipeline decided the commit.
 	Ignored []Pipeline
 }
@@ -76,6 +79,11 @@ type CheckRequest struct {
 	RequiredJobs []string
 	TrustedWeb   *deploypolicy.TrustedWebPolicy
 	Token        string
+	// DeployFiles are the repo-relative paths Tide reads to deploy this app
+	// (compose files, .env, override, env_file and watch_files entries). When
+	// the commit has no pipeline and its diff touches none of them, the gate
+	// inherits a green ancestor pipeline instead of waiting.
+	DeployFiles []string
 }
 
 // DefaultPipelineSources are the pipeline sources that decide a deploy when
@@ -364,31 +372,9 @@ func (c *Checker) Check(ctx context.Context, req CheckRequest) Result {
 		return Result{Allowed: false, Outcome: OutcomeDeny, Reason: ReasonCIError, Status: "unknown", Detail: "failed to query GitLab pipelines"}
 	}
 
-	var listed []struct {
-		ID     int64  `json:"id"`
-		SHA    string `json:"sha"`
-		Ref    string `json:"ref"`
-		Status string `json:"status"`
-		Source string `json:"source"`
-		WebURL string `json:"web_url"`
-	}
-	if err := json.Unmarshal(body, &listed); err != nil {
+	pipelines, err := parsePipelines(body, commitSHA)
+	if err != nil {
 		return Result{Allowed: false, Outcome: OutcomeDeny, Reason: ReasonCIError, Status: "unknown", Detail: "invalid GitLab pipelines JSON"}
-	}
-
-	pipelines := make([]Pipeline, 0, len(listed))
-	for _, item := range listed {
-		if item.SHA != "" && !strings.EqualFold(strings.TrimSpace(item.SHA), commitSHA) {
-			continue
-		}
-		pipelines = append(pipelines, Pipeline{
-			ID:     item.ID,
-			SHA:    strings.TrimSpace(item.SHA),
-			Ref:    strings.TrimSpace(item.Ref),
-			Status: item.Status,
-			Source: item.Source,
-			WebURL: item.WebURL,
-		})
 	}
 
 	var primaryRes *Result
@@ -432,6 +418,9 @@ func (c *Checker) Check(ctx context.Context, req CheckRequest) Result {
 	}
 
 	outcome, reason := ClassifyPipelineStatus("missing")
+	if inherited, ok := c.inheritGreenParent(ctx, client, token, apiBase, project, commitSHA, req); ok {
+		return inherited
+	}
 	detail := "waiting for trusted pipeline"
 	if strict && len(others) > 0 {
 		detail = "strict mode: waiting for trusted pipeline (other sources ignored)"
@@ -444,6 +433,47 @@ func (c *Checker) Check(ctx context.Context, req CheckRequest) Result {
 		Detail:  detail,
 		Ignored: others,
 	}
+}
+
+// fetchPipelines lists the pipelines of one commit, newest first.
+func fetchPipelines(ctx context.Context, client *http.Client, token, apiBase, project, commitSHA string) ([]Pipeline, error) {
+	endpoint := fmt.Sprintf("%s/projects/%s/pipelines?sha=%s&per_page=100&order_by=id&sort=desc",
+		apiBase, project, url.QueryEscape(commitSHA))
+	body, statusCode, err := doGitLabGET(ctx, client, token, endpoint)
+	if err != nil || statusCode >= 300 {
+		return nil, fmt.Errorf("failed to query GitLab pipelines (HTTP %d)", statusCode)
+	}
+	return parsePipelines(body, commitSHA)
+}
+
+// parsePipelines decodes the pipelines list and keeps entries of commitSHA.
+func parsePipelines(body []byte, commitSHA string) ([]Pipeline, error) {
+	var listed []struct {
+		ID     int64  `json:"id"`
+		SHA    string `json:"sha"`
+		Ref    string `json:"ref"`
+		Status string `json:"status"`
+		Source string `json:"source"`
+		WebURL string `json:"web_url"`
+	}
+	if err := json.Unmarshal(body, &listed); err != nil {
+		return nil, fmt.Errorf("invalid GitLab pipelines JSON")
+	}
+	pipelines := make([]Pipeline, 0, len(listed))
+	for _, item := range listed {
+		if item.SHA != "" && !strings.EqualFold(strings.TrimSpace(item.SHA), commitSHA) {
+			continue
+		}
+		pipelines = append(pipelines, Pipeline{
+			ID:     item.ID,
+			SHA:    strings.TrimSpace(item.SHA),
+			Ref:    strings.TrimSpace(item.Ref),
+			Status: item.Status,
+			Source: item.Source,
+			WebURL: item.WebURL,
+		})
+	}
+	return pipelines, nil
 }
 
 type glJob struct {

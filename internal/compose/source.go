@@ -210,6 +210,29 @@ func appFolderDir(repoDir, appDir string) (string, error) {
 	return folder, nil
 }
 
+// RepoRelPathForApp maps an absolute host path into the app checkout to its
+// repo-relative slash path. ok is false when the path is outside the
+// checkout (e.g. an external host env file) — such paths can never appear in
+// a repo diff.
+func (e *ComposeExecutor) RepoRelPathForApp(appID, abs string) (string, bool) {
+	if e == nil || strings.TrimSpace(appID) == "" || strings.TrimSpace(abs) == "" {
+		return "", false
+	}
+	root, err := filepath.Abs(filepath.Join(e.WorkDir, appID, "repo"))
+	if err != nil {
+		return "", false
+	}
+	target, err := filepath.Abs(abs)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
 // rememberSource keeps the last resolved invocation for an app so Destroy /
 // Restart / Exec can address a template-sourced stack after Apply.
 func (e *ComposeExecutor) rememberSource(appID string, inv Invocation) {

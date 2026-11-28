@@ -1938,6 +1938,7 @@ func (r *Reconciler) evaluateCIGate(app *App, commitSHA string, repoSecret []byt
 		RequiredJobs: policy.EffectiveRequiredJobs(),
 		TrustedWeb:   policy.TrustedWebPipelines,
 		Token:        token,
+		DeployFiles:  r.deployFilesForApp(app),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -2007,7 +2008,18 @@ func (r *Reconciler) checkPipelineGate(app *App) error {
 				_ = r.Registry.UpdateCIStatus(app.ID, "allowed", detail, res.WebURL, res.Source, res.PipelineID, checkedAt)
 			}
 			if r.Logger != nil {
-				if len(res.Ignored) > 0 {
+				if res.InheritedFrom != "" {
+					r.Logger.Info("CI gate inherited pipeline status from parent",
+						"app", app.Name,
+						"commit", app.LastSeenCommit,
+						"inherited_from", res.InheritedFrom,
+						"pipeline_id", res.PipelineID,
+						"pipeline_source", res.Source,
+						"pipeline_status", res.Status,
+						"reason", "no deploy files changed",
+						"decision", "allow",
+					)
+				} else if len(res.Ignored) > 0 {
 					r.Logger.Info("Deploy allowed without a counted pipeline",
 						"app", app.Name,
 						"commit", app.LastSeenCommit,
